@@ -1,0 +1,59 @@
+// firestore.rules
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ---- GLOBALS ----
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+    
+    // Auth helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // Check if the user is an admin by validating their exact login email
+    // For a production app this might check an "admins" collection instead
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.email == "kaoru@fukei-shashin.co.jp";
+    }
+
+    // ==== RULES FOR COLLECTIONS ====
+
+    // 1. Posts (Blog / News / Announcements)
+    match /posts/{postId} {
+      // Anyone can read posts
+      allow read: if true;
+      // Only admins can create, update, or delete posts
+      allow write: if isAdmin();
+    }
+    
+    // 2. Settings / Configuration
+    match /settings/{docId} {
+      // Anyone can read public configs like 'general' or 'contests'
+      allow read: if true;
+      allow write: if true; // TEMP ALLOW ALL
+    }
+    
+    // Legacy Config fallback
+    match /config/{configId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+    
+    // 3. Subscribers (Newsletter)
+    match /subscribers/{subscriberId} {
+      // Users can only write their own email (via cloud function ideally, but allow create here if direct)
+      allow create: if true; // In reality this should be validated, but currently using simple form
+      allow read, update, delete: if isAdmin();
+    }
+    
+    // 4. Archive (Historical Posts)
+    match /archive/{archiveId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,700;1,400&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", ui-serif, Georgia, serif;
+}
+
+/* Brand Logo Variant Styles */
+.logo-bright:has(#_ブライト) #_ダーク,
+.logo-bright:has(#_ブライト) [id="_レイヤー_1"] {
+  display: none !important;
+}
+.logo-bright #_ブライト {
+  display: block !important;
+}
+
+.logo-dark:has(#_ダーク) #_ブライト,
+.logo-dark:has(#_ダーク) [id="_レイヤー_1"] {
+  display: none !important;
+}
+.logo-dark #_ダーク {
+  display: block !important;
+}
+
+/* Fallback for SVGs without bright layer - forceful color override */
+.logo-bright:not(:has(#_ブライト)) path,
+.logo-bright:not(:has(#_ブライト)) circle,
+.logo-bright:not(:has(#_ブライト)) rect {
+  fill: #ffffff !important;
+}
