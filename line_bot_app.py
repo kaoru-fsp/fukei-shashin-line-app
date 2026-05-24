@@ -1,11 +1,29 @@
 import os
+import json
 from flask import Flask, request, abort
-from firebase_admin import credentials, firestore, initialize_app
+import firebase_admin
+from firebase_admin import credentials, firestore
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage, ImageSendMessage
 )
+
+if not firebase_admin._apps:
+    # Render上の環境変数（先ほど設定したもの）から鍵を読み込む
+    firebase_creds = os.environ.get('FIREBASE_CREDENTIALS')
+    
+    if firebase_creds:
+        # 環境変数がある場合（Render環境）
+        cred_dict = json.loads(firebase_creds)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        # 環境変数がない場合（あなたのパソコン環境）
+        cred = credentials.Certificate('serviceAccountKey.json')
+        
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 
 # ==========================================
 # 設定（環境変数または直接入力）
