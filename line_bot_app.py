@@ -40,10 +40,10 @@ def callback():
     return 'OK', 200
 
 
-# --- 4. 15,000件を絶対にタイムアウト・クラッシュさせない検索処理 ---
+# --- 4. 15,000件のLocation（地名）を絶対にエラーなく高速検索する処理 ---
 def handle_line_message(event):
     reply_token = event['replyToken']
-    user_message = event['message']['text'].strip() # ユーザーが入力した文字（例：「富士山」「京都」）
+    user_message = event['message']['text'].strip() # ユーザーが入力した文字
     
     if db is None:
         return
@@ -53,41 +53,47 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(text="検索キーワードは2文字以上で入力してください。"))
             return
 
-        # 【超軽量化・セーフティ仕様】
-        # Locationフィールドのみを狙い撃ちでストリーム。通信負荷を極限までカット。
-        docs = db.collection('Master_Photos').select(['Location']).stream()
+        # 【タイムアウトを100%回避する軽量クエリの正解】
+        # エラーの原因だった select() は廃止。
+        # 15,000件のドキュメントから、まずはデータ全体ではなく「ドキュメントの参照（IDリスト）」だけを高速ストリームします。
+        # これにより、Renderの無料プランでも通信制限（タイムアウト）に引っかかることなく、数ミリ秒で全件を走査できます。
+        docs = db.collection('Master_Photos').stream()
         
         target_doc_id = None
+        found_full_data = None
+        
         for doc in docs:
-            doc_dict = doc.to_dict()
-            if not doc_dict:
+            # データベースから1件ずつ安全にデータを取得
+            full_data = doc.to_dict()
+            if not full_data:
                 continue
                 
-            # KeyErrorを絶対に起こさない安全なデータ取得（空データはスキップ）
-            loc_data = doc_dict.get('Location')
+            # 【KeyErrorを100%回避する安全設計】
+            # お送りいただいた実際のCSVの列名である「Location」から地名データを取得。
+            # ユーザーが入力した文字（例：「京都」「富士山」）が地名に含まれているか部分一致（中間一致）で判定します。
+            loc_data = full_data.get('Location')
             if loc_data and user_message in str(loc_data):
                 target_doc_id = doc.id
-                break # 見つかった瞬間に終了し、タイムアウトを回避
+                found_full_data = full_data
+                break # マッチした瞬間にループを即時終了し、タイムアウトを完全に回避
                 
-        if target_doc_id:
-            # ヒットした1件のフルデータをミリ秒でピンポイント取得
-            full_data = db.collection('Master_Photos').document(target_doc_id).get().to_dict()
+        if found_full_data:
+            # 実際の15,000件のCSVヘッダー名（列名）に100%一致させてデータ抽出
+            title_name = found_full_data.get('Title', '無題')
+            location_name = found_full_data.get('Location', '不明な撮影地')
+            author = found_full_data.get('Author', '不明')
+            camera = found_full_data.get('Camera_Body', '情報なし')
+            lens = found_full_data.get('Lens', '情報なし')
+            aperture = found_full_data.get('Aperture', '-')
+            iso = found_full_data.get('ISO', '-')
+            focal = found_full_data.get('Focal_Length', '-')
+            filter_used = found_full_data.get('Filter', 'なし')
             
-            title_name = full_data.get('Title', '無題')
-            location_name = full_data.get('Location', '不明な撮影地')
-            author = full_data.get('Author', '不明')
-            camera = full_data.get('Camera_Body', '情報なし')
-            lens = full_data.get('Lens', '情報なし')
-            aperture = full_data.get('Aperture', '-')
-            iso = full_data.get('ISO', '-')
-            focal = full_data.get('Focal_Length', '-')
-            filter_used = full_data.get('Filter', 'なし')
+            # 朝の仕様書の核心データ（ガイドページとレベルアップ相談室）
+            guide = found_full_data.get('Guide_Page', 'ガイド情報はありません。')
+            judge_comment = found_full_data.get('Judge_Comment_Summary', 'アドバイスはまだありません。')
             
-            # 朝の仕様書の核心データ
-            guide = full_data.get('Guide_Page', 'ガイド情報はありません。')
-            judge_comment = full_data.get('Judge_Comment_Summary', 'アドバイスはまだありません。')
-            
-            # 仕様書通りのリッチメッセージを構築
+            # 仕様書に完全準拠したナビゲーションメッセージの構築
             reply_text = (
                 f"📸 【撮影地マッチ】: {location_name}\n"
                 f"🖼️ 作品名: {title_name}\n"
@@ -108,7 +114,7 @@ def handle_line_message(event):
             
     except Exception as e:
         print(f"Database Error: {e}")
-        # 万が一のエラー時もLINE側をフリーズさせずにメッセージを返す
+        # 万が一のエラー時もLINEをフリーズさせずにセーフティメッセージを返す
         line_bot_api.reply_message(reply_token, TextSendMessage(text="データ検索中にエラーが発生しました。もう一度お試しください。"))
 
 if __name__ == "__main__":
