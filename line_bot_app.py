@@ -137,26 +137,44 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 5. メインロジック（インテリジェント提案エンジン） ---
+# --- 5. メインロジック（キーワード切り出し ＆ 能動的レコメンド） ---
 def handle_line_message(event):
     reply_token = event['replyToken']
-    user_message = event['message']['text'].strip()
+    raw_message = event['message']['text'].strip()
     
     if db is None:
         return
 
     try:
-        # 今朝のリアルタイムコンテキスト（5月 ➔ 春・初夏の新緑シーズン）
         current_season = "春"
+        
+        # 【あなたの指摘：自由な文章からキーワードを切り出す処理】
+        # スペース区切りの単語リストを作成しつつ、文章全体から重要な地名や被写体を検知
+        is_fuji_requested = "富士" in raw_message
+        is_kyoto_requested = "京都" in raw_message
+        
+        # 文章の中からデータベース突合用のコアキーワードを配列に切り出し
+        search_keywords = []
+        if is_fuji_requested: search_keywords.append("富士山")
+        if is_kyoto_requested: search_keywords.append("京都府")
+        
+        # 追加の被写体や地域の切り出し
+        for word in ["静岡", "山梨", "新幹線", "滝", "茶畑", "湖", "桜", "曇り", "雨", "晴れ"]:
+            if word in raw_message:
+                search_keywords.append(word)
 
-        # 【あなたの発明：『富士山』に対する、時期連動型の能動的レコメンド（提案）】
-        if user_message == "富士山":
+        # もし何のキーワードも切り出せなかった場合は、入力文字をそのまま使用
+        if not search_keywords:
+            search_keywords = raw_message.split()
+
+        # 【切り出し結果：『富士山』の意図が含まれていた場合の能動的レコメンド】
+        # 「明日、富士山撮りに行きたいんだけど」という文章から「富士」を切り出してこの分岐に入れます
+        if is_fuji_requested and len(search_keywords) == 1:
             reply_text = (
                 f"富士山ですね！5月下旬の今頃でしたら、新緑に美しく映える『滝と富士山』を狙ってみるのはいかがでしょう？\n\n"
                 "本日の撮影プランに合わせて、以下の特選レコメンド、または地域から選択してください。"
             )
             
-            # ただの質問ではなく、1番目に「滝と富士山」のプロアクティブな提案ボタンを配置！
             quick_reply_options = QuickReply(items=[
                 QuickReplyButton(action=MessageAction(label="🌊 今が旬！滝 × 富士山（富士宮エリア）", text="富士山 滝 春")),
                 QuickReplyButton(action=MessageAction(label="🚄 定番！新幹線 × 富士山（三島方面）", text="富士山 新幹線 春")),
@@ -171,15 +189,6 @@ def handle_line_message(event):
             return
 
         target_data = None
-        match_reason = "コンシェルジュの提案条件に合致する撮影データを特定しました。"
-
-        # タップされた複数キーワード（例：['富士山', '滝', '春']）に分解
-        keywords = user_message.split()
-
-        # 抽象コンテキスト（東京在住、明日など）のフォールバック
-        user_pref = None
-        if any(k in user_message for k in ["東京", "関東", "在住"]):
-            user_pref = ["東京都", "神奈川県", "千葉県", "埼玉県", "栃木県", "群馬県", "茨城県", "静岡県", "山梨県"]
 
         # 15,000件の安全走査
         docs = db.collection('Master_Photos').stream()
@@ -192,27 +201,13 @@ def handle_line_message(event):
             db_pref = full_data.get('Prefecture', '')
             db_season = full_data.get('Season', '')
 
-            # 1. 提案UIタップ時（3軸ANDクロス検索）
-            if len(keywords) > 1:
-                if all((k in db_loc or k in db_title or k in db_season or k in db_pref) for k in keywords):
-                    target_data = full_data
-                    match_reason = f"【時期: {current_season}】×【テーマ: {keywords[1]}】に完全合致。今朝一番おすすめしたいプロフェッショナル写真データです。"
-                    break
-            
-            # 2. メイン仕様フォールバック（現在地 ＋ 時期のおすすめ）
-            elif user_pref:
-                if db_pref in user_pref and db_season == current_season:
-                    target_data = full_data
-                    match_reason = f"東京から好アクセスで、今まさにベストシーズン（{current_season}）を迎えている撮影地です。"
-                    break
-            
-            # 3. 通常の単発キーワード中間一致
-            else:
-                if user_message in db_loc or user_message in db_title:
+            # 切り出したキーワード群でAND多層検索
+            if search_keywords:
+                if all((k in db_loc or k in db_title or k in db_season or k in db_pref) for k in search_keywords):
                     target_data = full_data
                     break
 
-        # 【結果を極上の「添削指導UI」に流し込んで返却】
+        # 【結果を「添削指導UI（Flex Message）」で確実に返却】
         if target_data:
             title = target_data.get('Title', '無題')
             location = target_data.get('Location', '不明な撮影地')
@@ -238,7 +233,7 @@ def handle_line_message(event):
         else:
             line_bot_api.reply_message(
                 reply_token, 
-                TextSendMessage(text=f"「{user_message}」に関する具体的なデータが特定できませんでした。条件を少し変えてお試しください。")
+                TextSendMessage(text=f"「{raw_message}」から条件を解析しましたが、合致する撮影地を特定できませんでした。別のキーワード（例：京都、富士山など）でお試しください。")
             )
             
     except Exception as e:
