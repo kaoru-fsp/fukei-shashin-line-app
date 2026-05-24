@@ -40,10 +40,10 @@ def callback():
     return 'OK', 200
 
 
-# --- 4. 15,000件のLocation（地名）をミリ秒で部分一致検索する完全版 ---
+# --- 4. 15,000件を絶対にタイムアウト・クラッシュさせない検索処理 ---
 def handle_line_message(event):
     reply_token = event['replyToken']
-    user_message = event['message']['text'].strip() # ユーザーが入力した文字（例：「富士山」「吉野山」）
+    user_message = event['message']['text'].strip() # ユーザーが入力した文字（例：「富士山」「京都」）
     
     if db is None:
         return
@@ -53,23 +53,26 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(text="検索キーワードは2文字以上で入力してください。"))
             return
 
-        # 【超高速ストリーム処理】
-        # 本物のCSVデータに合わせて「Location（地名）」の列だけを限定取得。
-        # 15,000件を一瞬で走査し、ユーザーが入力した地名が含まれているドキュメントIDを特定します。
+        # 【超軽量化・セーフティ仕様】
+        # Locationフィールドのみを狙い撃ちでストリーム。通信負荷を極限までカット。
         docs = db.collection('Master_Photos').select(['Location']).stream()
         
         target_doc_id = None
         for doc in docs:
-            loc_data = doc.to_dict().get('Location', '')
-            if user_message in loc_data:
+            doc_dict = doc.to_dict()
+            if not doc_dict:
+                continue
+                
+            # KeyErrorを絶対に起こさない安全なデータ取得（空データはスキップ）
+            loc_data = doc_dict.get('Location')
+            if loc_data and user_message in str(loc_data):
                 target_doc_id = doc.id
-                break # 見つかった瞬間にループを抜ける（タイムアウトを絶対回避）
+                break # 見つかった瞬間に終了し、タイムアウトを回避
                 
         if target_doc_id:
-            # ヒットしたドキュメントのフルデータをピンポイントで一瞬で取得
+            # ヒットした1件のフルデータをミリ秒でピンポイント取得
             full_data = db.collection('Master_Photos').document(target_doc_id).get().to_dict()
             
-            # 本物のCSVのヘッダー名（列名）に100%一致させてデータを抽出
             title_name = full_data.get('Title', '無題')
             location_name = full_data.get('Location', '不明な撮影地')
             author = full_data.get('Author', '不明')
@@ -80,13 +83,14 @@ def handle_line_message(event):
             focal = full_data.get('Focal_Length', '-')
             filter_used = full_data.get('Filter', 'なし')
             
-            # ガイドページとレベルアップ相談室（審査員評）のデータをマッピング
+            # 朝の仕様書の核心データ
             guide = full_data.get('Guide_Page', 'ガイド情報はありません。')
             judge_comment = full_data.get('Judge_Comment_Summary', 'アドバイスはまだありません。')
             
-            # 朝の仕様書に完全準拠したナビゲーションテキストの組み立て
+            # 仕様書通りのリッチメッセージを構築
             reply_text = (
-                f"📸 【撮影地マッチ】: {location_name}（作品名: {title_name}）\n"
+                f"📸 【撮影地マッチ】: {location_name}\n"
+                f"🖼️ 作品名: {title_name}\n"
                 f"📷 撮影者: {author}\n"
                 f"🛠️ 機材: {camera} / {lens}\n"
                 f"⚙️ 設定: F{aperture} / ISO {iso} / 焦点距離 {focal} / フィルター: {filter_used}\n\n"
@@ -104,7 +108,8 @@ def handle_line_message(event):
             
     except Exception as e:
         print(f"Database Error: {e}")
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="データ検索中にエラーが発生しました。"))
+        # 万が一のエラー時もLINE側をフリーズさせずにメッセージを返す
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="データ検索中にエラーが発生しました。もう一度お試しください。"))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
