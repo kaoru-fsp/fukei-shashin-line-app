@@ -1,9 +1,8 @@
 import os
 import json
-from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, FlexSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -22,6 +21,7 @@ try:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
+        print("Firestore initialized successfully.")
 except Exception as e:
     print(f"Firestore initialization error: {e}")
 
@@ -40,49 +40,172 @@ def callback():
     return 'OK', 200
 
 
-# --- 4. 現在地・天候・時期・撮影データをクロス参照するコンシェルジュエンジン ---
+# --- 4. 添削指導（レベルアップ相談室）UIを動的に組み立てる関数 ---
+def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
+    """
+    朝の仕様書に準拠し、審査員評（添削指導）を美しくカード型で見せるための
+    LINE Flex Message (JSON構造) をPythonのディクショナリで定義。
+    """
+    flex_bubble = {
+      "type": "bubble",
+      "hero": {
+        "type": "image",
+        "url": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80",
+        "size": "full",
+        "aspectRatio": "20:13",
+        "aspectMode": "cover"
+      },
+      "body": {
+        "type": "box",
+        "layout": "vertical",
+        "contents": [
+          {
+            "type": "text",
+            "text": "🌸 AIコンシェルジュ厳選提案",
+            "weight": "bold",
+            "color": "#1DB954",
+            "size": "sm"
+          },
+          {
+            "type": "text",
+            "text": location,
+            "weight": "bold",
+            "size": "xl",
+            "margin": "md",
+            "wrap": True
+          },
+          {
+            "type": "box",
+            "layout": "vertical",
+            "margin": "lg",
+            "spacing": "sm",
+            "contents": [
+              {
+                "type": "box",
+                "layout": "baseline",
+                "spacing": "sm",
+                "contents": [
+                  {"type": "text", "text": "作品名", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                ]
+              },
+              {
+                "type": "box",
+                "layout": "baseline",
+                "spacing": "sm",
+                "contents": [
+                  {"type": "text", "text": "推奨機材", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                ]
+              },
+              {
+                "type": "box",
+                "layout": "baseline",
+                "spacing": "sm",
+                "contents": [
+                  {"type": "text", "text": "撮影設定", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": settings, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                ]
+              },
+              {
+                "type": "box",
+                "layout": "baseline",
+                "spacing": "sm",
+                "contents": [
+                  {"type": "text", "text": "当日天候", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": weather, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                ]
+              }
+            ]
+          },
+          {"type": "separator", "margin": "xxl"},
+          {
+            "type": "box",
+            "layout": "vertical",
+            "margin": "xxl",
+            "contents": [
+              {
+                "type": "text",
+                "text": "📖 【現地ナビ・アクセス】",
+                "weight": "bold",
+                "size": "md",
+                "color": "#111111",
+                "margin": "xs"
+              },
+              {
+                "type": "text",
+                "text": guide,
+                "wrap": True,
+                "size": "sm",
+                "color": "#555555",
+                "margin": "md"
+              }
+            ]
+          },
+          {"type": "separator", "margin": "xxl"},
+          {
+            "type": "box",
+            "layout": "vertical",
+            "margin": "xxl",
+            "backgroundColor": "#f7f8fa",
+            "cornerRadius": "md",
+            "paddingAll": "md",
+            "contents": [
+              {
+                "type": "text",
+                "text": "🎓 【レベルアップ相談室・添削指導】",
+                "weight": "bold",
+                "size": "md",
+                "color": "#e67e22"
+              },
+              {
+                "type": "text",
+                "text": judge_comment,
+                "wrap": True,
+                "size": "sm",
+                "color": "#333333",
+                "margin": "sm"
+              }
+            ]
+          }
+        ]
+      }
+    }
+    return flex_bubble
+
+
+# --- 5. メインロジック（多次元クロス検索 ＆ UI流し込み） ---
 def handle_line_message(event):
     reply_token = event['replyToken']
-    user_message = event['message']['text'].strip() # ユーザーの入力文
+    user_message = event['message']['text'].strip()
     
     if db is None:
         return
 
     try:
-        if len(user_message) < 2:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="撮影コンシェルジュです。地名や現在の状況（例：「東京在住で明日行ける場所」「いま曇りでおすすめ」）を教えてください！"))
-            return
+        target_data = None
+        match_reason = "条件にマッチするプロの撮影データを呼び出しました。"
 
-        target_doc_id = None
-        match_reason = ""
-
-        # 【仕様書の核心：多次元コンテキスト（現在地・天候・時期）の自動解析】
-        # 1. ユーザーの現在地・アクセス圏（出発地）の判定
+        # コンテキスト抽出
         user_pref = None
         if any(k in user_message for k in ["東京", "関東", "在住"]):
             user_pref = ["東京都", "神奈川県", "千葉県", "埼玉県", "栃木県", "群馬県", "茨城県", "静岡県", "山梨県"]
-        elif any(k in user_message for k in ["京都", "関西", "大阪", "兵庫"]):
-            user_pref = ["京都府", "大阪府", "兵庫県", "奈良県", "滋賀県", "三重県", "和歌山県"]
+        elif any(k in user_message for k in ["京都", "関西", "大阪"]):
+            user_pref = ["京都府", "大阪府", "兵庫県", "奈良県", "滋賀県"]
 
-        # 2. 天候コンテキストの判定
         detect_weather = None
-        for w in ["曇り", "くもり", "晴れ", "はれ", "雨", "あめ", "霧", "きり"]:
+        for w in ["曇り", "くもり", "晴れ", "はれ", "雨", "あめ"]:
             if w in user_message:
-                detect_weather = "曇り" if "くもり" in w else ("晴れ" if "はれ" in w else ("雨" if "あめ" in w else w))
+                detect_weather = "曇り" if "くもり" in w else ("晴れ" if "はれ" in w else "雨")
                 break
 
-        # 3. 日付・シーズンコンテキストの判定（「明日」や5月の日付から自動推論 ➔ 「春」）
-        current_season = "春" 
+        current_season = "春"
 
-        # 【15,000件の高速ストリーム・メタデータクロス検証】
-        # select()によるバグを完全修正。軽量フィールド（Prefecture, Weather, Season, Location, Title）のみを順次走査。
+        # 15,000件の安全スキャン
         docs = db.collection('Master_Photos').stream()
-        
         for doc in docs:
-            # KeyErrorを絶対に起こさない安全なデータ取得
             full_data = doc.to_dict()
-            if not full_data:
-                continue
+            if not full_data: continue
             
             db_pref = full_data.get('Prefecture', '')
             db_weather = full_data.get('Weather', '')
@@ -90,80 +213,52 @@ def handle_line_message(event):
             db_loc = full_data.get('Location', '')
             db_title = full_data.get('Title', '')
 
-            # パターン①：メイン仕様（現在地 ＋ 時期・おすすめのクロス参照）
-            if user_pref and not detect_weather:
-                if db_pref in user_pref and db_season == current_season:
-                    target_doc_id = doc.id
-                    match_reason = f"ご提示いただいた居住地（近郊）かつ、今の時期（{current_season}）に最高の条件を迎えるため提案します。"
-                    break
-            
-            # パターン②：シチュエーション仕様（天候 ＋ おすすめのクロス参照）
-            elif detect_weather and not user_pref:
-                if detect_weather in str(db_weather):
-                    target_doc_id = doc.id
-                    match_reason = f"現在の天候（{detect_weather}）の光の条件・ディテールを最大限に活かせる撮影地です。"
-                    break
+            # 複合クロス検索の判定
+            if user_pref and db_pref in user_pref and db_season == current_season:
+                target_data = full_data
+                break
+            elif detect_weather and detect_weather in str(db_weather):
+                target_data = full_data
+                break
+            elif user_message in str(db_loc) or user_message in str(db_title):
+                target_data = full_data
+                break
 
-            # パターン③：複合クロス仕様（現在地 ＋ 天候 ＋ 時期の完全合致）
-            elif user_pref and detect_weather:
-                if db_pref in user_pref and detect_weather in str(db_weather):
-                    target_doc_id = doc.id
-                    match_reason = f"現在地からアクセス可能で、かつ今日の天候（{detect_weather}）に最も適した撮影スポットです。"
-                    break
-
-            # パターン④：フォールバック（通常のキーワード・撮影地・作品名の中間一致検索 ➔ 富士山等）
-            else:
-                if user_message in str(db_loc) or user_message in str(db_title):
-                    target_doc_id = doc.id
-                    match_reason = f"キーワード「{user_message}」に合致する撮影マスターデータを引き当てました。"
-                    break
-
-        # 【仕様書のマッピング仕様通りのリッチデータ返却】
-        if target_doc_id:
-            # 確定した1件のデータをピンポイント展開
-            final_data = db.collection('Master_Photos').document(target_doc_id).get().to_dict()
+        # マッチした場合、Flex Messageを生成して返信
+        if target_data:
+            title = target_data.get('Title', '無題')
+            location = target_data.get('Location', '不明な撮影地')
+            author = target_data.get('Author', '不明')
+            camera = target_data.get('Camera_Body', '情報なし')
+            lens = target_data.get('Lens', '情報なし')
             
-            title_name = final_data.get('Title', '無題')
-            location_name = final_data.get('Location', '不明な撮影地')
-            author = final_data.get('Author', '不明')
-            camera = final_data.get('Camera_Body', '情報なし')
-            lens = final_data.get('Lens', '情報なし')
-            aperture = final_data.get('Aperture', '-')
-            iso = final_data.get('ISO', '-')
-            focal = final_data.get('Focal_Length', '-')
-            filter_used = final_data.get('Filter', 'なし')
-            weather_condition = final_data.get('Weather', '不明')
-            light_condition = final_data.get('Light_Condition', '情報なし')
+            aperture = target_data.get('Aperture', '-')
+            iso = target_data.get('ISO', '-')
+            focal = target_data.get('Focal_Length', '-')
+            settings = f"F{aperture} / ISO {iso} / {focal}mm"
             
-            guide = final_data.get('Guide_Page', 'ガイド情報はありません。')
-            judge_comment = final_data.get('Judge_Comment_Summary', 'アドバイスはまだありません。')
+            weather = target_data.get('Weather', '不明')
+            guide = target_data.get('Guide_Page', 'ナビ情報は現在準備中です。')
+            judge_comment = target_data.get('Judge_Comment_Summary', '審査員アドバイスは現在準備中です。')
             
-            reply_text = (
-                f"🌸 【AIコンシェルジュ厳選提案】\n"
-                f"💡 提案の関連付け: {match_reason}\n\n"
-                f"📍 撮影地: {location_name}\n"
-                f"🖼️ 作品名: {title_name} (撮影者: {author})\n"
-                f"🌤️ 現地条件: 天候 {weather_condition} / 光源: {light_condition}\n"
-                f"🛠️ 推奨機材: {camera} / {lens}\n"
-                f"⚙️ 設定値: F{aperture} / ISO {iso} / 焦点距離 {focal} / フィルター: {filter_used}\n\n"
-                f"📖 【現地ナビ・アクセス】\n{guide}\n\n"
-                f"🎓 【レベルアップ相談室（審査員アドバイス）】\n{judge_comment}"
+            # UIの組み立て
+            bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
+            
+            # LINEへ送信（FlexSendMessage を使用）
+            line_bot_api.reply_message(
+                reply_token,
+                FlexSendMessage(alt_text="撮影添削指導レポート", contents=bubble_json)
             )
-            
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
-            
         else:
+            # 見つからなかった場合のフォールバック（ここは通常のテキストで安全に返す）
+            from linebot.models import TextSendMessage
             line_bot_api.reply_message(
                 reply_token, 
-                TextSendMessage(text=f"ご提示いただいた条件（{user_message}）に合致する撮影地が見つかりませんでした。別の天候や「京都」「富士山」などの地名でお試しください。")
+                TextSendMessage(text="ご提示いただいた条件に合うデータが現在見つかりませんでした。「富士山」や「京都」などのキーワードでお試しください。")
             )
             
     except Exception as e:
-        print(f"Database Error: {e}")
-        try:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="データ処理中にエラーが発生しました。もう一度お試しください。"))
-        except:
-            pass
+        print(f"Error in handle_line_message: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
