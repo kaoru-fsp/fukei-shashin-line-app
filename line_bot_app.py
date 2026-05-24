@@ -56,21 +56,18 @@ try:
     print("Firestore initialized successfully.")
 except Exception as e:
     print(f"Firestore initialization error: {e}")
-    db = None
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
-
+    
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        print("Invalid signature. Please check your channel access token/channel secret.")
-        abort(400)
-
-    return 'OK'
+        handler.handle(body, request.headers.get('X-Line-Signature', ''))
+    except Exception as e:
+        print(f"Error in handler: {e}")
+        
+    return 'OK', 200
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
