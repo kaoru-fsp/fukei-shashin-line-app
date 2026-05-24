@@ -2,7 +2,7 @@ import os
 import json
 from flask import Flask, request, abort
 import firebase_admin
-from firebase_admin import credentials, firestore, initialize_app
+from firebase_admin import credentials, firestore
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
@@ -29,12 +29,12 @@ db = firestore.client()
 # 設定（環境変数または直接入力）
 # ==========================================
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get(
-    'LINE_CHANNEL_ACCESS_TOKEN', 
-    'zl9qX3l1P1CZ/h3umY+dExVdF+Q0kfZfGQrPUzd/8u9GeYb4nN7HtH6uqmItwsjUJikT1AbJea17ROdgyeXP+sK8fBThy1PLkWoDsYzYpZV3TUHXHGiarezI+QyxaBZgGEvfizLTa7JibDrYoUoT1wdB04t89/1O/w1cDnyilFU=n'
+    'LINE_CHANNEL_ACCESS_TOKEN',
+    'zl9qX3l1P1CZ/h3umY+dExVdF+Q0kfZfGQrPUzd/8u9GeYb4nN7HtH6uqmItwsjUJikT1AbJea17R0dgyeXP+sK8fBThy1PLkWoDsYzYpZV3TUHXHGiarezI+QyxaBZgGEvfizLTa7JibDrYoUoT1wdB04t89/10/w1cDnyi1FU=n'
 )
-# シークレットはLINE Developersコンソールから取得して設定してください
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', 'YOUR_LINE_CHANNEL_SECRET_HERE') 
 
+# シークレットはLINE Developersコンソールから取得して設定してください
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '72f4758bcd9918d175946a01597f9ea')
 # クローズドテスト用のユーザーID
 TEST_USER_ID = 'U9d8196b4cec0551a812809ed156b1877'
 
