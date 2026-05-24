@@ -30,7 +30,7 @@ db = firestore.client()
 # ==========================================
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get(
     'LINE_CHANNEL_ACCESS_TOKEN',
-    'zl9qX3l1P1CZ/h3umY+dExVdF+Q0kfZfGQrPUzd/8u9GeYb4nN7HtH6uqmItwsjUJikT1AbJea17R0dgyeXP+sK8fBThy1PLkWoDsYzYpZV3TUHXHGiarezI+QyxaBZgGEvfizLTa7JibDrYoUoT1wdB04t89/10/w1cDnyi1FU=n'
+    'zl9qX3l1P1CZ/h3umY+dExVdF+Q0kfZfGQrPUzd/8u9GeYb4nN7HtH6uqmItwsjUJikT1AbJea17R0dgyeXP+sK8fBThy1PLkWoDsYzYpZV3TUHXHGiarezI+QyxaBZgGEvfizLTa7JibDrYoUoT1wdB04t89/10/w1cDnyi1FU='
 )
 
 # シークレットはLINE Developersコンソールから取得して設定してください
