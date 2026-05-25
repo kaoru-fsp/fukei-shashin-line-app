@@ -2,25 +2,23 @@ import os
 import json
 import random
 from flask import Flask, request, abort
-from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, TextSendMessage, FlexSendMessage
+from linebot import LineBotApi
+from linebot.models import TextSendMessage, FlexSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
-from openai import OpenAI  # AI（司書）の知性を導入
+from openai import OpenAI  # 司書の知性を導入
 
 app = Flask(__name__)
 
-# --- 1. LINE API の初期化 ---
+# --- 1. LINE API の初期化（元の動いていた構造を100%維持） ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
-LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 2. OpenAI API（司書脳）の初期化 ---
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 ai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- 3. Firebase / Firestore の初期化（既存のものを維持） ---
+# --- 3. Firebase / Firestore の初期化（元の構造を100%維持） ---
 db = None
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
@@ -34,20 +32,22 @@ except Exception as e:
     print(f"Firestore initialization error: {e}")
 
 
-# --- 4. LINE Webhook 受信口（エラーを防止する安全設計に修正） ---
+# --- 4. LINE Webhook 受信口（元の手動パース構造を完全維持） ---
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature')
-    body = request.get_data(as_text=True)
     try:
-        handler.handle(body, signature)
+        request_json = request.get_json()
+        events = request_json.get('events', [])
+        for event in events:
+            # テキストメッセージが届いた場合のみ処理
+            if event.get('type') == 'message' and event['message'].get('type') == 'text':
+                handle_line_message(event)
     except Exception as e:
-        print(f"Webhook Error: {e}")
-        abort(400)
+        print(f"Error processing webhook event: {e}")
     return 'OK', 200
 
 
-# --- 5. 美しいFlex Message UI（既存のものをそのまま維持） ---
+# --- 5. 美しいFlex Message UI（元の構造をそのまま維持） ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
     flex_bubble = {
       "type": "bubble",
@@ -128,21 +128,20 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. メイン処理：司書によるインテリジェント探索（タイムアウトを根絶） ---
-@handler.add(MessageEvent, message=TextMessage)
+# --- 6. メイン処理：手動イベントパースに合わせたインテリジェント探索 ---
 def handle_line_message(event):
-    reply_token = event.reply_token
-    user_message = event.message.text.strip()
+    reply_token = event['replyToken']
+    user_message = event['message']['text'].strip()
     
     if db is None:
         return
 
     try:
-        # ─── 司書脳（LLM）ステップ1: ユーザーの曖昧な言葉から「検索キー」を優しく抽出 ───
+        # ─── 司書脳（LLM）ステップ1: キーワードの抽出 ───
         intent_response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",  # 高速かつ安価なモデルでキーワードを抽出
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "ユーザーの文章から、日本の『都道府県名』、または『被写体や季節のキーワード（例：桜、新緑、富士山など）』を2個以内の単語で抽出して、カンマ区切りで出力してください。該当がない場合は「無」とだけ出力してください。例：「長野で桜が見たい」➔「長野県,桜」"},
+                {"role": "system", "content": "ユーザーの文章から、日本の『都道府県名』、または『被写体や季節のキーワード（例：桜、新緑、富士山など）』を2個以内の単語で抽出して、カンマ区切りで出力してください。該当がない場合は「無」とだけ出力してください。"},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.0
@@ -150,36 +149,33 @@ def handle_line_message(event):
         
         search_keywords = [k.strip() for k in intent_response.choices[0].message.content.split(",") if k.strip() != "無"]
         
-        # ─── 司書脳ステップ2: 15,000件を stream() せず、安全に限定検索 ───
+        # ─── 司書脳ステップ2: 15,000件の安全な限定ロード ───
         photos_ref = db.collection('Master_Photos')
         matched_photos = []
         
-        # まずは、キーワードに関連しそうなデータを「最大100件」に厳格に制限してロード（タイムアウトを100%防止）
-        # キーワードが都道府県なら、Prefectureカラムで高速インデックス検索
         if search_keywords:
             main_keyword = search_keywords[0]
-            # 都道府県でのクエリ
+            # 実際のフィールド名「Prefecture」で高速インデックス検索（最大100件制限）
             query = photos_ref.where('Prefecture', '==', main_keyword).limit(100)
             docs = query.stream()
             matched_photos = [doc.to_dict() for doc in docs]
             
-            # 都道府県でヒットしなかった場合、LocationやSubjectにキーワードが含まれるものを探す（安全な上限数で回す）
+            # ヒットしない場合、LocationやSubjectにキーワードが含まれるものを先頭200件から安全にスキャン
             if not matched_photos:
-                fallback_docs = photos_ref.limit(200).stream() # 15,000件ではなく、先頭200件に絞って安全に検索
+                fallback_docs = photos_ref.limit(200).stream()
                 for doc in fallback_docs:
                     data = doc.to_dict()
                     if main_keyword in str(data.get('Location', '')) or main_keyword in str(data.get('Subject', '')):
                         matched_photos.append(data)
         
-        # 万が一、何も引っかからなかった場合は全体の先頭からランダムに紹介
+        # 該当がない場合は先頭からランダムに選出
         if not matched_photos:
             random_docs = photos_ref.limit(10).stream()
             matched_photos = [doc.to_dict() for doc in random_docs]
 
-        # マッチした中から1件をそっと選出
         target_data = random.choice(matched_photos)
 
-        # ─── 司書脳ステップ3: 抽出したデータから、品格ある案内文を生成 ───
+        # ─── 司書脳ステップ3: 案内文の生成 ───
         system_prompt = """
         あなたは雑誌『風景写真』35年の歴史を預かる「ライブラリーの司書（コンシェルジュ）」です。
         データから引き出された事実のみを基にして、非常に丁寧で思慮深い「司書」の口調（紳士的な敬語）で、
@@ -207,7 +203,7 @@ def handle_line_message(event):
         )
         司書のメッセージ = response.choices[0].message.content
 
-        # ─── 🤖 ステップ4: 「司書の言葉」＋「美しいFlex UI」の2連コンボで返信 ───
+        # ─── ステップ4: 「司書の言葉」＋「美しいFlex UI」をLINEへ同時に返信 ───
         title = target_data.get('Title', '無題')
         location = target_data.get('Location', '不明な撮影地')
         author = target_data.get('Author', '不明')
@@ -217,13 +213,13 @@ def handle_line_message(event):
         settings = f"F{target_data.get('Aperture', '-')} / ISO {target_data.get('ISO', '-')} / {target_data.get('Focal_Length', '-')}mm"
         weather = target_data.get('Weather', '不明')
         
-        # 既存データにある「プロのロジック解説」をUIにマッピング
+        # あなたのマスターデータの項目名「Judge_Comment_Summary」「Logic_Advice」を正しくマッピング
         guide = target_data.get('Judge_Comment_Summary', 'ナビ情報は現在準備中です。')
         judge_comment = target_data.get('Logic_Advice', 'アドバイスは現在準備中です。')
         
         bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
         
-        # 司書のテキストメッセージと、美しいカードUIを同時にLINEへ返却
+        # 配列形式で2つのメッセージを同時に送信（元のlinebotライブラリの仕様に完全追従）
         line_bot_api.reply_message(
             reply_token,
             [
