@@ -6,19 +6,19 @@ from linebot import LineBotApi
 from linebot.models import TextSendMessage, FlexSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
-from openai import OpenAI  # 司書の知性を導入
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# --- 1. LINE API の初期化（元の動いていた構造を100%維持） ---
+# --- 1. LINE API の初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# --- 2. OpenAI API（司書脳）の初期化 ---
+# --- 2. OpenAI API の初期化 ---
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 ai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- 3. Firebase / Firestore の初期化（元の構造を100%維持） ---
+# --- 3. Firebase / Firestore の初期化 ---
 db = None
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
@@ -32,14 +32,13 @@ except Exception as e:
     print(f"Firestore initialization error: {e}")
 
 
-# --- 4. LINE Webhook 受信口（元の手動パース構造を完全維持） ---
+# --- 4. LINE Webhook 受信口 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     try:
         request_json = request.get_json()
         events = request_json.get('events', [])
         for event in events:
-            # テキストメッセージが届いた場合のみ処理
             if event.get('type') == 'message' and event['message'].get('type') == 'text':
                 handle_line_message(event)
     except Exception as e:
@@ -47,7 +46,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 5. 美しいFlex Message UI（元の構造をそのまま維持） ---
+# --- 5. 本物のデータを美しく見せる Flex Message UI ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
     flex_bubble = {
       "type": "bubble",
@@ -76,7 +75,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
                 "spacing": "sm",
                 "contents": [
                   {"type": "text", "text": "名作", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": f"「{title}」 ({author} 著)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                  {"type": "text", "text": f"「{title}」 ({author} 様 著)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
                 ]
               },
               {
@@ -93,7 +92,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
                 "layout": "baseline",
                 "spacing": "sm",
                 "contents": [
-                  {"type": "text", "text": "条件", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": "設定", "color": "#aaaaaa", "size": "sm", "flex": 2},
                   {"type": "text", "text": f"{settings} / 天候: {weather}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
                 ]
               }
@@ -105,7 +104,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
             "layout": "vertical",
             "margin": "xxl",
             "contents": [
-              {"type": "text", "text": "📖 【ライブラリーの撮影地知見】", "weight": "bold", "size": "md", "color": "#111111"},
+              {"type": "text", "text": "📖 【この名作のコンテキスト（背景）】", "weight": "bold", "size": "md", "color": "#111111"},
               {"type": "text", "text": guide, "wrap": True, "size": "sm", "color": "#555555", "margin": "md"}
             ]
           },
@@ -118,7 +117,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
             "cornerRadius": "md",
             "paddingAll": "md",
             "contents": [
-              {"type": "text", "text": "💬 【この名作に宿る改善ロジック】", "weight": "bold", "size": "md", "color": "#2c3e50"},
+              {"type": "text", "text": "💬 【プロのロジック・指導アドバイス】", "weight": "bold", "size": "md", "color": "#e67e22"},
               {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}
             ]
           }
@@ -128,7 +127,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. メイン処理：手動イベントパースに合わせたインテリジェント探索 ---
+# --- 6. メイン処理：本物のマスター項目名にマッピング ---
 def handle_line_message(event):
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
@@ -137,60 +136,70 @@ def handle_line_message(event):
         return
 
     try:
-        # ─── 司書脳（LLM）ステップ1: キーワードの抽出 ───
+        # ─── 司書脳（LLM）ステップ1: 検索用の「正式な都道府県名」を抽出 ───
         intent_response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "ユーザーの文章から、日本の『都道府県名』、または『被写体や季節のキーワード（例：桜、新緑、富士山など）』を2個以内の単語で抽出して、カンマ区切りで出力してください。該当がない場合は「無」とだけ出力してください。"},
+                {"role": "system", "content": "ユーザーの文章から、関係する日本の『都道府県名』を正式名称（例：長野県、山梨県、千葉県）で1つだけ抽出してください。都道府県名が含まれない、または特定できない場合は「無し」とだけ出力してください。"},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.0
         )
+        pref_keyword = intent_response.choices[0].message.content.strip()
         
-        search_keywords = [k.strip() for k in intent_response.choices[0].message.content.split(",") if k.strip() != "無"]
-        
-        # ─── 司書脳ステップ2: 15,000件の安全な限定ロード ───
         photos_ref = db.collection('Master_Photos')
         matched_photos = []
         
-        if search_keywords:
-            main_keyword = search_keywords[0]
-            # 実際のフィールド名「Prefecture」で高速インデックス検索（最大100件制限）
-            query = photos_ref.where('Prefecture', '==', main_keyword).limit(100)
+        # ─── ステップ2: 実際のフィールド名「Area」から前方一致で確実に引き抜く ───
+        if pref_keyword != "無し":
+            # Firestoreの仕様に合わせた、高速かつ安全な前方一致クエリ（長野県から始まるデータをハント）
+            query = photos_ref.where('Area', '>=', pref_keyword).where('Area', '<=', pref_keyword + '\uf8ff').limit(100)
             docs = query.stream()
             matched_photos = [doc.to_dict() for doc in docs]
-            
-            # ヒットしない場合、LocationやSubjectにキーワードが含まれるものを先頭200件から安全にスキャン
-            if not matched_photos:
-                fallback_docs = photos_ref.limit(200).stream()
-                for doc in fallback_docs:
-                    data = doc.to_dict()
-                    if main_keyword in str(data.get('Location', '')) or main_keyword in str(data.get('Subject', '')):
-                        matched_photos.append(data)
         
-        # 該当がない場合は先頭からランダムに選出
+        # 都道府県名がない、またはヒットしない場合は、「桜」や「富士山」などのキーワードで先頭1000件から部分一致検索
+        if not matched_photos:
+            fallback_docs = photos_ref.limit(1000).stream()
+            for doc in fallback_docs:
+                data = doc.to_dict()
+                db_area = str(data.get('Area', ''))
+                db_subject = str(data.get('Subject', ''))
+                if user_message in db_area or user_message in db_subject:
+                    matched_photos.append(data)
+                    if len(matched_photos) >= 50:
+                        break
+        
+        # 完全に見つからない場合のセーフティ
         if not matched_photos:
             random_docs = photos_ref.limit(10).stream()
             matched_photos = [doc.to_dict() for doc in random_docs]
 
+        # 確定した1件（本物のマスターデータ構造）
         target_data = random.choice(matched_photos)
 
-        # ─── 司書脳ステップ3: 案内文の生成 ───
+        # ─── ステップ3: 100%本物のデータだけを使って、誠実な案内文を作る ───
+        title = target_data.get('Title', '無題')
+        area = target_data.get('Area', '不明な撮影地')
+        place = target_data.get('Place', '')
+        full_location = f"{area} {place}".strip() if (place and str(place) != 'nan') else area
+        winner = target_data.get('Winner', '不明')
+        
         system_prompt = """
-        あなたは雑誌『風景写真』35年の歴史を預かる「ライブラリーの司書（コンシェルジュ）」です。
-        データから引き出された事実のみを基にして、非常に丁寧で思慮深い「司書」の口調（紳士的な敬語）で、
-        ユーザーへの優しい案内メッセージを作成してください。事実の捏造は厳禁です。
+        あなたは雑誌『風景写真』のライブラリー司書です。
+        与えられた【ライブラリーのデータ】の事実のみを基にして、丁寧な口調で案内を作ってください。
+        データが「不明」となっているものは、嘘をついて捏造せず、正直に情報がない旨を伝えてください。
         """
         
         user_prompt = f"""
         【ライブラリーのデータ】
-        ・作品: 「{target_data.get('Title', '無題')}」 ({target_data.get('Author', '名無し')} 著)
-        ・撮影地: {target_data.get('Location', '不明な撮影地')}
+        ・作品名: 「{title}」
+        ・撮影地: {full_location}
+        ・作者: {winner} 様
         ・被写体要素: {target_data.get('Subject', '')}
         
         ユーザーの問いかけ: 「{user_message}」
         
-        上記データを使って、150文字程度の短く紳士的な案内文を作ってください。最後に「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
+        上記の「作品名」「撮影地」「作者名」を必ず文章の中に明記して、150文字程度で案内文を作成してください。最後は「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
         """
         
         response = ai_client.chat.completions.create(
@@ -199,27 +208,25 @@ def handle_line_message(event):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3
+            temperature=0.2
         )
         司書のメッセージ = response.choices[0].message.content
 
-        # ─── ステップ4: 「司書の言葉」＋「美しいFlex UI」をLINEへ同時に返信 ───
-        title = target_data.get('Title', '無題')
-        location = target_data.get('Location', '不明な撮影地')
-        author = target_data.get('Author', '不明')
-        camera = target_data.get('Camera_Body', '情報なし')
+        # ─── ステップ4: カードUIへ本物の項目（Camera, Lens, Exposureなど）をマッピング ───
+        camera = target_data.get('Camera', '情報なし')
         lens = target_data.get('Lens', '情報なし')
-        
-        settings = f"F{target_data.get('Aperture', '-')} / ISO {target_data.get('ISO', '-')} / {target_data.get('Focal_Length', '-')}mm"
+        settings = target_data.get('Exposure', '情報なし')  # CSVの「f16 1/250秒」などの文字列がそのまま入ります
         weather = target_data.get('Weather', '不明')
         
-        # あなたのマスターデータの項目名「Judge_Comment_Summary」「Logic_Advice」を正しくマッピング
-        guide = target_data.get('Judge_Comment_Summary', 'ナビ情報は現在準備中です。')
-        judge_comment = target_data.get('Logic_Advice', 'アドバイスは現在準備中です。')
+        # アドバイス項目のマッピング
+        guide = target_data.get('Context_Advice', 'バックエンド・アクセスナビ情報は現在準備中です。')
+        if not guide or str(guide) == 'nan': guide = 'バックエンド・アクセスナビ情報は現在準備中です。'
         
-        bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
+        judge_comment = target_data.get('Logic_Advice', 'プロによる作画ロジック・添削指導データは現在準備中です。')
+        if not judge_comment or str(judge_comment) == 'nan': judge_comment = 'プロによる作画ロジック・添削指導データは現在準備中です。'
         
-        # 配列形式で2つのメッセージを同時に送信（元のlinebotライブラリの仕様に完全追従）
+        bubble_json = create_添削_ui(full_location, title, winner, camera, lens, settings, weather, guide, judge_comment)
+        
         line_bot_api.reply_message(
             reply_token,
             [
@@ -230,7 +237,7 @@ def handle_line_message(event):
             
     except Exception as e:
         print(f"Concierge System Error: {e}")
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="申し訳ございません。書棚の検索中に少し不手際がございました。もう一度お声がけいただけますでしょうか。"))
+        line_bot_api.reply_message(reply_token, TextSendMessage(text="申し訳ございません。書棚の検索中に不手際がございました。"))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
