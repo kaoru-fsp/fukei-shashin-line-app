@@ -55,7 +55,6 @@ def callback():
 
 # --- 5. 【完全維持 ＋ 本物の入賞作品画像対応】元の添削指導UI ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
-    # ※裏側で生成された、この名作固有の「fupcサーバーの画像URL」がグローバルまたは動的にheroへセットされます
     global TARGET_IMAGE_URL
     image_url = TARGET_IMAGE_URL if 'TARGET_IMAGE_URL' in globals() else "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
 
@@ -63,7 +62,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
       "type": "bubble",
       "hero": {
         "type": "image",
-        "url": image_url, # ➔ FUPCサーバーの文字入り閲覧用画像がここに美しく咲きます
+        "url": image_url,
         "size": "full",
         "aspectRatio": "20:13",
         "aspectMode": "cover"
@@ -72,7 +71,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
         "type": "box",
         "layout": "vertical",
         "contents": [
-          {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "sm"},
+          {"type": "text", "text": "🌸 AIコンシェル浅厳選提案", "weight": "bold", "color": "#1DB954", "size": "sm"},
           {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "md", "wrap": True},
           {
             "type": "box",
@@ -181,20 +180,21 @@ def create_大文字選択肢_ui(reply_text, quick_replies):
     return flex_bubble
 
 
-# --- 7. 対話 ＆ 画像自動生成エンジン ---
+# --- 7. 改良型対話エンジン：セーフティ超強化型 ---
 def handle_line_message(event):
     global TARGET_IMAGE_URL
     user_id = event['source']['userId']
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     
-    if db is None or not ai_client: return
+    if db is None: return
 
     now = datetime.now()
     default_month = f"{now.month}月"
     default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
+        # 🗄️ 過去の記憶のロード ＆ 話題の急な方向転換の自動判定
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
         
@@ -214,44 +214,82 @@ def handle_line_message(event):
         else:
             current_state["turn_count"] = current_state.get("turn_count", 0) + 1
 
-        # AIによるスマート文脈解釈
-        system_prompt = f"""
-        あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。
-        【現在の会話ステート】
-        - 月: {current_state.get('month')}
-        - 旬: {current_state.get('period')}
-        - 都道府県: {current_state.get('prefecture')}
-        - 被写体テーマ: {current_state.get('subject')}
-        - 今回の会話ターン数: {current_state.get('turn_count')} 回目 (最大3回)
+        status = "ASK"
+        updated_state = current_state
+        reply_text = ""
+        quick_replies = []
 
-        【ルール】
-        1. 返信文は必ず【100文字以内】でスマートに逆質問すること。
-        2. 3回目のやり取り、または条件が揃った場合は必ず status を "COMPLETE" にすること。
-        3. 1〜2回目は status を "ASK" にし、見やすい大きな選択肢ボタンのテキスト（最大4択）を quick_replies に入れること。
-        """
+        # ─── 🤖 【防御復活】AIによるスマート文脈解釈 ───
+        ai_success = False
+        if ai_client:
+            try:
+                system_prompt = f"""
+                あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。
+                【現在の会話ステート】
+                - 月: {current_state.get('month')}
+                - 旬: {current_state.get('period')}
+                - 都道府県: {current_state.get('prefecture')}
+                - 被写体テーマ: {current_state.get('subject')}
+                - 今回の会話ターン数: {current_state.get('turn_count')} 回目 (最大3回)
 
-        intent_response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
-            temperature=0.0,
-            response_format={"type": "json_object"}
-        )
-        
-        ai_res = json.loads(intent_response.choices[0].message.content.strip())
-        status = ai_res.get("status", "ASK")
-        updated_state = ai_res.get("updated_state", current_state)
-        updated_state["turn_count"] = current_state["turn_count"]
-        
-        reply_text = ai_res.get("reply_text", "どのような風景をお探しですか？")
-        quick_replies = ai_res.get("quick_replies", [])
+                【ルール】
+                1. 返信文は必ず【100文字以内】でスマートに逆質問すること。
+                2. 3回目のやり取り、または条件が揃った場合は必ず status を "COMPLETE" にすること。
+                3. 1〜2回目は status を "ASK" にし、見やすい大きな選択肢ボタンのテキスト（最大4択）を quick_replies に入れること。
+                """
+
+                intent_response = ai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                    timeout=4.0
+                )
+                
+                ai_res = json.loads(intent_response.choices[0].message.content.strip())
+                status = ai_res.get("status", "ASK")
+                updated_state = ai_res.get("updated_state", current_state)
+                updated_state["turn_count"] = current_state["turn_count"]
+                reply_text = ai_res.get("reply_text", "")
+                quick_replies = ai_res.get("quick_replies", [])
+                ai_success = True
+            except Exception as ai_err:
+                print(f"⚠️ OpenAI一時エラーガード（自力パースでセッションを継続します）: {ai_err}")
+
+        # ─── 🛡️ 自力救済ルート: AIがエラーでコケても100%自力で地名を拾ってボタンを返す ───
+        if not ai_success:
+            for p in ["長野", "山梨", "静岡", "山形", "福島"]:
+                if p in user_message: updated_state["prefecture"] = p + "県"
+            for s in ["滝", "新緑", "茶畑", "新幹線", "花", "富士山"]:
+                if s in user_message: updated_state["subject"] = s
+
+            pref = updated_state.get("prefecture", "無し")
+            subj = updated_state.get("subject", "無し")
+
+            if pref == "長野県" and subj == "無し":
+                status = "ASK"
+                reply_text = "明日（5月下旬）の長野県ですね。広いエリアですので、アクセスとテーマから絞り込みましょう。"
+                quick_replies = ["🌱 北信 × ブナ新緑", "🌊 東信 × 清流と滝", "🌸 南信 × 残雪と花"]
+            elif (pref in ["山梨県", "静岡県"] or "富士山" in user_message) and subj == "無し":
+                status = "ASK"
+                reply_text = "明日の富士山周辺ですね。ルートによって狙える表情が異なります。ご希望のテーマはどちらですか？"
+                quick_replies = ["🌊 中央道：山梨 × 滝", "🌱 東名：静岡 × 茶畑", "🚄 東名 × 新幹線"]
+            elif pref != "無し" or subj != "無し" or "確定" in user_message or current_state["turn_count"] >= 2:
+                status = "COMPLETE"
+                reply_text = "かしこまりました。それでは条件に合う名作の書棚を開きます。"
+            else:
+                status = "ASK"
+                reply_text = "明日（5月下旬）のおすすめ撮影地ですね。車での移動を想定し、今もっとも輝く被写体を選出しました。"
+                quick_replies = ["🌊 清流・滝と新緑", "🗻 富士山周辺スポット", "🌱 茶畑と新緑の丘"]
 
         if current_state["turn_count"] >= 3:
             status = "COMPLETE"
 
         session_ref.set(updated_state)
 
-        # ─── 🔁 1〜2回目：大文字カスタムボタンメニューを最速送信（画像はまだ出さない） ───
+        # ─── 🔁 1〜2回目：大文字カスタムボタンメニューを最速送信 ───
         if status == "ASK":
+            if not reply_text: reply_text = "今の時期に最適な撮影テーマをご案内します。気になる項目を選択してください。"
             if not quick_replies: quick_replies = ["次の候補を見る"]
             menu_json = create_大文字選択肢_ui(reply_text, quick_replies)
             line_bot_api.reply_message(event['replyToken'], FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_json))
@@ -265,6 +303,12 @@ def handle_line_message(event):
             target_period = updated_state.get("period", default_period)
             target_pref = updated_state.get("prefecture", "無し")
             target_subject = updated_state.get("subject", "無し")
+
+            # 曖昧なクイックテキスト選択を検索用に標準化
+            if "北信" in user_message or "新緑" in user_message: target_subject = "新緑"
+            if "東信" in user_message or "滝" in user_message: target_subject = "滝"
+            if "静岡" in user_message or "茶畑" in user_message: target_pref = "静岡県"
+            if "山梨" in user_message: target_pref = "山梨県"
 
             photos_ref = db.collection('Master_Photos')
             query = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period)
@@ -287,20 +331,17 @@ def handle_line_message(event):
             # フィールド名ズレ自動吸収マッピング
             flat_data = {str(k).lower(): v for k, v in target_data.items() if v}
             
-            # ─── 🔗 【最重要】仕様書に準拠した「閲覧用画像URL」の動的生成 ───
+            # ─── 🔗 閲覧用画像URLの動的生成 ───
             published = flat_data.get('published') or target_data.get('Published')
             pic_file_name = flat_data.get('picfilename') or flat_data.get('pic_file_name') or target_data.get('PicFileName')
             
             if published and pic_file_name:
                 pub_str = str(published).strip()
-                parent_dir = pub_str[:4] # 先頭4文字（年）
-                child_dir = pub_str      # 全体（子ディレクトリ）
+                parent_dir = pub_str[:4]
+                child_dir = pub_str
                 file_name = str(pic_file_name).strip()
-                
-                # 末尾のスラッシュ重複を防ぎ、綺麗に結合
                 TARGET_IMAGE_URL = f"{IMAGE_BASE_VIEW.rstrip('/')}/{parent_dir}/{child_dir}/{file_name}"
             else:
-                # 万が一データに画像名がない場合のセーフティ
                 TARGET_IMAGE_URL = "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
 
             title = flat_data.get('title') or flat_data.get('subject') or target_data.get('Title', '名作風景')
@@ -330,11 +371,14 @@ def handle_line_message(event):
             )
 
     except Exception as e:
+        # 万が一のエラー時も絶対に隠蔽せず、生ログをLINE画面に完全に暴露するデバッグ仕様
+        raw_error_trace = traceback.format_exc()
+        print(f"🔥 実行時エラー詳細:\n{raw_error_trace}")
         try:
-            line_bot_api.reply_message(event['replyToken'], TextSendMessage(text=f"🔍 システム調整中:\n再度の入力をお試しいただくか、しばらくお待ちください。"))
+            line_bot_api.reply_message(event['replyToken'], TextSendMessage(text=f"❌ システム内部エラー検知:\n{raw_error_trace}"))
         except:
             pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)qqqqaA
+    app.run(host="0.0.0.0", port=port)
