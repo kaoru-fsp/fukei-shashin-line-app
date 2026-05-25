@@ -1,19 +1,28 @@
 import os
 import json
 import random
+import traceback
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
-from linebot.models import TextSendMessage, FlexSendMessage
+from linebot.models import (
+    TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction
+)
 import firebase_admin
 from firebase_admin import credentials, firestore
+from openai import OpenAI
 
 app = Flask(__name__)
 
-# --- 1. LINE API の初期化（元の構造を完全維持） ---
+# --- 1. LINE API の初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# --- 2. Firebase / Firestore の初期化（元の構造を完全維持） ---
+# --- 2. OpenAI API の初期化 ---
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+ai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# --- 3. Firebase / Firestore の初期化 ---
 db = None
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
@@ -27,7 +36,7 @@ except Exception as e:
     print(f"Firestore initialization error: {e}")
 
 
-# --- 3. LINE Webhook 受信口 ---
+# --- 4. LINE Webhook 受信口 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     try:
@@ -41,7 +50,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 4. 【完全復元】元の添削指導UI（Flex Message）の組み立て ---
+# --- 5. 【完全維持】元の添削指導UI（Flex Message） ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
     flex_bubble = {
       "type": "bubble",
@@ -122,83 +131,159 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 5. メイン処理：インデックス・AIエラーを100%回避し、確実にデータを1秒で返すロジック ---
+# --- 6. 真の対話エンジン：記憶保持型コンシェルジュシステム ---
 def handle_line_message(event):
+    user_id = event['source']['userId']
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     
-    if db is None:
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="データベースが接続されていません。"))
-        return
+    if db is None or not ai_client: return
+
+    # 本日の「月・旬」の自動判定（ベースライン）
+    now = datetime.now()
+    default_month = f"{now.month}月"
+    default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
-        # ─── ⚡ インデックス未作成エラーを100%回避する設計 ───
-        # エラーの元凶となるwhereクエリを一切使わず、安全な上限数（500件）を直接ストリームロード
-        photos_ref = db.collection('Master_Photos')
-        docs = photos_ref.limit(500).stream()
+        # ─── 🗄️ 記憶のロード: Firestoreからこのユーザーの現在の対話ステートを取得 ───
+        session_ref = db.collection('User_Sessions').document(user_id)
+        session_doc = session_ref.get()
         
-        matched_photos = []
-        all_loaded_photos = []
-        
-        # 入力された地名の「最初の2文字」（例: 「長野」「山梨」「山形」「富士」）を取得
-        search_keyword = user_message[:2]
-        
-        for doc in docs:
-            data = doc.to_dict()
-            if not data:
-                continue
-            all_loaded_photos.append(data)
-            
-            db_loc = str(data.get('Location', ''))
-            db_title = str(data.get('Title', ''))
-            
-            # メモリ上での安全な突合（インデックス未作成エラーは100%起きません）
-            if search_keyword in db_loc or search_keyword in db_title:
-                matched_photos.append(data)
-                if len(matched_photos) >= 5:  # 速度最優先で5件で打ち切り
-                    break
-        
-        # 万が一、ロードした500件の中にキーワードが含まれるデータがない場合は、
-        # 空振りのエラー（不手際）にせず、読み込んだ中からランダムに1件を選び、100%中身入りの成果を返します
-        if not matched_photos and all_loaded_photos:
-            matched_photos = all_loaded_photos
+        if session_doc.exists:
+            current_state = session_doc.to_dict()
+        else:
+            current_state = {"month": default_month, "period": default_period, "prefecture": "無し", "subject": "無し"}
 
-        if not matched_photos:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="データベース内に写真データが見つかりませんでした。"))
+        # ─── 🤖 AIによる文脈解釈 ＆ ステート自動更新 ───
+        system_prompt = f"""
+        あなたは雑誌『風景写真』の読者（シニアの写真愛好家）をエスコートする、極めて品格のある対話型AIコンシェルジュです。
+        ユーザーは東京在住で、主にお車での移動（高速道路ルート）を想定しています。
+
+        【現在の検索ステート】
+        - 月: {current_state.get('month')}
+        - 旬: {current_state.get('period')}
+        - 都道府県: {current_state.get('prefecture')}
+        - 被写体テーマ: {current_state.get('subject')}
+
+        本日の日付の前提は【 {default_month} {default_period} 】です。「明日」や「週末」という発言にはこの前提を適用してください。
+
+        【あなたの思考ミッション】
+        1. ユーザーの最新の発言（例：「新緑が良いな」「静岡側で」など）を読み解き、上記の検索ステートを更新してください。
+        2. 更新した結果、「都道府県」と「被写体テーマ」の双方が、撮影地を特定できるレベルにまで【具体的に絞り込まれたか】を判定してください。
+        3. 大雑把な段階（例：「長野に行きたい」「おすすめある？」など）では、絶対にすぐカードを出してはいけません。会話のラリーを続けるため、statusを"ASK"にし、次の絞り込みのための紳士的な「逆質問・提案」と、ユーザーが押しやすい具体的なボタンの選択肢（最大4択、15文字以内）を作成してください。
+        4. 条件が完全に揃った、またはユーザーの要望がピンポイントに収束したと判断した場合は、statusを"COMPLETE"にしてください。
+
+        必ず以下のJSONフォーマットのみで正確に出力してください。
+        {{
+          "status": "ASK" または "COMPLETE",
+          "updated_state": {{
+            "month": "○月",
+            "period": "〇旬",
+            "prefecture": "〇〇県 または 無し",
+            "subject": "〇〇（例：滝、茶畑、新緑、新幹線など） または 無し"
+          }},
+          "reply_text": "ユーザーへの紳士的なセリフ（ASKの場合は魅力的で具体的な逆質問、COMPLETEの場合は『かしこまりました。それでは条件に合う名作の書棚を開きます。』などの締めの言葉）",
+          "quick_replies": ["選択肢1", "選択肢2"] (ASKの場合のみ。COMPLETEの場合は空配列 [])
+        }}
+        """
+
+        intent_response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        
+        ai_res = json.loads(intent_response.choices[0].message.content.strip())
+        status = ai_res.get("status", "ASK")
+        updated_state = ai_res.get("updated_state", current_state)
+        reply_text = ai_res.get("reply_text", "どのような風景をお探しですか？")
+        quick_replies = ai_res.get("quick_replies", [])
+
+        # 最新のステートを記憶（Firestoreへ上書き保存）
+        session_ref.set(updated_state)
+
+        # ─── 🔁 対話継続（ASK）モード: まだ絞り込み途中のため、逆質問ボタンを出して終了（カードは出さない） ───
+        if status == "ASK":
+            items = []
+            for label in quick_replies:
+                items.append(QuickReplyButton(action=MessageAction(label=label[:15], text=label)))
+            
+            q_reply = QuickReply(items=items) if items else None
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text, quick_reply=q_reply))
             return
 
-        target_data = random.choice(matched_photos)
+        # ─── 🎯 絞り込み完了（COMPLETE）モード: 最後のまとめとして極上のカードをドンと出す ───
+        if status == "COMPLETE":
+            # 対話が完結したため、ユーザーのセッション記憶は綺麗にリセット（削除）
+            session_ref.delete()
 
-        # ─── 💎 あなたの元コードの「項目名」を100%完全維持して抽出 ───
-        title = target_data.get('Title', '無題')
-        location = target_data.get('Location', '不明な撮影地')
-        author = target_data.get('Author', '不明')
-        camera = target_data.get('Camera_Body', '情報なし')
-        lens = target_data.get('Lens', '情報なし')
-        
-        aperture = target_data.get('Aperture', '-')
-        iso = target_data.get('ISO', '-')
-        focal = target_data.get('Focal_Length', '-')
-        settings = f"F{aperture} / ISO {iso} / {focal}mm"
-        
-        weather = target_data.get('Weather', '不明')
-        guide = target_data.get('Guide_Page', 'ナビ情報は現在準備中です。')
-        judge_comment = target_data.get('Judge_Comment_Summary', '審査員アドバイスは現在準備中です。')
-        
-        # 100%中身の詰まった本物のFlex Messageカードのみを、エラーなしで最速返信
-        bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
-        
-        line_bot_api.reply_message(
-            reply_token,
-            [
-                TextSendMessage(text=f"大変お待たせいたしました。当ライブラリーの書棚から、ご要望に近い名作「{title}」の記録をお持ちいたしました。"),
-                FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json)
-            ]
-        )
+            target_month = updated_state.get("month", default_month)
+            target_period = updated_state.get("period", default_period)
+            target_pref = updated_state.get("prefecture", "無し")
+            target_subject = updated_state.get("subject", "無し")
+
+            # あなたの設計通り、36分割マトリクス × 地域インデックスで一撃狙い撃ち
+            photos_ref = db.collection('Master_Photos')
+            query = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period)
+            if target_pref != "無し":
+                query = query.where('Prefecture', '==', target_pref)
+                
+            docs = query.stream()
+            matched_photos = [doc.to_dict() for doc in docs if doc.to_dict()]
             
+            # メモリ上での被写体（Subject）マッチング
+            if target_subject != "無し" and matched_photos:
+                filtered = [p for p in matched_photos if (target_subject in str(p.values()))]
+                if filtered: matched_photos = filtered
+            
+            if not matched_photos:
+                fallback_docs = photos_ref.limit(5).stream()
+                matched_photos = [doc.to_dict() for doc in fallback_docs if doc.to_dict()]
+
+            target_data = random.choice(matched_photos)
+
+            # ─── 💎 フィールド名のズレを100%吸収する自動マッピング ───
+            flat_data = {str(k).lower(): v for k, v in target_data.items() if v}
+            title = flat_data.get('title') or flat_data.get('subject') or target_data.get('Title', '名作風景')
+            location = flat_data.get('location') or flat_data.get('area') or flat_data.get('place') or target_data.get('Location', '厳選撮影地')
+            author = flat_data.get('author') or flat_data.get('winner') or target_data.get('Author', '写真家')
+            camera = flat_data.get('camera_body') or flat_data.get('camera') or target_data.get('Camera_Body', '一眼レフ')
+            lens = flat_data.get('lens') or target_data.get('Lens', '標準レンズ')
+            
+            if flat_data.get('exposure'):
+                settings = flat_data.get('exposure')
+            else:
+                settings = f"F{flat_data.get('aperture', '-')} / ISO {flat_data.get('iso', '-')} / {flat_data.get('focal_length', '-')}mm"
+                
+            weather = flat_data.get('weather') or target_data.get('Weather', '晴れ')
+            guide = flat_data.get('guide_page') or flat_data.get('context_advice') or 'ルートナビ情報は本棚に大切に保管されています。'
+            judge_comment = flat_data.get('judge_comment_summary') or flat_data.get('logic_advice') or '画面全体の構成が実に見事な名作です。'
+
+            # 組み立てたまとめのカードUI
+            bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
+            
+            # 対話のまとめ文と、リッチなカードを同時に返信（最高のクロージング）
+            line_bot_api.reply_message(
+                reply_token,
+                [
+                    TextSendMessage(text=reply_text),
+                    FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json)
+                ]
+            )
+
     except Exception as e:
-        # 万が一の際もエラー内容を隠蔽せず、直接LINE画面に文字を吐き出させます
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"❌ 動作エラー詳細:\n{str(e)}"))
+        error_str = str(e)
+        print(f"🔥 Engine Crash Error:\n{traceback.format_exc()}")
+        # 複合インデックスが未作成の場合のみ、生成用のURLをLINEに流す親切デバッグ
+        if "https://console.firebase.google.com" in error_str:
+            url_start = error_str.find("https://console.firebase.google.com")
+            index_url = error_str[url_start:].split()[0]
+            msg = f"⚙️ Firestoreの複合インデックスの作成が必要です。\n以下のリンクを一度だけクリックして、インデックスを有効化してください：\n\n{index_url}"
+            try:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
+            except:
+                pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
