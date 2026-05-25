@@ -129,7 +129,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. 【新設】文字が大きくてシニアでも絶対に見やすい選択肢ボタンUI ---
+# --- 6. 【大文字・大ボタン仕様】視認性抜群のカスタム選択肢メニュー ---
 def create_大文字選択肢_ui(reply_text, quick_replies):
     buttons_contents = []
     for label in quick_replies:
@@ -137,7 +137,7 @@ def create_大文字選択肢_ui(reply_text, quick_replies):
             "type": "button",
             "action": {
                 "type": "message",
-                "label": label[:15],  # ボタンに表示される大きな文字
+                "label": label[:15],
                 "text": label
             },
             "style": "secondary",
@@ -156,7 +156,7 @@ def create_大文字選択肢_ui(reply_text, quick_replies):
                     "type": "text",
                     "text": reply_text,
                     "wrap": True,
-                    "size": "md",  # 逆質問の文字も大きく読みやすく
+                    "size": "md",
                     "color": "#111111",
                     "weight": "bold"
                 },
@@ -172,7 +172,7 @@ def create_大文字選択肢_ui(reply_text, quick_replies):
     return flex_bubble
 
 
-# --- 7. 対話エンジン ---
+# --- 7. 改良型対話エンジン：話題切り替え（リセット）自動追従システム ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
@@ -185,13 +185,28 @@ def handle_line_message(event):
     default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
+        # 🗄️ 過去の記憶のロード
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
         
+        is_new_topic = False
         if session_doc.exists:
             current_state = session_doc.to_dict()
-            current_state["turn_count"] = current_state.get("turn_count", 0) + 1
+            
+            # ─── ⚡ 【最重要】話題の急な方向転換を自動検知 ───
+            # 記憶が「長野」なのに、新しいメッセージに「山梨」や「静岡」が含まれていたら、古い記憶を強制破棄
+            past_pref = current_state.get("prefecture", "無し")
+            if past_pref != "無し" and past_pref != "特定不能":
+                # 格納されている「長野県」から「長野」を抽出
+                past_pref_short = past_pref.replace("県", "").replace("府", "").replace("都", "").replace("道", "")
+                if past_pref_short not in user_message and any(p in user_message for p in ["長野", "山梨", "静岡", "山形", "福島", "富士山"]):
+                    print(f"トピックの変更を検知しました: {past_pref_short} -> {user_message}")
+                    is_new_topic = True
         else:
+            is_new_topic = True
+
+        # 新しい話題、または新規対話ならステートを完全にリセット
+        if is_new_topic:
             current_state = {
                 "month": default_month,
                 "period": default_period,
@@ -199,6 +214,8 @@ def handle_line_message(event):
                 "subject": "無し",
                 "turn_count": 1
             }
+        else:
+            current_state["turn_count"] = current_state.get("turn_count", 0) + 1
 
         # AIによる文脈解釈
         system_prompt = f"""
@@ -214,10 +231,10 @@ def handle_line_message(event):
         本日の日付の前提は【 {default_month} {default_period} 】です。
 
         【対話ルール】
-        1. 簡潔さの徹底: 返信文（reply_text）は必ず【100文字以内】。前置きはすべて排除すること。
+        1. 簡潔さの徹底: 返信文（reply_text）は必ず【100文字以内】で、前置きなしでスマートに逆質問すること。
         2. 3ターン制限: 現在【 {current_state.get('turn_count')} 回目 】。
-           - 3回目のやり取り、または主要条件が揃った場合は必ず status を "COMPLETE" にすること。
-           - 1〜2回目は status を "ASK" にし、次の選択肢（最大4択、12文字以内）を quick_replies の配列に入れて提示すること。
+           - 3回目のラリー、または条件（都道府県と被写体）が揃った場合は必ず status を "COMPLETE" にすること。
+           - 1〜2回目は status を "ASK" にし、次の一手を絞るための大きな選択肢ボタン（最大4択、12文字以内）を quick_replies の配列に入れて提示すること。
         """
 
         intent_response = ai_client.chat.completions.create(
@@ -238,21 +255,20 @@ def handle_line_message(event):
         if current_state["turn_count"] >= 3:
             status = "COMPLETE"
 
+        # 最新の記憶をしっかり保存
         session_ref.set(updated_state)
 
-        # ─── 🔁 1〜2回目：大文字で見やすい「カスタムボタンメニュー」として送信 ───
+        # ─── 🔁 1〜2回目：大文字カスタムボタンメニューを最速送信 ───
         if status == "ASK":
-            # 選択肢が万が一空ならセーフティとして生成
             if not quick_replies:
-                quick_replies = ["次のステップへ"]
-                
+                quick_replies = ["次の候補を見る"]
             menu_json = create_大文字選択肢_ui(reply_text, quick_replies)
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_json))
+            line_bot_api.reply_message(event['replyToken'], FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_json))
             return
 
         # ─── 🎯 3回目（または確定時）：まとめとして極上のカードをドンと出す ───
         if status == "COMPLETE":
-            session_ref.delete()
+            session_ref.delete() # 対話完結のため記憶をクリア
 
             target_month = updated_state.get("month", default_month)
             target_period = updated_state.get("period", default_period)
@@ -298,7 +314,7 @@ def handle_line_message(event):
             
             closing_text = "ご要望を反映し、今回の撮影計画に最適な名作の書棚をまとめました。どうぞご高覧ください。"
             line_bot_api.reply_message(
-                reply_token,
+                event['replyToken'],
                 [
                     TextSendMessage(text=closing_text),
                     FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json)
@@ -306,15 +322,11 @@ def handle_line_message(event):
             )
 
     except Exception as e:
-        error_str = str(e)
-        if "https://console.firebase.google.com" in error_str:
-            url_start = error_str.find("https://console.firebase.google.com")
-            index_url = error_str[url_start:].split()[0]
-            msg = f"⚙️ Firestoreの複合インデックスの作成が必要です。\n以下のリンクを一度だけクリックして有効化してください：\n\n{index_url}"
-            try:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
-            except:
-                pass
+        # 万が一のエラー時も絶対に既読スルーにせず、強制的にメッセージを返して生存を維持する
+        try:
+            line_bot_api.reply_message(event['replyToken'], TextSendMessage(text=f"🔍 システム調整中:\n再度の入力をお試しいただくか、しばらくお待ちください。"))
+        except:
+            pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
