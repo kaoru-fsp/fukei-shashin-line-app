@@ -131,7 +131,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. 真の対話エンジン：記憶保持型コンシェルジュシステム ---
+# --- 6. 真の対話エンジン：3ターン制約・テンポ最優先型 ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
@@ -139,52 +139,46 @@ def handle_line_message(event):
     
     if db is None or not ai_client: return
 
-    # 本日の「月・旬」の自動判定（ベースライン）
+    # 時期の自動判定
     now = datetime.now()
     default_month = f"{now.month}月"
     default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
-        # ─── 🗄️ 記憶のロード: Firestoreからこのユーザーの現在の対話ステートを取得 ───
+        # ─── 🗄️ 記憶のロード（何回目の会話かもカウント） ───
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
         
         if session_doc.exists:
             current_state = session_doc.to_dict()
+            current_state["turn_count"] = current_state.get("turn_count", 0) + 1
         else:
-            current_state = {"month": default_month, "period": default_period, "prefecture": "無し", "subject": "無し"}
+            current_state = {
+                "month": default_month,
+                "period": default_period,
+                "prefecture": "無し",
+                "subject": "無し",
+                "turn_count": 1
+            }
 
-        # ─── 🤖 AIによる文脈解釈 ＆ ステート自動更新 ───
+        # ─── 🤖 AIによる文脈解釈 ＆ 3ターン強制クロージングプロンプト ───
         system_prompt = f"""
-        あなたは雑誌『風景写真』の読者（シニアの写真愛好家）をエスコートする、極めて品格のある対話型AIコンシェルジュです。
-        ユーザーは東京在住で、主にお車での移動（高速道路ルート）を想定しています。
+        あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。無駄な長文や、同じ質問の繰り返しは厳禁です。
 
-        【現在の検索ステート】
+        【現在の会話ステート】
         - 月: {current_state.get('month')}
         - 旬: {current_state.get('period')}
         - 都道府県: {current_state.get('prefecture')}
         - 被写体テーマ: {current_state.get('subject')}
+        - 今回の会話ターン数: {current_state.get('turn_count')} 回目 (最大3回)
 
-        本日の日付の前提は【 {default_month} {default_period} 】です。「明日」や「週末」という発言にはこの前提を適用してください。
+        本日の日付の前提は【 {default_month} {default_period} 】です。
 
-        【あなたの思考ミッション】
-        1. ユーザーの最新の発言（例：「新緑が良いな」「静岡側で」など）を読み解き、上記の検索ステートを更新してください。
-        2. 更新した結果、「都道府県」と「被写体テーマ」の双方が、撮影地を特定できるレベルにまで【具体的に絞り込まれたか】を判定してください。
-        3. 大雑把な段階（例：「長野に行きたい」「おすすめある？」など）では、絶対にすぐカードを出してはいけません。会話のラリーを続けるため、statusを"ASK"にし、次の絞り込みのための紳士的な「逆質問・提案」と、ユーザーが押しやすい具体的なボタンの選択肢（最大4択、15文字以内）を作成してください。
-        4. 条件が完全に揃った、またはユーザーの要望がピンポイントに収束したと判断した場合は、statusを"COMPLETE"にしてください。
-
-        必ず以下のJSONフォーマットのみで正確に出力してください。
-        {{
-          "status": "ASK" または "COMPLETE",
-          "updated_state": {{
-            "month": "○月",
-            "period": "〇旬",
-            "prefecture": "〇〇県 または 無し",
-            "subject": "〇〇（例：滝、茶畑、新緑、新幹線など） または 無し"
-          }},
-          "reply_text": "ユーザーへの紳士的なセリフ（ASKの場合は魅力的で具体的な逆質問、COMPLETEの場合は『かしこまりました。それでは条件に合う名作の書棚を開きます。』などの締めの言葉）",
-          "quick_replies": ["選択肢1", "選択肢2"] (ASKの場合のみ。COMPLETEの場合は空配列 [])
-        }}
+        【厳格な対話ルール】
+        1. 簡潔さの徹底: あなたの返信文（reply_text）は、必ず【100文字以内】で、スマートに要点だけを伝えてください。くどい挨拶や前置きはすべて廃止してください。
+        2. 3ターン制限: 現在のターン数は【 {current_state.get('turn_count')} 回目 】です。
+           - ターン数が 3 に達した場合、または主要な条件（都道府県と被写体）が概ね予測できた場合は、絶対に会話を引き延ばさず、必ず status を "COMPLETE" にして会話を締めくくってください。
+           - 1回目、2回目の大雑把な段階では、status を "ASK" にし、次の一手（中央道ルートか、東名ルートか等）をスパッと2〜4択のクイックリプライ（各12文字以内）で提案してください。
         """
 
         intent_response = ai_client.chat.completions.create(
@@ -197,53 +191,57 @@ def handle_line_message(event):
         ai_res = json.loads(intent_response.choices[0].message.content.strip())
         status = ai_res.get("status", "ASK")
         updated_state = ai_res.get("updated_state", current_state)
+        # ターン数を引き継ぐ
+        updated_state["turn_count"] = current_state["turn_count"]
+        
         reply_text = ai_res.get("reply_text", "どのような風景をお探しですか？")
         quick_replies = ai_res.get("quick_replies", [])
 
-        # 最新のステートを記憶（Firestoreへ上書き保存）
+        # 3回目のやり取りに達したら、何が何でも強制的にCOMPLETEにするセーフティ
+        if current_state["turn_count"] >= 3:
+            status = "COMPLETE"
+
+        # セッションを更新保存
         session_ref.set(updated_state)
 
-        # ─── 🔁 対話継続（ASK）モード: まだ絞り込み途中のため、逆質問ボタンを出して終了（カードは出さない） ───
+        # ─── 🔁 1〜2回目：端的な逆質問ボタンでテンポよく返す ───
         if status == "ASK":
             items = []
             for label in quick_replies:
                 items.append(QuickReplyButton(action=MessageAction(label=label[:15], text=label)))
-            
             q_reply = QuickReply(items=items) if items else None
             line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text, quick_reply=q_reply))
             return
 
-        # ─── 🎯 絞り込み完了（COMPLETE）モード: 最後のまとめとして極上のカードをドンと出す ───
+        # ─── 🎯 3回目（または収束時）：まとめとして極上のカードをドンと出す ───
         if status == "COMPLETE":
-            # 対話が完結したため、ユーザーのセッション記憶は綺麗にリセット（削除）
-            session_ref.delete()
+            session_ref.delete()  # 記憶をクリア
 
             target_month = updated_state.get("month", default_month)
             target_period = updated_state.get("period", default_period)
             target_pref = updated_state.get("prefecture", "無し")
             target_subject = updated_state.get("subject", "無し")
 
-            # あなたの設計通り、36分割マトリクス × 地域インデックスで一撃狙い撃ち
+            # 36分割マトリクス × 地域インデックス検索
             photos_ref = db.collection('Master_Photos')
             query = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period)
-            if target_pref != "無し":
+            if target_pref != "無し" and target_pref != "特定不能":
                 query = query.where('Prefecture', '==', target_pref)
                 
             docs = query.stream()
             matched_photos = [doc.to_dict() for doc in docs if doc.to_dict()]
             
-            # メモリ上での被写体（Subject）マッチング
             if target_subject != "無し" and matched_photos:
                 filtered = [p for p in matched_photos if (target_subject in str(p.values()))]
                 if filtered: matched_photos = filtered
             
             if not matched_photos:
-                fallback_docs = photos_ref.limit(5).stream()
+                fallback_docs = photos_ref.limit(10).stream()
                 matched_photos = [doc.to_dict() for doc in fallback_docs if doc.to_dict()]
 
             target_data = random.choice(matched_photos)
 
-            # ─── 💎 フィールド名のズレを100%吸収する自動マッピング ───
+            # 💎 フィールド名ズレ自動吸収マッピング
             flat_data = {str(k).lower(): v for k, v in target_data.items() if v}
             title = flat_data.get('title') or flat_data.get('subject') or target_data.get('Title', '名作風景')
             location = flat_data.get('location') or flat_data.get('area') or flat_data.get('place') or target_data.get('Location', '厳選撮影地')
@@ -257,29 +255,27 @@ def handle_line_message(event):
                 settings = f"F{flat_data.get('aperture', '-')} / ISO {flat_data.get('iso', '-')} / {flat_data.get('focal_length', '-')}mm"
                 
             weather = flat_data.get('weather') or target_data.get('Weather', '晴れ')
-            guide = flat_data.get('guide_page') or flat_data.get('context_advice') or 'ルートナビ情報は本棚に大切に保管されています。'
-            judge_comment = flat_data.get('judge_comment_summary') or flat_data.get('logic_advice') or '画面全体の構成が実に見事な名作です。'
+            guide = flat_data.get('guide_page') or flat_data.get('context_advice') or 'ルートナビ情報は本棚に保管されています。'
+            judge_comment = flat_data.get('judge_comment_summary') or flat_data.get('logic_advice') or '構図バランスが実に見事な名作です。'
 
-            # 組み立てたまとめのカードUI
             bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
             
-            # 対話のまとめ文と、リッチなカードを同時に返信（最高のクロージング）
+            # 締めの挨拶も短くスマートに
+            closing_text = "ご要望を反映し、今回の撮影計画に最適な名作の書棚をまとめました。どうぞご高覧ください。"
             line_bot_api.reply_message(
                 reply_token,
                 [
-                    TextSendMessage(text=reply_text),
+                    TextSendMessage(text=closing_text),
                     FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json)
                 ]
             )
 
     except Exception as e:
         error_str = str(e)
-        print(f"🔥 Engine Crash Error:\n{traceback.format_exc()}")
-        # 複合インデックスが未作成の場合のみ、生成用のURLをLINEに流す親切デバッグ
         if "https://console.firebase.google.com" in error_str:
             url_start = error_str.find("https://console.firebase.google.com")
             index_url = error_str[url_start:].split()[0]
-            msg = f"⚙️ Firestoreの複合インデックスの作成が必要です。\n以下のリンクを一度だけクリックして、インデックスを有効化してください：\n\n{index_url}"
+            msg = f"⚙️ Firestoreの複合インデックスの作成が必要です。\n以下のリンクを一度だけクリックして有効化してください：\n\n{index_url}"
             try:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
             except:
