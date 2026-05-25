@@ -12,6 +12,11 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
+# ==========================================================
+# 📸 【FUPC管理サーバー】画像閲覧用ベースURL（将来の移転時はここを変更）
+# ==========================================================
+IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
+
 # --- 1. LINE API の初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -48,13 +53,17 @@ def callback():
     return 'OK', 200
 
 
-# --- 5. 【完全維持】元の添削指導UI（Flex Message） ---
+# --- 5. 【完全維持 ＋ 本物の入賞作品画像対応】元の添削指導UI ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
+    # ※裏側で生成された、この名作固有の「fupcサーバーの画像URL」がグローバルまたは動的にheroへセットされます
+    global TARGET_IMAGE_URL
+    image_url = TARGET_IMAGE_URL if 'TARGET_IMAGE_URL' in globals() else "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
+
     flex_bubble = {
       "type": "bubble",
       "hero": {
         "type": "image",
-        "url": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80",
+        "url": image_url, # ➔ FUPCサーバーの文字入り閲覧用画像がここに美しく咲きます
         "size": "full",
         "aspectRatio": "20:13",
         "aspectMode": "cover"
@@ -172,8 +181,9 @@ def create_大文字選択肢_ui(reply_text, quick_replies):
     return flex_bubble
 
 
-# --- 7. 改良型対話エンジン：話題切り替え（リセット）自動追従システム ---
+# --- 7. 対話 ＆ 画像自動生成エンジン ---
 def handle_line_message(event):
+    global TARGET_IMAGE_URL
     user_id = event['source']['userId']
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
@@ -185,42 +195,28 @@ def handle_line_message(event):
     default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
-        # 🗄️ 過去の記憶のロード
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
         
         is_new_topic = False
         if session_doc.exists:
             current_state = session_doc.to_dict()
-            
-            # ─── ⚡ 【最重要】話題の急な方向転換を自動検知 ───
-            # 記憶が「長野」なのに、新しいメッセージに「山梨」や「静岡」が含まれていたら、古い記憶を強制破棄
             past_pref = current_state.get("prefecture", "無し")
             if past_pref != "無し" and past_pref != "特定不能":
-                # 格納されている「長野県」から「長野」を抽出
                 past_pref_short = past_pref.replace("県", "").replace("府", "").replace("都", "").replace("道", "")
                 if past_pref_short not in user_message and any(p in user_message for p in ["長野", "山梨", "静岡", "山形", "福島", "富士山"]):
-                    print(f"トピックの変更を検知しました: {past_pref_short} -> {user_message}")
                     is_new_topic = True
         else:
             is_new_topic = True
 
-        # 新しい話題、または新規対話ならステートを完全にリセット
         if is_new_topic:
-            current_state = {
-                "month": default_month,
-                "period": default_period,
-                "prefecture": "無し",
-                "subject": "無し",
-                "turn_count": 1
-            }
+            current_state = {"month": default_month, "period": default_period, "prefecture": "無し", "subject": "無し", "turn_count": 1}
         else:
             current_state["turn_count"] = current_state.get("turn_count", 0) + 1
 
-        # AIによる文脈解釈
+        # AIによるスマート文脈解釈
         system_prompt = f"""
         あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。
-
         【現在の会話ステート】
         - 月: {current_state.get('month')}
         - 旬: {current_state.get('period')}
@@ -228,13 +224,10 @@ def handle_line_message(event):
         - 被写体テーマ: {current_state.get('subject')}
         - 今回の会話ターン数: {current_state.get('turn_count')} 回目 (最大3回)
 
-        本日の日付の前提は【 {default_month} {default_period} 】です。
-
-        【対話ルール】
-        1. 簡潔さの徹底: 返信文（reply_text）は必ず【100文字以内】で、前置きなしでスマートに逆質問すること。
-        2. 3ターン制限: 現在【 {current_state.get('turn_count')} 回目 】。
-           - 3回目のラリー、または条件（都道府県と被写体）が揃った場合は必ず status を "COMPLETE" にすること。
-           - 1〜2回目は status を "ASK" にし、次の一手を絞るための大きな選択肢ボタン（最大4択、12文字以内）を quick_replies の配列に入れて提示すること。
+        【ルール】
+        1. 返信文は必ず【100文字以内】でスマートに逆質問すること。
+        2. 3回目のやり取り、または条件が揃った場合は必ず status を "COMPLETE" にすること。
+        3. 1〜2回目は status を "ASK" にし、見やすい大きな選択肢ボタンのテキスト（最大4択）を quick_replies に入れること。
         """
 
         intent_response = ai_client.chat.completions.create(
@@ -255,20 +248,18 @@ def handle_line_message(event):
         if current_state["turn_count"] >= 3:
             status = "COMPLETE"
 
-        # 最新の記憶をしっかり保存
         session_ref.set(updated_state)
 
-        # ─── 🔁 1〜2回目：大文字カスタムボタンメニューを最速送信 ───
+        # ─── 🔁 1〜2回目：大文字カスタムボタンメニューを最速送信（画像はまだ出さない） ───
         if status == "ASK":
-            if not quick_replies:
-                quick_replies = ["次の候補を見る"]
+            if not quick_replies: quick_replies = ["次の候補を見る"]
             menu_json = create_大文字選択肢_ui(reply_text, quick_replies)
             line_bot_api.reply_message(event['replyToken'], FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_json))
             return
 
-        # ─── 🎯 3回目（または確定時）：まとめとして極上のカードをドンと出す ───
+        # ─── 🎯 3回目（確定時）：まとめとして本物の入賞作品画像つき極上カードを出す ───
         if status == "COMPLETE":
-            session_ref.delete() # 対話完結のため記憶をクリア
+            session_ref.delete()
 
             target_month = updated_state.get("month", default_month)
             target_period = updated_state.get("period", default_period)
@@ -295,6 +286,23 @@ def handle_line_message(event):
 
             # フィールド名ズレ自動吸収マッピング
             flat_data = {str(k).lower(): v for k, v in target_data.items() if v}
+            
+            # ─── 🔗 【最重要】仕様書に準拠した「閲覧用画像URL」の動的生成 ───
+            published = flat_data.get('published') or target_data.get('Published')
+            pic_file_name = flat_data.get('picfilename') or flat_data.get('pic_file_name') or target_data.get('PicFileName')
+            
+            if published and pic_file_name:
+                pub_str = str(published).strip()
+                parent_dir = pub_str[:4] # 先頭4文字（年）
+                child_dir = pub_str      # 全体（子ディレクトリ）
+                file_name = str(pic_file_name).strip()
+                
+                # 末尾のスラッシュ重複を防ぎ、綺麗に結合
+                TARGET_IMAGE_URL = f"{IMAGE_BASE_VIEW.rstrip('/')}/{parent_dir}/{child_dir}/{file_name}"
+            else:
+                # 万が一データに画像名がない場合のセーフティ
+                TARGET_IMAGE_URL = "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
+
             title = flat_data.get('title') or flat_data.get('subject') or target_data.get('Title', '名作風景')
             location = flat_data.get('location') or flat_data.get('area') or flat_data.get('place') or target_data.get('Location', '厳選撮影地')
             author = flat_data.get('author') or flat_data.get('winner') or target_data.get('Author', '写真家')
@@ -322,7 +330,6 @@ def handle_line_message(event):
             )
 
     except Exception as e:
-        # 万が一のエラー時も絶対に既読スルーにせず、強制的にメッセージを返して生存を維持する
         try:
             line_bot_api.reply_message(event['replyToken'], TextSendMessage(text=f"🔍 システム調整中:\n再度の入力をお試しいただくか、しばらくお待ちください。"))
         except:
