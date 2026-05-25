@@ -46,7 +46,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 5. 本物のデータを美しく見せる Flex Message UI ---
+# --- 5. 【完全復元】元の添削指導UI（Flex Message）の組み立て ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
     flex_bubble = {
       "type": "bubble",
@@ -61,7 +61,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
         "type": "box",
         "layout": "vertical",
         "contents": [
-          {"type": "text", "text": "🏛️ 風景写真ライブラリー 厳選案内", "weight": "bold", "color": "#111111", "size": "sm"},
+          {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "sm"},
           {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "md", "wrap": True},
           {
             "type": "box",
@@ -74,8 +74,8 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
                 "layout": "baseline",
                 "spacing": "sm",
                 "contents": [
-                  {"type": "text", "text": "名作", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": f"「{title}」 ({author} 様 著)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                  {"type": "text", "text": "作品名", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
                 ]
               },
               {
@@ -83,7 +83,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
                 "layout": "baseline",
                 "spacing": "sm",
                 "contents": [
-                  {"type": "text", "text": "機材", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": "推奨機材", "color": "#aaaaaa", "size": "sm", "flex": 2},
                   {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
                 ]
               },
@@ -92,8 +92,8 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
                 "layout": "baseline",
                 "spacing": "sm",
                 "contents": [
-                  {"type": "text", "text": "設定", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": f"{settings} / 天候: {weather}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
+                  {"type": "text", "text": "撮影設定", "color": "#aaaaaa", "size": "sm", "flex": 2},
+                  {"type": "text", "text": settings, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
                 ]
               }
             ]
@@ -104,7 +104,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
             "layout": "vertical",
             "margin": "xxl",
             "contents": [
-              {"type": "text", "text": "📖 【この名作のコンテキスト（背景）】", "weight": "bold", "size": "md", "color": "#111111"},
+              {"type": "text", "text": "📖 【現地ナビ・アクセス】", "weight": "bold", "size": "md", "color": "#111111"},
               {"type": "text", "text": guide, "wrap": True, "size": "sm", "color": "#555555", "margin": "md"}
             ]
           },
@@ -117,7 +117,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
             "cornerRadius": "md",
             "paddingAll": "md",
             "contents": [
-              {"type": "text", "text": "💬 【プロのロジック・指導アドバイス】", "weight": "bold", "size": "md", "color": "#e67e22"},
+              {"type": "text", "text": "🎓 【レベルアップ相談室・添削指導】", "weight": "bold", "size": "md", "color": "#e67e22"},
               {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}
             ]
           }
@@ -127,7 +127,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. メイン処理：本物のマスター項目名にマッピング ---
+# --- 6. メイン処理：元の項目名（Location, Author等）を1ミリも変えずに完全合致 ---
 def handle_line_message(event):
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
@@ -136,70 +136,76 @@ def handle_line_message(event):
         return
 
     try:
-        # ─── 司書脳（LLM）ステップ1: 検索用の「正式な都道府県名」を抽出 ───
+        # OpenAIで入力文から適切な検索キーワードを特定
         intent_response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "ユーザーの文章から、関係する日本の『都道府県名』を正式名称（例：長野県、山梨県、千葉県）で1つだけ抽出してください。都道府県名が含まれない、または特定できない場合は「無し」とだけ出力してください。"},
+                {"role": "system", "content": "ユーザーの文章から、撮影地や被写体に関するキーワード（例：長野、富士山、桜など）を1つだけ抽出してください。"},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.0
         )
-        pref_keyword = intent_response.choices[0].message.content.strip()
+        keyword = intent_response.choices[0].message.content.strip()
         
         photos_ref = db.collection('Master_Photos')
         matched_photos = []
         
-        # ─── ステップ2: 実際のフィールド名「Area」から前方一致で確実に引き抜く ───
-        if pref_keyword != "無し":
-            # Firestoreの仕様に合わせた、高速かつ安全な前方一致クエリ（長野県から始まるデータをハント）
-            query = photos_ref.where('Area', '>=', pref_keyword).where('Area', '<=', pref_keyword + '\uf8ff').limit(100)
-            docs = query.stream()
-            matched_photos = [doc.to_dict() for doc in docs]
+        # タイムアウトとインデックスエラーを防ぐため、安全な上限数（500件）をロードして部分一致判定
+        search_limit_docs = photos_ref.limit(500).stream()
         
-        # 都道府県名がない、またはヒットしない場合は、「桜」や「富士山」などのキーワードで先頭1000件から部分一致検索
-        if not matched_photos:
-            fallback_docs = photos_ref.limit(1000).stream()
-            for doc in fallback_docs:
-                data = doc.to_dict()
-                db_area = str(data.get('Area', ''))
-                db_subject = str(data.get('Subject', ''))
-                if user_message in db_area or user_message in db_subject:
-                    matched_photos.append(data)
-                    if len(matched_photos) >= 50:
-                        break
+        for doc in search_limit_docs:
+            data = doc.to_dict()
+            db_loc = str(data.get('Location', ''))
+            db_title = str(data.get('Title', ''))
+            
+            # 【完全維持】元の項目名「Location」「Title」でキーワード判定
+            if keyword in db_loc or keyword in db_title or user_message in db_loc:
+                matched_photos.append(data)
+                if len(matched_photos) >= 10:
+                    break
         
-        # 完全に見つからない場合のセーフティ
+        # 万が一ヒットしない場合の安全策
         if not matched_photos:
-            random_docs = photos_ref.limit(10).stream()
-            matched_photos = [doc.to_dict() for doc in random_docs]
+            backup_docs = photos_ref.limit(5).stream()
+            matched_photos = [doc.to_dict() for doc in backup_docs]
 
-        # 確定した1件（本物のマスターデータ構造）
         target_data = random.choice(matched_photos)
 
-        # ─── ステップ3: 100%本物のデータだけを使って、誠実な案内文を作る ───
+        # ─── 【重要】元の項目名（フィールド名）を100%そのまま維持して抽出 ───
         title = target_data.get('Title', '無題')
-        area = target_data.get('Area', '不明な撮影地')
-        place = target_data.get('Place', '')
-        full_location = f"{area} {place}".strip() if (place and str(place) != 'nan') else area
-        winner = target_data.get('Winner', '不明')
+        location = target_data.get('Location', '不明な撮影地')
+        author = target_data.get('Author', '不明')
+        camera = target_data.get('Camera_Body', '情報なし')
+        lens = target_data.get('Lens', '情報なし')
         
+        aperture = target_data.get('Aperture', '-')
+        iso = target_data.get('ISO', '-')
+        focal = target_data.get('Focal_Length', '-')
+        settings = f"F{aperture} / ISO {iso} / {focal}mm"
+        
+        weather = target_data.get('Weather', '不明')
+        guide = target_data.get('Guide_Page', 'ナビ情報は現在準備中です。')
+        judge_comment = target_data.get('Judge_Comment_Summary', '審査員アドバイスは現在準備中です。')
+
+        # ─── 元の事実データのみをAIに渡し、中身の詰まった具体的な案内文を作らせる ───
         system_prompt = """
         あなたは雑誌『風景写真』のライブラリー司書です。
-        与えられた【ライブラリーのデータ】の事実のみを基にして、丁寧な口調で案内を作ってください。
-        データが「不明」となっているものは、嘘をついて捏造せず、正直に情報がない旨を伝えてください。
+        与えられた【データ】の事実（作品名、撮影地、作者名、機材設定など）を必ず文章の中に具体的に盛り込んで、
+        シニア写真愛好家の方へ向けた、丁寧で役に立つ案内文を作成してください。
+        データが「情報なし」や「準備中」となっている場合は、正直にその旨を伝えてください。
         """
         
         user_prompt = f"""
-        【ライブラリーのデータ】
+        【データ】
         ・作品名: 「{title}」
-        ・撮影地: {full_location}
-        ・作者: {winner} 様
-        ・被写体要素: {target_data.get('Subject', '')}
+        ・撮影地: {location}
+        ・作者: {author} 様
+        ・推奨機材: {camera} ({lens})
+        ・撮影設定: {settings}
         
         ユーザーの問いかけ: 「{user_message}」
         
-        上記の「作品名」「撮影地」「作者名」を必ず文章の中に明記して、150文字程度で案内文を作成してください。最後は「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
+        上記の具体的な情報をしっかりと文章に含めて、150文字程度の案内文を作ってください。最後は「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
         """
         
         response = ai_client.chat.completions.create(
@@ -212,26 +218,14 @@ def handle_line_message(event):
         )
         司書のメッセージ = response.choices[0].message.content
 
-        # ─── ステップ4: カードUIへ本物の項目（Camera, Lens, Exposureなど）をマッピング ───
-        camera = target_data.get('Camera', '情報なし')
-        lens = target_data.get('Lens', '情報なし')
-        settings = target_data.get('Exposure', '情報なし')  # CSVの「f16 1/250秒」などの文字列がそのまま入ります
-        weather = target_data.get('Weather', '不明')
-        
-        # アドバイス項目のマッピング
-        guide = target_data.get('Context_Advice', 'バックエンド・アクセスナビ情報は現在準備中です。')
-        if not guide or str(guide) == 'nan': guide = 'バックエンド・アクセスナビ情報は現在準備中です。'
-        
-        judge_comment = target_data.get('Logic_Advice', 'プロによる作画ロジック・添削指導データは現在準備中です。')
-        if not judge_comment or str(judge_comment) == 'nan': judge_comment = 'プロによる作画ロジック・添削指導データは現在準備中です。'
-        
-        bubble_json = create_添削_ui(full_location, title, winner, camera, lens, settings, weather, guide, judge_comment)
+        # ─── LINEへ返信 ───
+        bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
         
         line_bot_api.reply_message(
             reply_token,
             [
                 TextSendMessage(text=司書のメッセージ),
-                FlexSendMessage(alt_text="風景写真ライブラリー案内レポート", contents=bubble_json)
+                FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json)
             ]
         )
             
