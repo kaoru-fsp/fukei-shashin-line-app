@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import traceback  # エラーの発生行を特定するためのパーツ
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
@@ -15,7 +16,7 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# --- 2. OpenAI API の初期化（揺らぎを構造化データに切り出すプロとして使用） ---
+# --- 2. OpenAI API の初期化 ---
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 ai_client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -128,7 +129,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. 真のロジック：AIによる「揺らぎキーワード切り出し」×「高精度マトリクス検索」 ---
+# --- 6. メイン処理：エラー発生時にすべてをLINEへ暴露するデバッグ版クエリ ---
 def handle_line_message(event):
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
@@ -137,7 +138,7 @@ def handle_line_message(event):
         return
 
     try:
-        # システム側のリアルタイムな「本日」の基準を生成
+        # 時期の基準を生成
         now = datetime.now()
         default_month = f"{now.month}月"
         if now.day <= 10:
@@ -147,23 +148,12 @@ def handle_line_message(event):
         else:
             default_period = "下旬"
 
-        # ─── 🤖 AI（OpenAI）による究極の「揺らぎ切り出し」ミッション ───
+        # AIによる「揺らぎ切り出し」
         system_prompt = f"""
-        あなたはユーザーの曖昧な発話から、データベース検索に必要な4つのキーワードを正確に切り出す天才データアナリストです。
-        本日の日付は【 {default_month} {default_period} 】です。これを大前提として以下のルールに従って解析してください。
-
-        【出力フォーマット】
-        必ず以下の4つの要素を、指定された形式の「カンマ区切り」のみで出力してください。余計な説明文は一切排除してください。
+        ユーザーの文章から、データベース検索に必要な4つのキーワードを正確に切り出してください。
+        本日の日付は大前提として【 {default_month} {default_period} 】です。
+        必ず以下の4つの要素を、指定された形式の「カンマ区切り」のみで出力してください。
         月,旬,都道府県名,被写体
-
-        【ルール】
-        1. 月: ユーザーが月を指定していれば「○月」、無ければ本日の前提である「{default_month}」を出力。
-        2. 旬: ユーザーが初/中/下旬を指定していれば「初旬」「中旬」「下旬」のいずれか、無ければ本日の前提である「{default_period}」を出力。
-        3. 都道府県名: ユーザーの発話（例：長野、富士山の山梨側など）から、該当する正式な日本の都道府県名を1つ特定して出力。特定できなければ「無し」。
-        4. 被写体: 撮影したいテーマ（例：滝、新緑、桜、新幹線など）を1単語で抽出。無ければ「無し」。
-
-        出力例1（明日どこかおすすめ？の場合）: {default_month},{default_period},無し,無し
-        出力例2（来週中央道で富士山の方に行くの場合）: {default_month},下旬,山梨県,富士山
         """
 
         intent_response = ai_client.chat.completions.create(
@@ -175,44 +165,36 @@ def handle_line_message(event):
             temperature=0.0
         )
         
-        # AIの解析結果を分解
         ai_output = intent_response.choices[0].message.content.strip()
-        print(f"AI Extraction Result: {ai_output}") # ログで確認用
         extracted_parts = [p.strip() for p in ai_output.split(",")]
         
-        # 安全に要素をマッピング（パース崩れ対策）
         target_month = extracted_parts[0] if len(extracted_parts) > 0 else default_month
         target_period = extracted_parts[1] if len(extracted_parts) > 1 else default_period
         target_pref = extracted_parts[2] if len(extracted_parts) > 2 else "無し"
         target_subject = extracted_parts[3] if len(extracted_parts) > 3 else "無し"
 
-        # ─── 🎯 インデックスによる高精度な狙い撃ち検索 ───
+        # 36分割マトリクス検索
         photos_ref = db.collection('Master_Photos')
-        
-        # 1年＝36分割マトリクスによる一次絞り込み（これで数百件に自動収束）
         query = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period)
         
-        # AIが「都道府県」を特定できていれば、さらにクエリを重ねて数十件レベルに完全ロック
         if target_pref != "無し":
             query = query.where('Prefecture', '==', target_pref)
             
         docs = query.stream()
         matched_photos = [doc.to_dict() for doc in docs if doc.to_dict()]
         
-        # 被写体（Subject）のキーワード絞り込み（メモリ上での高速突合）
         if target_subject != "無し" and matched_photos:
             filtered = [p for p in matched_photos if (target_subject in str(p.get('Location', '')) or target_subject in str(p.get('Title', '')))]
             if filtered:
                 matched_photos = filtered
         
-        # 万が一、条件に合致する写真が1件もない場合のセーフティ（全体からランダム）
         if not matched_photos:
             fallback_docs = photos_ref.limit(5).stream()
             matched_photos = [doc.to_dict() for doc in fallback_docs]
 
         target_data = random.choice(matched_photos)
 
-        # ─── 💎 元コードの「項目名」を100%そのまま使用してマッピング ───
+        # 項目マッピング
         title = target_data.get('Title', '無題')
         location = target_data.get('Location', '不明な撮影地')
         author = target_data.get('Author', '不明')
@@ -228,23 +210,20 @@ def handle_line_message(event):
         guide = target_data.get('Guide_Page', 'ナビ情報は現在準備中です。')
         judge_comment = target_data.get('Judge_Comment_Summary', '審査員アドバイスは現在準備中です。')
         
-        # 結果を最速で返却
         bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
         line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="撮影地コンシェルジュレポート", contents=bubble_json))
             
     except Exception as e:
-        error_str = str(e)
-        print(f"Query Error: {error_str}")
+        # ─── 🚨 【ブラックボックス解体】生のエラーログと行番号をLINEに直接叩きつける ───
+        raw_error_trace = traceback.format_exc()
+        print(f"🔥 サーバー側検出エラー:\n{raw_error_trace}")
         
-        # 複合インデックス未作成の場合、Firebaseコンソールの自動生成URLをLINEに直接吐き出す親切デバッグ仕様
-        if "https://console.firebase.google.com" in error_str:
-            url_start = error_str.find("https://console.firebase.google.com")
-            index_url = error_str[url_start:].split()[0]
-            msg = f"⚙️ Firestoreの複合インデックス設定が必要です。\n以下のURLを1回クリックして、インデックスを作成してください。数分で開通します：\n\n{index_url}"
-        else:
-            msg = f"❌ システムエラー詳細:\n{error_str}\n※OpenAIの残高（クレジット事前チャージ）が切れていないか、アカウント設定をご確認ください。"
-            
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
+        debug_message = (
+            "⚠️ 【稼働エラーを検知しました】\n"
+            "言い訳を排除し、現在の生のシステムエラー内容を出力します。この画面をそのまま教えてください：\n\n"
+            f"{raw_error_trace}"
+        )
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=debug_message))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
