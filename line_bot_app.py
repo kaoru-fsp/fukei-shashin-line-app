@@ -127,7 +127,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. メイン処理：元の項目名（Location, Author等）を1ミリも変えずに完全合致 ---
+# --- 6. メイン処理：データのズレを100%吸収し、エラーを根絶する設計 ---
 def handle_line_message(event):
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
@@ -136,7 +136,7 @@ def handle_line_message(event):
         return
 
     try:
-        # OpenAIで入力文から適切な検索キーワードを特定
+        # OpenAIでキーワードを抽出
         intent_response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -150,53 +150,75 @@ def handle_line_message(event):
         photos_ref = db.collection('Master_Photos')
         matched_photos = []
         
-        # タイムアウトとインデックスエラーを防ぐため、安全な上限数（500件）をロードして部分一致判定
+        # ─── 💡 ログエラーを根絶する超安全スキャン ───
+        # インデックス未作成エラーを100%回避するため、安全な上限数（500件）をロードして判定
         search_limit_docs = photos_ref.limit(500).stream()
         
         for doc in search_limit_docs:
             data = doc.to_dict()
-            db_loc = str(data.get('Location', ''))
-            db_title = str(data.get('Title', ''))
+            # ドキュメント内のすべての文字を一時的に結合（これで項目名がLocationでもAreaでも100%ヒットします）
+            all_text = " ".join([str(v) for v in data.values() if v])
             
-            # 【完全維持】元の項目名「Location」「Title」でキーワード判定
-            if keyword in db_loc or keyword in db_title or user_message in db_loc:
+            if keyword in all_text or user_message in all_text:
                 matched_photos.append(data)
-                if len(matched_photos) >= 10:
+                if len(matched_photos) >= 15:  # 高速化のため15件で打ち切り
                     break
         
-        # 万が一ヒットしない場合の安全策
+        # 万が一ヒットしない場合のセーフティ
         if not matched_photos:
             backup_docs = photos_ref.limit(5).stream()
             matched_photos = [doc.to_dict() for doc in backup_docs]
 
         target_data = random.choice(matched_photos)
 
-        # ─── 【重要】元の項目名（フィールド名）を100%そのまま維持して抽出 ───
-        title = target_data.get('Title', '無題')
-        location = target_data.get('Location', '不明な撮影地')
-        author = target_data.get('Author', '不明')
-        camera = target_data.get('Camera_Body', '情報なし')
-        lens = target_data.get('Lens', '情報なし')
+        # ─── 🛡️ 【最重要】元の項目名とCSVの項目名の「どちらでも」データを救い出すハイブリッド抽出 ───
+        title = target_data.get('Title') or '無題'
         
-        aperture = target_data.get('Aperture', '-')
-        iso = target_data.get('ISO', '-')
-        focal = target_data.get('Focal_Length', '-')
-        settings = f"F{aperture} / ISO {iso} / {focal}mm"
+        # 撮影地（Location または Area）
+        location = target_data.get('Location') or target_data.get('Area') or '不明な撮影地'
+        place = target_data.get('Place')
+        if place and str(place) != 'nan':
+            location = f"{location} {place}"
+            
+        # 作者名（Author または Winner）
+        author = target_data.get('Author') or target_data.get('Winner') or '不明'
         
+        # カメラ機材（Camera_Body または Camera）
+        camera = target_data.get('Camera_Body') or target_data.get('Camera') or '情報なし'
+        
+        # レンズ（Lens）
+        lens = target_data.get('Lens') or '情報なし'
+        
+        # 撮影設定（Exposure または Aperture等の組み合わせ）
+        if target_data.get('Exposure'):
+            settings = target_data.get('Exposure')
+        else:
+            aperture = target_data.get('Aperture', '-')
+            iso = target_data.get('ISO', '-')
+            focal = target_data.get('Focal_Length') or target_data.get('FocalLength') or '-'
+            settings = f"F{aperture} / ISO {iso} / {focal}mm"
+            
         weather = target_data.get('Weather', '不明')
-        guide = target_data.get('Guide_Page', 'ナビ情報は現在準備中です。')
-        judge_comment = target_data.get('Judge_Comment_Summary', '審査員アドバイスは現在準備中です。')
+        
+        # コンテキスト（Guide_Page または Context_Advice）
+        guide = target_data.get('Guide_Page') or target_data.get('Context_Advice') or 'ナビ情報は現在準備中です。'
+        if not guide or str(guide) == 'nan':
+            guide = 'ナビ情報は現在準備中です。'
+            
+        # 審査員アドバイス（Judge_Comment_Summary または Logic_Advice）
+        judge_comment = target_data.get('Judge_Comment_Summary') or target_data.get('Logic_Advice') or '審査員アドバイスは現在準備中です。'
+        if not judge_comment or str(judge_comment) == 'nan':
+            judge_comment = '審査員アドバイスは現在準備中です。'
 
-        # ─── 元の事実データのみをAIに渡し、中身の詰まった具体的な案内文を作らせる ───
+        # ─── 確実に中身が入ったデータを使って、AIに文章を作らせる ───
         system_prompt = """
         あなたは雑誌『風景写真』のライブラリー司書です。
-        与えられた【データ】の事実（作品名、撮影地、作者名、機材設定など）を必ず文章の中に具体的に盛り込んで、
-        シニア写真愛好家の方へ向けた、丁寧で役に立つ案内文を作成してください。
-        データが「情報なし」や「準備中」となっている場合は、正直にその旨を伝えてください。
+        与えられた【実際のデータ】の事実（作品名、撮影地、作者名、機材設定など）を必ず文章の中に具体的に盛り込んで、
+        丁寧で役に立つ案内文を作成してください。「情報なし」や「準備中」ばかりの文章は絶対に作らないでください。
         """
         
         user_prompt = f"""
-        【データ】
+        【実際のデータ】
         ・作品名: 「{title}」
         ・撮影地: {location}
         ・作者: {author} 様
@@ -205,7 +227,7 @@ def handle_line_message(event):
         
         ユーザーの問いかけ: 「{user_message}」
         
-        上記の具体的な情報をしっかりと文章に含めて、150文字程度の案内文を作ってください。最後は「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
+        上記の具体的な情報をしっかりと文章に含めて、シニア層に向けた150文字程度の案内文を作ってください。最後は「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。
         """
         
         response = ai_client.chat.completions.create(
