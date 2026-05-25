@@ -5,9 +5,7 @@ import traceback
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
-from linebot.models import (
-    TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction
-)
+from linebot.models import TextSendMessage, FlexSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
@@ -131,7 +129,50 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     return flex_bubble
 
 
-# --- 6. 真の対話エンジン：3ターン制約・テンポ最優先型 ---
+# --- 6. 【新設】文字が大きくてシニアでも絶対に見やすい選択肢ボタンUI ---
+def create_大文字選択肢_ui(reply_text, quick_replies):
+    buttons_contents = []
+    for label in quick_replies:
+        buttons_contents.append({
+            "type": "button",
+            "action": {
+                "type": "message",
+                "label": label[:15],  # ボタンに表示される大きな文字
+                "text": label
+            },
+            "style": "secondary",
+            "color": "#f0f0f0",
+            "margin": "sm"
+        })
+        
+    flex_bubble = {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": reply_text,
+                    "wrap": True,
+                    "size": "md",  # 逆質問の文字も大きく読みやすく
+                    "color": "#111111",
+                    "weight": "bold"
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "xs",
+                    "contents": buttons_contents
+                }
+            ]
+        }
+    }
+    return flex_bubble
+
+
+# --- 7. 対話エンジン ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
@@ -139,13 +180,11 @@ def handle_line_message(event):
     
     if db is None or not ai_client: return
 
-    # 時期の自動判定
     now = datetime.now()
     default_month = f"{now.month}月"
     default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
 
     try:
-        # ─── 🗄️ 記憶のロード（何回目の会話かもカウント） ───
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
         
@@ -161,9 +200,9 @@ def handle_line_message(event):
                 "turn_count": 1
             }
 
-        # ─── 🤖 AIによる文脈解釈 ＆ 3ターン強制クロージングプロンプト ───
+        # AIによる文脈解釈
         system_prompt = f"""
-        あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。無駄な長文や、同じ質問の繰り返しは厳禁です。
+        あなたは雑誌『風景写真』の格調高いAIコンシェルジュです。
 
         【現在の会話ステート】
         - 月: {current_state.get('month')}
@@ -174,11 +213,11 @@ def handle_line_message(event):
 
         本日の日付の前提は【 {default_month} {default_period} 】です。
 
-        【厳格な対話ルール】
-        1. 簡潔さの徹底: あなたの返信文（reply_text）は、必ず【100文字以内】で、スマートに要点だけを伝えてください。くどい挨拶や前置きはすべて廃止してください。
-        2. 3ターン制限: 現在のターン数は【 {current_state.get('turn_count')} 回目 】です。
-           - ターン数が 3 に達した場合、または主要な条件（都道府県と被写体）が概ね予測できた場合は、絶対に会話を引き延ばさず、必ず status を "COMPLETE" にして会話を締めくくってください。
-           - 1回目、2回目の大雑把な段階では、status を "ASK" にし、次の一手（中央道ルートか、東名ルートか等）をスパッと2〜4択のクイックリプライ（各12文字以内）で提案してください。
+        【対話ルール】
+        1. 簡潔さの徹底: 返信文（reply_text）は必ず【100文字以内】。前置きはすべて排除すること。
+        2. 3ターン制限: 現在【 {current_state.get('turn_count')} 回目 】。
+           - 3回目のやり取り、または主要条件が揃った場合は必ず status を "COMPLETE" にすること。
+           - 1〜2回目は status を "ASK" にし、次の選択肢（最大4択、12文字以内）を quick_replies の配列に入れて提示すること。
         """
 
         intent_response = ai_client.chat.completions.create(
@@ -191,38 +230,35 @@ def handle_line_message(event):
         ai_res = json.loads(intent_response.choices[0].message.content.strip())
         status = ai_res.get("status", "ASK")
         updated_state = ai_res.get("updated_state", current_state)
-        # ターン数を引き継ぐ
         updated_state["turn_count"] = current_state["turn_count"]
         
         reply_text = ai_res.get("reply_text", "どのような風景をお探しですか？")
         quick_replies = ai_res.get("quick_replies", [])
 
-        # 3回目のやり取りに達したら、何が何でも強制的にCOMPLETEにするセーフティ
         if current_state["turn_count"] >= 3:
             status = "COMPLETE"
 
-        # セッションを更新保存
         session_ref.set(updated_state)
 
-        # ─── 🔁 1〜2回目：端的な逆質問ボタンでテンポよく返す ───
+        # ─── 🔁 1〜2回目：大文字で見やすい「カスタムボタンメニュー」として送信 ───
         if status == "ASK":
-            items = []
-            for label in quick_replies:
-                items.append(QuickReplyButton(action=MessageAction(label=label[:15], text=label)))
-            q_reply = QuickReply(items=items) if items else None
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text, quick_reply=q_reply))
+            # 選択肢が万が一空ならセーフティとして生成
+            if not quick_replies:
+                quick_replies = ["次のステップへ"]
+                
+            menu_json = create_大文字選択肢_ui(reply_text, quick_replies)
+            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_json))
             return
 
-        # ─── 🎯 3回目（または収束時）：まとめとして極上のカードをドンと出す ───
+        # ─── 🎯 3回目（または確定時）：まとめとして極上のカードをドンと出す ───
         if status == "COMPLETE":
-            session_ref.delete()  # 記憶をクリア
+            session_ref.delete()
 
             target_month = updated_state.get("month", default_month)
             target_period = updated_state.get("period", default_period)
             target_pref = updated_state.get("prefecture", "無し")
             target_subject = updated_state.get("subject", "無し")
 
-            # 36分割マトリクス × 地域インデックス検索
             photos_ref = db.collection('Master_Photos')
             query = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period)
             if target_pref != "無し" and target_pref != "特定不能":
@@ -241,7 +277,7 @@ def handle_line_message(event):
 
             target_data = random.choice(matched_photos)
 
-            # 💎 フィールド名ズレ自動吸収マッピング
+            # フィールド名ズレ自動吸収マッピング
             flat_data = {str(k).lower(): v for k, v in target_data.items() if v}
             title = flat_data.get('title') or flat_data.get('subject') or target_data.get('Title', '名作風景')
             location = flat_data.get('location') or flat_data.get('area') or flat_data.get('place') or target_data.get('Location', '厳選撮影地')
@@ -260,7 +296,6 @@ def handle_line_message(event):
 
             bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
             
-            # 締めの挨拶も短くスマートに
             closing_text = "ご要望を反映し、今回の撮影計画に最適な名作の書棚をまとめました。どうぞご高覧ください。"
             line_bot_api.reply_message(
                 reply_token,
