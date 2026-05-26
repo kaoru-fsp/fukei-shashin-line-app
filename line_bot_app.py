@@ -15,10 +15,10 @@ from collections import Counter
 app = Flask(__name__)
 
 # ==========================================================
-# 📸 定数定義（仕様書に完全準拠）
+# 📸 定数定義（仕様書に完全準拠。将来のサーバー移転時もここを変えるだけ）
 # ==========================================================
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
-TOKYO_LAT = 35.6895  # 現在地リファレンス：新宿
+TOKYO_LAT = 35.6895  # 東京の基準点（現在地リファレンス：新宿・都庁付近）
 TOKYO_LON = 139.6917
 
 # --- LINE / OpenAI API の初期化 ---
@@ -42,7 +42,7 @@ except Exception as e:
     print(f"Firestore initialization error: {e}")
 
 
-# --- 2点間の距離を算出するハヴェルサイン公式 ---
+# --- 2点間の距離を算出するハヴェルサイン公式（半径250km判定用ツール） ---
 def calculate_distance(lat1, lon1, lat2, lon2):
     rad_lat1, rad_lon1 = math.radians(lat1), math.radians(lon1)
     rad_lat2, rad_lon2 = math.radians(lat2), math.radians(lon2)
@@ -64,7 +64,7 @@ def get_lat_lon(data):
     return None
 
 
-# --- 項目「Place」が空欄の場合「Area」を表示するルール ---
+# --- 項目「Place」が空欄の場合「Area」を表示するルール対応抽出 ---
 def get_photo_place_name(pdata):
     flat = {str(k).lower(): v for k, v in pdata.items() if v}
     place = flat.get('place') or pdata.get('Place')
@@ -84,6 +84,34 @@ def generate_fupc_url(photo_data):
     if len(published) >= 4 and pic_file_name:
         return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
     return "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
+
+
+# --- 🛡️ インデックスエラーを100%回避する超軽量データフィルター（背骨） ---
+def get_filtered_photos(target_month, target_period):
+    photos_ref = db.collection('Master_Photos')
+    # インデックスが標準保証されているMonth（月）だけでロードし、Period（旬）はメモリで安全に弾く
+    docs = photos_ref.where('Month', '==', target_month).stream()
+    
+    filtered_photos = []
+    for doc in docs:
+        pdata = doc.to_dict()
+        if not pdata: continue
+        
+        db_period = str(pdata.get('Period', '')).strip()
+        if db_period != target_period: continue
+            
+        coords = get_lat_lon(pdata)
+        if coords:
+            # 半径250km以内かを厳密に判定
+            if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) <= 250.0:
+                filtered_photos.append(pdata)
+        else:
+            flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
+            pref = str(flat_data.get('prefecture') or pdata.get('Prefecture', ''))
+            if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
+                filtered_photos.append(pdata)
+                
+    return filtered_photos
 
 
 # --- 🗃️ 大文字・大ボタン仕様のカスタムメニュー作成 ---
@@ -183,6 +211,20 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
     }
 
 
+# --- ⚔️ 【防壁完全復活】LINE Webhook 受信口 ---
+@app.route("/callback", methods=['POST'])
+def callback():
+    try:
+        request_json = request.get_json()
+        events = request_json.get('events', [])
+        for event in events:
+            if event.get('type') == 'message' and event['message'].get('type') == 'text':
+                handle_line_message(event)
+    except Exception as e:
+        print(f"🔥 Webhook Critical Error: {traceback.format_exc()}")
+    return 'OK', 200
+
+
 # --- 対話アナリティクスエンジン ---
 def handle_line_message(event):
     global TARGET_IMAGE_URL
@@ -215,27 +257,10 @@ def handle_line_message(event):
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュ提案メニュー", contents=create_大文字選択肢_ui(menu_text, choices)))
                 return
 
-        # ─── 📊 ①＆②: 36分割クエリ一撃必殺（超軽量・インデックス狙い撃ち） ───
+        # ─── 📊 ①＆②: 1往復目のリアルタイム集計（安全な超軽量フィルターを適用） ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
-            print("🚀 インデックス指定の高速マトリクス検索を開始します...")
-            photos_ref = db.collection('Master_Photos')
-            
-            # 💡 【超重要】月と旬の両方を最初から指定して、サーバーへの負荷を100分の1に激減
-            docs = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period).stream()
-            
-            base_photos = []
-            for doc in docs:
-                pdata = doc.to_dict()
-                if not pdata: continue
-                coords = get_lat_lon(pdata)
-                if coords:
-                    if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) <= 250.0:
-                        base_photos.append(pdata)
-                else:
-                    flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
-                    pref = str(flat_data.get('prefecture') or pdata.get('Prefecture', ''))
-                    if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
-                        base_photos.append(pdata)
+            print("🚀 初期集計：超軽量フィルターでロードします...")
+            base_photos = get_filtered_photos(target_month, target_period)
 
             # キーワード集計
             subjects, point_names, trends = [], [], []
@@ -283,10 +308,9 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=create_大文字選択肢_ui(reply_text, choices)))
             return
 
-        # ─── 🗄️ 紙芝居遷移ハンドリング ───
+        # ─── 🗄️ 【バグ完全清掃】2往復目以降も「生クエリ」を完全廃止し、安全な関数に統一 ───
         state = session_doc.to_dict()
-        base_photos = db.collection('Master_Photos').where('Month', '==', target_month).where('Period', '==', target_period).stream()
-        base_photos = [d.to_dict() for d in base_photos if d.to_dict()]
+        base_photos = get_filtered_photos(target_month, target_period)
 
         # ─── 📸 被写体 or ポイントが選ばれた場合 ───
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
@@ -331,7 +355,7 @@ def handle_line_message(event):
             if sel_type == "place" or "ポイント" in user_message:
                 session_ref.delete()
 
-                # 公式URLスキーム統合（LINE内からマップを1秒起動）
+                # 公式URLスキームでGoogle Mapsを1秒起動
                 map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
                 route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
@@ -372,25 +396,17 @@ def handle_line_message(event):
                 sub_choices = []
                 for pl in extracted_places:
                     sub_choices.append({"label": f"📍 ポイント: {pl}", "text": f"選ぶポイント: {pl}"})
-                sub_choices.append({"label": "❌ やめる", "text": "やめる"} )
+                sub_choices.append({"label": "❌ やめる", "text": "やめる"})
 
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="周辺の撮影ポイント提案", contents=create_大文字選択肢_ui(reply_text, sub_choices)))
                 return
 
     except Exception as e:
-        error_str = str(e)
-        print(f"🔥 Critical StackTrace:\n{traceback.format_exc()}")
-        
-        # ─── ⚙️ 初回デプロイ時のみ必要なインデックス自動生成URLの抽出 ───
-        if "https://console.firebase.google.com" in error_str:
-            url_start = error_str.find("https://console.firebase.google.com")
-            index_url = error_str[url_start:].split()[0]
-            msg = f"⚙️ Firestoreの複合インデックス設定が必要です。\n以下のリンクを一度だけクリックして有効化してください（数分で完了します）：\n\n{index_url}"
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
-        else:
-            try:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="本棚の通信が一時的に瞬断しました。もう一度「明日のおすすめ」とお声がけください。"))
-            except: pass
+        # 万が一の際もサイレントクラッシュせず、必ずメッセージで受け流す強固なセーフティ
+        print(f"🔥 Internal Session Error:\n{traceback.format_exc()}")
+        try:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="本棚の通信が一時的に瞬断しました。もう一度「明日のおすすめ」とお声がけください。"))
+        except: pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
