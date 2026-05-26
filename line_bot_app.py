@@ -1,13 +1,26 @@
 import os
 import json
+import random
+import math
 import traceback
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
-from linebot.models import TextSendMessage
+from linebot.models import (
+    TextSendMessage, FlexSendMessage, BubbleContainer, CarouselContainer
+)
 import firebase_admin
 from firebase_admin import credentials, firestore
+from collections import Counter
 
 app = Flask(__name__)
+
+# ==========================================================
+# 📸 定数定義（仕様書に完全準拠・東京の現在地リファレンス）
+# ==========================================================
+IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
+TOKYO_LAT = 35.6895  # 現在地リファレンス：新宿・東京都庁周辺
+TOKYO_LON = 139.6917
 
 # --- LINE API の初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
@@ -22,58 +35,74 @@ try:
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
+        print("Firestore initialized successfully.")
 except Exception as e:
-    pass
+    print(f"Firestore initialization error: {e}")
 
-@app.route("/callback", methods=['POST'])
-def callback():
-    try:
-        request_json = request.get_json()
-        events = request_json.get('events', [])
-        for event in events:
-            if event.get('type') == 'message' and event['message'].get('type') == 'text':
-                handle_line_message(event)
-    except Exception as e:
-        print(f"🔥 Webhook Error: {traceback.format_exc()}")
-    return 'OK', 200
 
-def handle_line_message(event):
-    reply_token = event['replyToken']
+# --- 2点間の距離を算出するハヴェルサイン公式 ---
+def calculate_distance(lat1, lon1, lat2, lon2):
+    math_pi = math.pi
+    rad_lat1, rad_lon1 = lat1 * math_pi / 180.0, lon1 * math_pi / 180.0
+    rad_lat2, rad_lon2 = lat2 * math_pi / 180.0, lon2 * math_pi / 180.0
+    d_lat = rad_lat2 - rad_lat1
+    d_lon = rad_lon2 - rad_lon1
+    a = math.sin(d_lat / 2) ** 2 + math.cos(rad_lat1) * math.cos(rad_lat2) * math.sin(d_lon / 2) ** 2
+    return 6371.0 * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+
+# --- 【CSV構造厳守】撮影地名またはエリア名を安全に返すルール ---
+def get_photo_place_name(pdata):
+    place = str(pdata.get('Place', '')).strip()
+    if place and place.lower() != 'nan': 
+        return place
+    area = str(pdata.get('Area', '')).strip()
+    if area and area.lower() != 'nan': 
+        return area
+    return "厳選撮影地"
+
+
+# ─── 🌸 【FUPC公式】閲覧用画像URL生成関数（タイポ完全根絶） ───
+def generate_fupc_url(photo_data):
+    published = str(photo_data.get('Published', '')).strip()
+    pic_file_name = str(photo_data.get('PicFileName', '')).strip()
+    if len(published) >= 4 and pic_file_name:
+        return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
+    return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
+
+
+# ─── 🛡️ 【CSV完全準拠】新フォルダ contest_data_v2 直結データ抽出エンジン ───
+def get_filtered_photos(target_month, target_period, focus_keyword=None):
+    # 🌟 文字化け・列ズレのない、新しく流し込んだ『contest_data_v2』を指定
+    photos_ref = db.collection('contest_data_v2')
     
-    if db is None:
-        line_bot_api.reply_message(reply_token, TextSendMessage(text="❌ Firebaseの初期化自体に失敗しています。環境変数を確認してください。"))
-        return
-
-    try:
-        # ─── ⚡ 【デバッグ専用】条件を1割もつけず、コレクションから1件だけ直接ロード ───
-        photos_ref = db.collection('Master_Photos')
-        docs = list(photos_ref.limit(1).stream())
+    # "5月" -> 5 (純粋な数値型)に変換してクエリを発行
+    m_num = int(target_month.replace("月", "").strip())
+    
+    # 複合インデックスエラーを避けるため、Monthの数値型単一クエリで一撃ロード
+    docs = photos_ref.where('Month', '==', m_num).stream()
+    
+    filtered_photos = []
+    for doc in docs:
+        pdata = doc.to_dict()
+        if not pdata: continue
         
-        if not docs:
-            # フォルダ名自体が違う可能性を考慮し、別名でも1件試す
-            alternative_ref = db.collection('master_photos')
-            docs = list(alternative_ref.limit(1).stream())
-            if docs:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="⚠️ 判明: コレクション名が『Master_Photos』ではなく小文字の『master_photos』で登録されています。"))
-                return
+        # ─── ⚡ 【パズル解決】CSVに実在する Day（日付）から、今の上旬・中旬・下旬を自動判定 ───
+        try:
+            db_day = int(pdata.get('Day', 0))
+            if target_period == "初旬" and not (1 <= db_day <= 10): continue
+            if target_period == "中旬" and not (11 <= db_day <= 20): continue
+            if target_period == "下旬" and not (21 <= db_day <= 31): continue
+        except:
+            continue
             
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="❌ 物理的事実: 接続したFirestore内にデータが『1件も存在しない（空っぽ）』か、コレクション名が間違っています。"))
-            return
+        # 必須データの存在チェック（インプレース）
+        pub = pdata.get('Published')
+        pic = pdata.get('PicFileName')
+        if not pub or not pic: continue
 
-        # データの鍵と値をそのまま文字列にする
-        actual_data = docs[0].to_dict()
-        debug_output = "📊 【DB内部データ生中継】\n"
-        debug_output += f"ドキュメントID: {docs[0].id}\n\n"
-        for key, value in actual_data.items():
-            debug_output += f"■ フィールド名: {key}\n   └ 値: {value} (型: {type(value).__name__})\n"
-
-        # そのままLINEに送信
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=debug_output))
-
-    except Exception as e:
-        raw_error = traceback.format_exc()
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=f"🔥 クエリ実行中にエラーが発生しました:\n{raw_error}"))
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+        # 2往復目のキーワード指定（長野、滝など）がある場合の部分一致抽出
+        if focus_keyword:
+            search_pool = (
+                str(pdata.get('Title', '')) + 
+                str
