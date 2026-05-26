@@ -48,8 +48,13 @@ def get_filtered_photos(target_month, focus_keyword=None):
     if db is None: return []
     m = int(target_month.replace("月", "").strip())
     
-    # 🎯 全件スキャンを完全に防ぐため、必ず Month のインデックスで絞り込みます
-    query = db.collection('contest_data_v2').where('Month', '==', m)
+    # 🎯 前後1ヶ月スロットの計算
+    prev_m = 12 if m == 1 else m - 1
+    next_m = 1 if m == 12 else m + 1
+    month_slot = [prev_m, m, next_m]
+    
+    # 🎯 全件スキャンは100%発生しないインデックス狙い撃ちクエリ
+    query = db.collection('contest_data_v2').where('Month', 'in', month_slot)
     docs = query.stream()
     
     filtered_photos = []
@@ -58,10 +63,8 @@ def get_filtered_photos(target_month, focus_keyword=None):
         if not pdata: continue
         if focus_keyword:
             search_pool = (
-                str(pdata.get('Title', '')) + 
-                str(pdata.get('Area', '')) + 
-                str(pdata.get('Place', '')) + 
-                str(pdata.get('Subject', '')) + 
+                str(pdata.get('Title', '')) + str(pdata.get('Area', '')) + 
+                str(pdata.get('Place', '')) + str(pdata.get('Subject', '')) + 
                 str(pdata.get('WinnerArea', ''))
             )
             if focus_keyword not in search_pool: continue
@@ -73,51 +76,51 @@ def create_ui_buttons(reply_text, choices_list):
     for item in choices_list:
         buttons_contents.append({
             "type": "button",
-            "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
-            "style": "secondary", "color": "#f0f0f0", "margin": "sm"
+            "action": {"type": "message", "label": item["label"], "text": item["text"]},
+            "style": "secondary", "color": "#e0e0e0", "margin": "md", "height": "sm"
         })
-    # 🔎 視認性向上のため大文字化 (lg)
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "lg", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
+    # 🔎 案内文を「xxl（特大）」、太字に変更
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xxl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
-    # 🔎 カルーセル内テキスト大文字化 (xl / lg)
-    return {"type": "carousel", "contents": [{"type": "bubble", "backgroundColor": "#111111", "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"}, "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#ffffff"}, {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "lg", "color": "#cccccc", "wrap": True}]}}, {"type": "bubble", "backgroundColor": "#111111", "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"}, "body": {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#ffffff"}, {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "lg", "color": "#cccccc", "wrap": True}]}}, {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "sm"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}}]}
+    # 🔎 カルーセルプレビュー内の全文字を限界まで巨大化（3xl / xl）
+    return {"type": "carousel", "contents": [{"type": "bubble", "backgroundColor": "#111111", "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"}, "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "3xl", "wrap": True, "color": "#ffffff"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "xl", "color": "#e0e0e0", "wrap": True}]}}, {"type": "bubble", "backgroundColor": "#111111", "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"}, "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "3xl", "wrap": True, "color": "#ffffff"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "xl", "color": "#e0e0e0", "wrap": True}]}}, {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "3xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}}]}
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🔎 最終画面テキスト特大化 (3xl / lg / xl)
+    # 🔎 最終ルート案内：見出しを4xl、項目やプロ選評・解説文をすべて「xl」の圧倒的大文字に変更
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
-        "hero": {"type": "image", "url": image_url, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+        "hero": {"type": "image", "url": image_url, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "lg"},
-                {"type": "text", "text": location, "weight": "bold", "size": "3xl", "margin": "md", "wrap": True},
+                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "xl"},
+                {"type": "text", "text": location, "weight": "bold", "size": "4xl", "margin": "md", "wrap": True},
                 {
-                    "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
+                    "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
                     "contents": [
-                        {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#999999", "size": "lg", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#222222", "size": "lg", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#999999", "size": "lg", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#222222", "size": "lg", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#999999", "size": "lg", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#222222", "size": "lg", "flex": 5}]}
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#777777", "size": "xl", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "xl", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#777777", "size": "xl", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "xl", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#777777", "size": "xl", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "xl", "flex": 5}]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "xl", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "lg", "color": "#333333", "margin": "md"}
+                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "2xl", "color": "#111111"},
+                        {"type": "text", "text": guide, "wrap": True, "size": "xl", "color": "#222222", "margin": "lg", "lineSpacing": "sm"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
-                    "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
+                    "type": "box", "layout": "vertical", "margin": "lg", "spacing": "md",
                     "contents": [
-                        {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
-                        {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
+                        {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary", "height": "md"},
+                        {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954", "height": "md"}
                     ]
                 }
             ]
@@ -165,12 +168,16 @@ def handle_line_message(event):
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形", "群馬", "栃木", "岩手", "大分", "鹿児島", "和歌山", "奈良", "山口"]:
                 if k in user_message: extracted_loc = k; break
             
-            # 🎯 完全に指定月のみの高速クエリ。ここでの全件スキャンは一切ありません。
+            # 🎯 前後1ヶ月スロットのインデックス検索を実行
             base_photos = get_filtered_photos(target_month, focus_keyword=extracted_loc)
             
-            # 🎯 5月のように該当月のデータがない場合は、即座に安全な月選択に誘導（裏での全件スキャンは100%排除）
+            # 🎯 完全に切り分け。4・5・6月にデータがない場合は「紅葉」を絶対に混ぜず、11月・12月へスマートに誘導
             if not base_photos:
-                reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、現在の季節（{target_month}）の撮影地データはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作データが非常に充実しています。何月の撮影地をご覧になりますか？"
+                m_num = int(target_month.replace("月", ""))
+                p_num = 12 if m_num == 1 else m_num - 1
+                n_num = 1 if m_num == 12 else m_num + 1
+                
+                reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、ご指定の季節（{p_num}月〜{n_num}月）の撮影地データはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作データが非常に充実しています。何月の撮影地をご覧になりますか？"
                 choices = [
                     {"label": "🍁 11月の撮影地を見る", "text": "11月の撮影地を探す"},
                     {"label": "❄️ 12月の撮影地を見る", "text": "12月の撮影地を探す"},
@@ -197,7 +204,11 @@ def handle_line_message(event):
             sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
             point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
             
-            reply_text = f"お出かけの条件でお探ししました。\n\n{target_month}の時期ですと、{sub_top_str}などの被写体が人気のようです。撮影ポイントとしては{point_top_str}などがございます。興味を感じるものはありますか？"
+            m_num = int(target_month.replace("月", ""))
+            p_num = 12 if m_num == 1 else m_num - 1
+            n_num = 1 if m_num == 12 else m_num + 1
+            
+            reply_text = f"お出かけの条件でお探ししました。\n\n{p_num}月〜{n_num}月の時期ですと、{sub_top_str}などの被写体が人気のようです。撮影ポイントとしては{point_top_str}などがございます。興味を感じるものはありますか？"
             
             choices = []
             for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
@@ -213,8 +224,6 @@ def handle_line_message(event):
         
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
-            
-            # 🎯 セッションで保持された月（例:11月）のインデックスのみでクエリ（全件検索完全NG対応）
             base_photos = get_filtered_photos(target_month, focus_keyword=word_name)
             
             if not base_photos:
@@ -228,8 +237,6 @@ def handle_line_message(event):
 
         if "ここに行く:" in user_message:
             word_name = user_message.replace("ここに行く:", "").strip()
-            
-            # 🎯 セッションで保持された月のみでクエリ（全件検索完全NG対応）
             base_photos = get_filtered_photos(target_month, focus_keyword=word_name)
 
             if not base_photos:
@@ -250,7 +257,7 @@ def handle_line_message(event):
             settings = target_photo.get('Exposure') or "情報なし"
             guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
 
-            # 🎯 ご指定のセリフを完全踏襲
+            # 🎯 セリフの完全固定（指示通り再現）
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
