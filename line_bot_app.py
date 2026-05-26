@@ -75,7 +75,7 @@ def get_photo_place_name(pdata):
     return ""
 
 
-# --- 🔗 仕様書に完全準拠した閲覧用画像URL生成 ---
+# ─── 🌸 【正真正銘の正解定義】FUPC公式URL生成関数 ───
 def generate_fupc_url(photo_data):
     flat = {str(k).lower(): v for k, v in photo_data.items() if v}
     published = str(flat.get('published') or photo_data.get('Published', '')).strip()
@@ -152,7 +152,7 @@ def get_filtered_photos(target_month, target_period, focus_keyword=None):
     return filtered_photos
 
 
-# --- 🗃️ 大文字・大ボタン仕様のカスタムメニュー作成 ---
+# --- 🗃️ 大文字・大ボタン仕様 of カスタムメニュー作成 ---
 def create_大文字選択肢_ui(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
@@ -173,39 +173,49 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# --- 🖼️ 【アスペクト比完全維持・ノートリ仕様 ＆ タイポ完全一掃】入賞作品2点紙芝居UI ---
+# --- 🖼️ 【FUPC完全統治・画角死守】入賞作品2点紙芝居UI ---
 def create_作品閲覧_ui(photo1, photo2, word_name):
-    def make_slide(p):
-        flat = {str(k).lower(): v for k, v in p.items() if v}
-        title = flat.get('title') or flat.get('subject') or p.get('Title') or "無題"
-        author = flat.get('author') or flat.get('winner') or p.get('Author') or "写真家"
-        loc = get_photo_place_name(p) or "厳選撮影地"
-        
-        # ─── 🌸 【タイポ完全根絶】generate_fupc_url へ文字を完全に目視確認し配置 ───
-        img_url = generate_fupc_url(p)
-        return {
-            "type": "bubble",
-            "backgroundColor": "#111111", # フィルムの黒フチを引き締める黒背景仕様
-            "hero": {
-                "type": "image", 
-                "url": img_url, 
-                "size": "full", 
-                "aspectRatio": "20:13", 
-                "aspectMode": "fit" # 強制カットを完全防御
-            },
-            "body": {
-                "type": "box", "layout": "vertical", "spacing": "sm",
-                "contents": [
-                    {"type": "text", "text": f"📍 {loc}", "weight": "bold", "size": "md", "wrap": True, "color": "#ffffff"},
-                    {"type": "text", "text": f"「{title}」 (撮影: {author} 様)", "size": "sm", "color": "#cccccc", "wrap": True}
-                ]
-            }
-        }
+    # ─── 🛡️ 1枚目のスライド生成（generate_fupc_urlに完全結合） ───
+    flat1 = {str(k).lower(): v for k, v in photo1.items() if v}
+    title1 = flat1.get('title') or flat1.get('subject') or photo1.get('Title') or "無題"
+    author1 = flat1.get('author') or flat1.get('winner') or photo1.get('Author') or "写真家"
+    loc1 = get_photo_place_name(photo1) or "厳選撮影地"
+    img_url1 = generate_fupc_url(photo1)
+
+    # ─── 🛡️ 2枚目のスライド生成（uを完全にパースして結合完了） ───
+    flat2 = {str(k).lower(): v for k, v in photo2.items() if v}
+    title2 = flat2.get('title') or flat2.get('subject') or photo2.get('Title') or "無題"
+    author2 = flat2.get('author') or flat2.get('winner') or photo2.get('Author') or "写真家"
+    loc2 = get_photo_place_name(photo2) or "厳選撮影地"
+    img_url2 = generate_fupc_url(photo2) 
+
     return {
         "type": "carousel",
         "contents": [
-            make_slide(photo1),
-            make_slide(photo2),
+            {
+                "type": "bubble",
+                "backgroundColor": "#111111",
+                "hero": {"type": "image", "url": img_url1, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": f"📍 {loc1}", "weight": "bold", "size": "md", "wrap": True, "color": "#ffffff"},
+                        {"type": "text", "text": f"「{title1}」 (撮影: {author1} 様)", "size": "sm", "color": "#cccccc", "wrap": True}
+                    ]
+                }
+            },
+            {
+                "type": "bubble",
+                "backgroundColor": "#111111",
+                "hero": {"type": "image", "url": img_url2, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": f"📍 {loc2}", "weight": "bold", "size": "md", "wrap": True, "color": "#ffffff"},
+                        {"type": "text", "text": f"「{title2}」 (撮影: {author2} 様)", "size": "sm", "color": "#cccccc", "wrap": True}
+                    ]
+                }
+            },
             {
                 "type": "bubble",
                 "body": {
@@ -279,7 +289,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 对話アナリティクスエンジン ---
+# --- 対話アナリティクスエンジン ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
@@ -309,9 +319,9 @@ def handle_line_message(event):
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュ提案メニュー", contents=menu_obj))
                 return
 
-        # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス集計（直近10年限定） ───
+        # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス集計 ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
-            print("🚀 直近10年限定の超高速データ駆動型集計を開始...")
+            print("🚀 超高速データ駆動型集計を開始...")
             
             extracted_loc = None
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形"]:
