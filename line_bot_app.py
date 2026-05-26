@@ -3,7 +3,6 @@ import json
 import random
 import re
 import traceback
-import urllib.parse  # 🎯 Googleマップの日本語エンコードのために追加
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
@@ -13,7 +12,7 @@ from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
-IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
+IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
@@ -40,17 +39,12 @@ def get_photo_place_name(pdata):
 
 def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
-    if published.endswith('.0'): published = published[:-2]
-    
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
-    if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
     
-    if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        # 🎯 重複スラッシュ(//)を確実に単一の / に自動修正
-        cleaned_url = re.sub(r'(?<!:)/+', '/', raw_url)
-        return cleaned_url
-    return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
+    if published and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
+        # 🎯 お手本として提示いただいた「正」の形をそのまま100%正確に組み立てます
+        return f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+    return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
     if db is None: return []
@@ -84,7 +78,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
-        # 🎯 完全な標準ボタン（余計なカラーコードを廃止し、エラーを完全防衛）
         buttons_contents.append({
             "type": "button",
             "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
@@ -97,7 +90,6 @@ def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🎯 形の揃った2枚構成。それぞれの下部に標準の「ここに行く」ボタンを配置
     return {
         "type": "carousel",
         "contents": [
@@ -129,7 +121,7 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🎯 詳細画面。最下部は完全標準仕様のマップ・ナビボタン
+    # 🎯 【完全修正】LINEの送信拒絶の原因だった baseline レイアウトをすべて horizontal に刷新
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -142,9 +134,9 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                 {
                     "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
                     "contents": [
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "md", "flex": 5}]}
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{camera} / {lens}", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "md", "flex": 5}]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -152,7 +144,7 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
                         {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "lg", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "md", "color": "#222222", "margin": "lg", "lineSpacing": "sm"}
+                        {"type": "text", "text": guide, "wrap": True, "size": "md", "color": "#222222", "margin": "lg"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -291,10 +283,8 @@ def handle_line_message(event):
             location = get_photo_place_name(target_photo)
             session_ref.delete()
 
-            # 🎯 【超重要】日本語地名を完全にURLエンコードし、LINEの通信遮断を100%回避
-            encoded_loc = urllib.parse.quote(location)
-            map_url = f"https://www.google.com/maps/search/?api=1&query={encoded_loc}"
-            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={encoded_loc}&travelmode=driving"
+            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
+            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
             title = target_photo.get('Title') or "無題"
             author = target_photo.get('Winner') or "不明"
