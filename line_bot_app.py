@@ -3,6 +3,7 @@ import json
 import random
 import re
 import traceback
+import urllib.parse  # 🎯 Googleマップの日本語エンコードのために追加
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
@@ -46,7 +47,7 @@ def generate_fupc_url(photo_data):
     
     if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        # 重複スラッシュ(//)を確実に単一の / に自動修正
+        # 🎯 重複スラッシュ(//)を確実に単一の / に自動修正
         cleaned_url = re.sub(r'(?<!:)/+', '/', raw_url)
         return cleaned_url
     return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
@@ -83,6 +84,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
+        # 🎯 完全な標準ボタン（余計なカラーコードを廃止し、エラーを完全防衛）
         buttons_contents.append({
             "type": "button",
             "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
@@ -95,8 +97,7 @@ def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🎯 【革新】不揃いな3枚目を廃止し、写真の下に直接「ここに行く」標準ボタンを配置！
-    # 🎯 これによりバブルの構造が100%完全一致するため、LINEの表示エラーが根底から消滅します
+    # 🎯 形の揃った2枚構成。それぞれの下部に標準の「ここに行く」ボタンを配置
     return {
         "type": "carousel",
         "contents": [
@@ -104,7 +105,7 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
                 "body": {
-                    "type": "box", "layout": "vertical", "spacing": "md", 
+                    "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
                         {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
@@ -116,7 +117,7 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
                 "body": {
-                    "type": "box", "layout": "vertical", "spacing": "md", 
+                    "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
                         {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
@@ -128,6 +129,7 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
+    # 🎯 詳細画面。最下部は完全標準仕様のマップ・ナビボタン
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -158,7 +160,7 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                     "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
                     "contents": [
                         {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
-                        {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
+                        {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954", "margin": "sm"}
                     ]
                 }
             ]
@@ -289,8 +291,10 @@ def handle_line_message(event):
             location = get_photo_place_name(target_photo)
             session_ref.delete()
 
-            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
-            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
+            # 🎯 【超重要】日本語地名を完全にURLエンコードし、LINEの通信遮断を100%回避
+            encoded_loc = urllib.parse.quote(location)
+            map_url = f"https://www.google.com/maps/search/?api=1&query={encoded_loc}"
+            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={encoded_loc}&travelmode=driving"
 
             title = target_photo.get('Title') or "無題"
             author = target_photo.get('Winner') or "不明"
