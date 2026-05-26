@@ -40,8 +40,9 @@ except Exception as e:
 
 # --- 2点間の距離を算出するハヴェルサイン公式 ---
 def calculate_distance(lat1, lon1, lat2, lon2):
-    rad_lat1, rad_lon1 = math.radians(lat1), math.radians(lon1)
-    rad_lat2, rad_lon2 = math.radians(lat2), math.radians(lon2)
+    math_pi = math.pi
+    rad_lat1, rad_lon1 = lat1 * math_pi / 180.0, lon1 * math_pi / 180.0
+    rad_lat2, rad_lon2 = lat2 * math_pi / 180.0, lon2 * math_pi / 180.0
     d_lat = rad_lat2 - rad_lat1
     d_lon = rad_lon2 - rad_lon1
     a = math.sin(d_lat / 2) ** 2 + math.cos(rad_lat1) * math.cos(rad_lat2) * math.sin(d_lon / 2) ** 2
@@ -80,27 +81,30 @@ def generate_fupc_url(photo_data):
     return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
 
 
-# --- 🛡️ 【データ足切り】必須項目がすべて100%実在する完璧なデータのみを抽出 ---
+# --- 🛡️ 表記ゆれをinクエリで完全中和してロードする高速関数 ---
 def get_filtered_photos(target_month, target_period):
     photos_ref = db.collection('Master_Photos')
-    docs = photos_ref.where('Month', '==', target_month).stream()
     
+    # "5月" から ["5", "05", "5月", "5月 "] という候補を作り、inクエリで最速抽出
+    m_num = target_month.replace("月", "").strip()
+    month_candidates = [m_num, m_num.zfill(2), f"{m_num}月", f"{m_num}月 "]
+    
+    docs = photos_ref.where('Month', 'in', month_candidates).stream()
+
     filtered_photos = []
     for doc in docs:
         pdata = doc.to_dict()
         if not pdata: continue
         
         db_period = str(pdata.get('Period', '')).strip()
-        if db_period != target_period: continue
+        if target_period not in db_period: continue
             
-        # ─── 🚨 データベースに画像ファイル名と公開年月日が実在するか厳格チェック ───
         flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
         pub = flat_data.get('published') or pdata.get('Published')
         pic = flat_data.get('picfilename') or flat_data.get('pic_file_name') or pdata.get('PicFileName')
         sub = flat_data.get('subject') or pdata.get('Subject')
         place_name = get_photo_place_name(pdata)
         
-        # データベース由来以外の補正文字・固定画像URLを100%排除するため、不完全データはここで完全足切り
         if not pub or not pic or not sub or not place_name or len(str(pub).strip()) < 4:
             continue
             
@@ -137,7 +141,7 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# --- 🖼️ 【タイポ完全修正】入賞作品2点スライド仕様の紙芝居UI ---
+# --- 🖼️ 入賞作品2点スライド仕様の紙芝居UI ---
 def create_作品閲覧_ui(photo1, photo2, word_name):
     def make_slide(p):
         flat = {str(k).lower(): v for k, v in p.items() if v}
@@ -146,7 +150,7 @@ def create_作品閲覧_ui(photo1, photo2, word_name):
         loc = get_photo_place_name(p)
         return {
             "type": "bubble",
-            # ─── 🌸 誤字を完全修正：generate_fupc_url へマッピング ───
+            # ─── 🌸 呼び出し関数名を正しく generate_fupc_url に完全結合 ───
             "hero": {"type": "image", "url": generate_fupc_url(p), "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
             "body": {
                 "type": "box", "layout": "vertical", "spacing": "sm",
@@ -260,15 +264,12 @@ def handle_line_message(event):
 
         # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス × 半径250kmリアルタイム集計 ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
-            print("🚀 初期データロード（完全データのみを抽出）...")
             base_photos = get_filtered_photos(default_month, default_period)
 
-            # ─── 🛡️ 事実限定：万が一合致する完全データが0件なら、即座に終了を返す ───
             if not base_photos:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=f"申し訳ございません。現在の時期【{default_month}{default_period}】かつ【東京から半径250km圏内】に合致する風景写真データが本棚に見つかりませんでした。"))
                 return
 
-            # キーワード集計（捏造文言の入り込む余地を完全封鎖）
             subjects, point_names, trends = [], [], []
             for p in base_photos:
                 flat = {str(k).lower(): v for k, v in p.items() if v}
@@ -287,7 +288,6 @@ def handle_line_message(event):
             point_ranks = [w[0] for w in Counter(point_names).most_common(3)]
             trend_ranks = [w[0] for w in Counter(trends).most_common(3)]
 
-            # ─── 🛡️ 100%データベース由来の実在ワードのみで文章を結合 ───
             sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
             point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
             trend_str = f"最近は{trend_ranks[0]}を取りに行く方が増えているようです。" if trend_ranks else ""
@@ -311,7 +311,7 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=create_大文字選択肢_ui(reply_text, choices)))
             return
 
-        # ─── 🗄️ 2往復目以降：記憶から完全に復元 ───
+        # ─── 🗄️ 2往復目以降：固定された月・旬の記憶から完全に復元 ───
         state = session_doc.to_dict()
         target_month = state.get("month", default_month)
         target_period = state.get("period", default_period)
@@ -360,6 +360,7 @@ def handle_line_message(event):
             if sel_type == "place" or "ポイント" in user_message:
                 session_ref.delete()
 
+                # 公式ユニバーサルリンクでGoogle Mapsを起動
                 map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
                 route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
@@ -370,10 +371,10 @@ def handle_line_message(event):
                 pub_str = str(published).strip()
                 TARGET_IMAGE_URL = f"{IMAGE_BASE_VIEW.rstrip('/')}/{pub_str[:4]}/{pub_str}/{str(pic_file_name).strip()}"
 
-                title = flat_data.get('title') or flat_data.get('subject') or target_photo.get('Title', '無題')
-                author = flat_data.get('author') or flat_data.get('winner') or target_photo.get('Author', '不明')
-                camera = flat_data.get('camera_body') or flat_data.get('camera') or target_photo.get('Camera_Body', '情報なし')
-                lens = flat_data.get('lens') or target_photo.get('Lens', '情報なし')
+                title = flat_data.get('title') or flat_data.get('subject') or target_photo.get('Title') or "無題"
+                author = flat_data.get('author') or flat_data.get('winner') or target_photo.get('Author') or "不明"
+                camera = flat_data.get('camera_body') or flat_data.get('camera') or target_photo.get('Camera_Body') or "情報なし"
+                lens = flat_data.get('lens') or target_photo.get('Lens') or "情報なし"
                 settings = flat_data.get('exposure') or f"F{flat_data.get('aperture', '-')} / ISO {flat_data.get('iso', '-')}"
                 weather = flat_data.get('weather') or target_photo.get('Weather', '不明')
                 guide = flat_data.get('guide_page') or flat_data.get('context_advice') or 'ルートナビ情報は本棚に保管されています。'
@@ -405,7 +406,6 @@ def handle_line_message(event):
                 return
 
     except Exception as e:
-        # ─── 🚨 万が一の際も、生のトレースバック（行番号・エラー原因）をLINEに直接暴露する ───
         raw_error_trace = traceback.format_exc()
         try:
             line_bot_api.reply_message(reply_token, TextSendMessage(text=f"❌ システム内部クラッシュ詳細:\n{raw_error_trace}"))
