@@ -47,20 +47,15 @@ def generate_fupc_url(photo_data):
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
     if db is None: return []
     
-    # 🎯 日にちから現在の「旬」を特定 (1=上旬, 2=中旬, 3=下旬)
     if current_day <= 10: d = 1
     elif current_day <= 20: d = 2
     else: d = 3
     
-    # 現在のタイムライン番号 (1〜36)
     curr_idx = (current_month - 1) * 3 + d
-    
-    # 🎯 【約1ヶ月間スロット】前後の「旬」を計算して、合計3つのスロット（約30日間）を算出
     prev_idx = 36 if curr_idx == 1 else curr_idx - 1
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    # 🎯 【全件検索NGの絶対死守】3つのスロットだけを高速インデックス検索
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -86,15 +81,14 @@ def create_ui_buttons(reply_text, choices_list):
             "action": {"type": "message", "label": item["label"], "text": item["text"]},
             "style": "secondary", "color": "#e0e0e0", "margin": "md", "height": "md"
         })
-    # 🔎 案内文：xxl（超大文字）
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xxl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
+    # 🔎 案内文のサイズを「3xl（超特大）」、太字へ圧倒的拡大
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "3xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🔎 文字サイズ限界拡大 (4xl / xxl) 
-    # 🎯 クロフチカット（aspectMode: "cover"）を完全適用
+    # 🔎 作品プレビューカード：見出しを最大級の「4xl」、補足文字を「xxl」へ限界突破拡大
     return {
         "type": "carousel",
         "contents": [
@@ -110,14 +104,13 @@ def create_preview_carousel(photo1, photo2, word_name):
             },
             {
                 "type": "bubble",
-                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "4xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "4xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
             }
         ]
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🔎 ルート案内：見出し5xl、選評・機材情報をすべて「xxl」に引き上げ、完全に文字をデカく
-    # 🎯 クロフチカット（aspectMode: "cover"）を完全適用
+    # 🔎 最終案内：地名をLINE規格最大の「5xl」、全項目・プロ選評・現地解説を「xxl」へ強制巨大化
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -169,8 +162,6 @@ def handle_line_message(event):
     user_id, reply_token, user_message = event['source']['userId'], event['replyToken'], event['message']['text'].strip()
     if db is None: return
     now = datetime.now()
-    
-    # 🎯 デフォルトは現在の月と日
     curr_m = now.month
     curr_d = now.day
 
@@ -187,18 +178,15 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="メニュー", contents=create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]")))))
             return
 
-        # 「〇月」の直接指定をパース
         requested_month = None
         m_match = re.search(r'(\d+)月', user_message)
         if m_match:
             requested_month = int(m_match.group(1))
 
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]) or requested_month:
-            # 🎯 指定があればその月の「中旬（15日）」扱い、なければ現在のリアルタイムな月日
             target_m = requested_month if requested_month else curr_m
             target_d = 15 if requested_month else curr_d
             
-            # 旬の日本語表記を生成
             if target_d <= 10: decade_str = "上旬"
             elif target_d <= 20: decade_str = "中旬"
             else: decade_str = "下旬"
@@ -207,10 +195,8 @@ def handle_line_message(event):
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形", "群馬", "栃木", "岩手", "大分", "鹿児島", "和歌山", "奈良", "山口"]:
                 if k in user_message: extracted_loc = k; break
             
-            # 🎯 前後1ヶ月（合計約30日間）スロットのインデックス検索を実行
             base_photos = get_filtered_photos(target_m, target_d, focus_keyword=extracted_loc)
             
-            # 🎯 データがなければ「紅葉」を絶対混ぜず、11月・12月へ安全に誘導
             if not base_photos:
                 reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、ご指定の時期（{target_m}月{decade_str} 前後30日間）の撮影地データはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作データが非常に充実しています。何月の撮影地をご覧になりますか？"
                 choices = [
@@ -256,7 +242,6 @@ def handle_line_message(event):
         
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
-            
             base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
             
             if not base_photos:
@@ -270,7 +255,6 @@ def handle_line_message(event):
 
         if "ここに行く:" in user_message:
             word_name = user_message.replace("ここに行く:", "").strip()
-            
             base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
 
             if not base_photos:
@@ -291,7 +275,6 @@ def handle_line_message(event):
             settings = target_photo.get('Exposure') or "情報なし"
             guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
 
-            # 🎯 セリフを完全固定
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
