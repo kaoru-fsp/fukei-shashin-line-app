@@ -12,12 +12,20 @@ from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
-# 🎯 スラッシュの重なりを防ぐため、末尾のスラッシュを削除した綺麗なベースURL
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
+# 🎯 日本の47都道府県リスト（これ以外はすべて海外とみなして遮断します）
+PREFECTURES = [
+    "北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島", "茨城", "栃木", "群馬",
+    "埼玉", "千葉", "東京", "神奈川", "新潟", "富山", "石川", "福井", "山梨", "長野",
+    "岐阜", "静岡", "愛知", "三重", "滋賀", "京都", "大阪", "兵庫", "奈良", "和歌山",
+    "鳥取", "島根", "岡山", "広島", "山口", "徳島", "香川", "愛媛", "高知", "福岡",
+    "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島", "沖縄"
+]
 
 db = None
 try:
@@ -43,8 +51,9 @@ def generate_fupc_url(photo_data):
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
     
     if published and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        # 🎯 【完全正常化】ご提示いただいたお手本の「正」のURLと1文字も違わず、寸分狂わずに結合します
-        return f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+        # 🎯 お手本通りの、スラッシュが重複しない半角英数字URLを生成
+        raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+        return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
@@ -59,7 +68,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    # 🎯 全件検索NG・海外除外の厳格インデックスクエリ
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -68,8 +76,12 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
         pdata = doc.to_dict()
         if not pdata: continue
         
-        # 海外候補の完全除外
-        if "海外" in str(pdata.get('Area', '')) or "海外" in str(pdata.get('Place', '')):
+        # 🎯 【台湾・海外100%完全除外ロジック】
+        loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
+        if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ", "タイ"]):
+            continue
+        # 🎯 日本の47都道府県名が1文字も含まれていないデータは、一律ですべて海外とみなして強制スキップ
+        if not any(pref in loc_pool for pref in PREFECTURES):
             continue
             
         if focus_keyword:
@@ -97,7 +109,6 @@ def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🎯 左右対称の2枚構成。下部に完全標準の「ここに行く」ボタンを配置。フチカット適用。
     return {
         "type": "carousel",
         "contents": [
@@ -109,6 +120,7 @@ def create_preview_carousel(photo1, photo2, word_name):
                     "contents": [
                         {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"🔗 URL: {u1}", "size": "xs", "color": "#888888", "wrap": True}, # 🎯 デバッグ用：生URLテキスト表示
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -121,6 +133,7 @@ def create_preview_carousel(photo1, photo2, word_name):
                     "contents": [
                         {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"🔗 URL: {u2}", "size": "xs", "color": "#888888", "wrap": True}, # 🎯 デバッグ用：生URLテキスト表示
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -129,6 +142,7 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
+    # 🎯 【超重要】LINEに確実に送信を通すため、未知の属性や複雑な横並びを全廃し、最も頑丈なプレーン縦並びに完全修正しました
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -139,13 +153,13 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                 {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "md"},
                 {"type": "text", "text": location, "weight": "bold", "size": "xxl", "margin": "md", "wrap": True},
                 {
-                    "type": "box", "layout": "horizontal", "margin": "md",
+                    "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
                     "contents": [
-                        {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
-                            {"type": "text", "text": f"作品名: {title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md"},
-                            {"type": "text", "text": f"推奨機材: {camera} / {lens}", "wrap": True, "color": "#111111", "size": "md"},
-                            {"type": "text", "text": f"撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"}
-                        ]}
+                        {"type": "text", "text": f"🔶 作品名: {title}", "wrap": True, "color": "#111111", "size": "md"},
+                        {"type": "text", "text": f"👤 撮影者: {author} 様", "wrap": True, "color": "#111111", "size": "md"},
+                        {"type": "text", "text": f"📷 推奨機材: {camera} / {lens}", "wrap": True, "color": "#111111", "size": "md"},
+                        {"type": "text", "text": f"⚙️ 撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"},
+                        {"type": "text", "text": f"🔗 写真URL: {image_url}", "wrap": True, "color": "#0000ff", "size": "xs"} # 🎯 デバッグ用：生URLテキスト表示
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -302,7 +316,7 @@ def handle_line_message(event):
             settings = target_photo.get('Exposure') or "情報なし"
             guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
 
-            # 🎯 ご指定いただいた温かいセリフを完全反映
+            # 🎯 あなたに指定していただいたセリフ
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
