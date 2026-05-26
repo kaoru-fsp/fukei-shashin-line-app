@@ -42,8 +42,8 @@ def generate_fupc_url(photo_data):
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
     
     if published and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        # 🎯 お手本として提示いただいた「正」の形をそのまま100%正確に組み立てます
-        return f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+        raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+        return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
@@ -65,6 +65,11 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     for doc in docs:
         pdata = doc.to_dict()
         if not pdata: continue
+        
+        # 🎯 【海外完全除外】クエリ直後の段階で「海外」データを根本からシャットアウト
+        if "海外" in str(pdata.get('Area', '')) or "海外" in str(pdata.get('Place', '')):
+            continue
+            
         if focus_keyword:
             search_pool = (
                 str(pdata.get('Title', '')) + str(pdata.get('Area', '')) + 
@@ -84,7 +89,7 @@ def create_ui_buttons(reply_text, choices_list):
             "style": "secondary",
             "margin": "sm"
         })
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "3xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
@@ -99,8 +104,8 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "body": {
                     "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
-                        {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
-                        {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "3xl", "color": "#444444", "wrap": True},
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -111,8 +116,8 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "body": {
                     "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
-                        {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
-                        {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "3xl", "color": "#444444", "wrap": True},
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -121,7 +126,6 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🎯 【完全修正】LINEの送信拒絶の原因だった baseline レイアウトをすべて horizontal に刷新
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -129,22 +133,22 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "md"},
-                {"type": "text", "text": location, "weight": "bold", "size": "xxl", "margin": "md", "wrap": True},
+                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "2xl"},
+                {"type": "text", "text": location, "weight": "bold", "size": "5xl", "margin": "md", "wrap": True},
                 {
                     "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
                     "contents": [
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": f"{camera} / {lens}", "wrap": True, "color": "#111111", "size": "md", "flex": 5}]},
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "md", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "md", "flex": 5}]}
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{camera} / {lens}", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
+                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "lg", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "md", "color": "#222222", "margin": "lg"}
+                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "4xl", "color": "#111111"},
+                        {"type": "text", "text": guide, "wrap": True, "size": "3xl", "color": "#222222", "margin": "lg"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
