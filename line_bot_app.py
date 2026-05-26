@@ -1,4 +1,4 @@
-vaimport os
+import os
 import json
 import random
 import re
@@ -56,6 +56,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
+    # 🎯 全件検索NGの絶対死守クエリ
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -81,36 +82,38 @@ def create_ui_buttons(reply_text, choices_list):
             "action": {"type": "message", "label": item["label"], "text": item["text"]},
             "style": "secondary", "color": "#e0e0e0", "margin": "md", "height": "md"
         })
-    # 🎯 案内テキストを強制的に 30px（いつもの倍以上）に指定
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "30px", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
+    # 🎯 案内文サイズを LINE規格最大級の「3xl」へ一気に拡大
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "3xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🎯 プレビューカード：地名を 36px、作品名・撮影者を 26px に絶対固定
+    # 🎯 プレビューカード：地名を「4xl」、作品名・撮影者を「3xl」（前回の倍）へ完全拡大
+    # 🎯 クロフチカット（cover）完全死守
     return {
         "type": "carousel",
         "contents": [
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "36px", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "26px", "color": "#444444", "wrap": True}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "3xl", "color": "#444444", "wrap": True}]}
             },
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "36px", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "26px", "color": "#444444", "wrap": True}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "3xl", "color": "#444444", "wrap": True}]}
             },
             {
                 "type": "bubble",
-                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "36px", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "4xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
             }
         ]
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🎯 最終ルート案内：地名を 42px、項目名・スペック・選評本文すべてを 26px に一括で強制拡大
+    # 🎯 最終案内：地名をLINE規格絶対最大値の「5xl」、全項目・プロ選評本文すべてを「3xl（前回の倍）」へ限界拡大
+    # 🎯 クロフチカット（cover）完全死守
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -118,22 +121,22 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "24px"},
-                {"type": "text", "text": location, "weight": "bold", "size": "42px", "margin": "md", "wrap": True},
+                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "3xl"},
+                {"type": "text", "text": location, "weight": "bold", "size": "5xl", "margin": "md", "wrap": True},
                 {
                     "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
                     "contents": [
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]}
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "30px", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "26px", "color": "#222222", "margin": "lg", "lineSpacing": "sm"}
+                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "4xl", "color": "#111111"},
+                        {"type": "text", "text": guide, "wrap": True, "size": "3xl", "color": "#222222", "margin": "lg", "lineSpacing": "md"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -236,9 +239,17 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="ご提案", contents=create_ui_buttons(reply_text, choices)))
             return
 
-        state = session_doc.to_dict()
-        target_m = int(state.get("target_m", curr_m))
-        target_d = int(state.get("target_d", curr_d))
+        # 🎯 旧セッションデータが残っていても型エラーでクラッシュしないための鉄壁の安全防衛回路
+        state = session_doc.to_dict() or {}
+        raw_m = state.get("target_m") or state.get("month") or curr_m
+        if isinstance(raw_m, str):
+            m_match = re.search(r'(\d+)', raw_m)
+            target_m = int(m_match.group(1)) if m_match else curr_m
+        else:
+            target_m = int(raw_m)
+
+        raw_d = state.get("target_d") or curr_d
+        target_d = int(raw_d) if raw_d else curr_d
         
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
