@@ -6,20 +6,20 @@ import traceback
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
-from linebot.models import TextSendMessage, FlexSendMessage
+# 🎯 【エラーの真犯人】辞書型を正式なLINEオブジェクトに変換するためのコンテナをインポート
+from linebot.models import TextSendMessage, FlexSendMessage, BubbleContainer, CarouselContainer
 import firebase_admin
 from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
-# 🎯 【確定正解】あなたが教えてくれた100%正しいベースURL
+# あなたが教えてくれた100%正しいベースURL
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# 🎯 日本の47都道府県リスト（台湾・海外候補を完全にシャットアウトするための防衛線）
 PREFECTURES = [
     "北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島", "茨城", "栃木", "群馬",
     "埼玉", "千葉", "東京", "神奈川", "新潟", "富山", "石川", "福井", "山梨", "長野",
@@ -51,16 +51,13 @@ def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
     
-    # 小数点残りのクレンジング
     if published.endswith('.0'): published = published[:-2]
     if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
     
     if published and pic_file_name and len(published) >= 4:
-        # 🎯 【パターン1完全再現】あなたが実証してくれた正解の形（ベース/年/フォルダ/ファイル）を最後まで寸分違わず組み立てます
+        # あなたが教えてくれた100%正しいURL結合ルール
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        # 結合時に万が一発生するスラッシュの重複（//）だけを自動で綺麗に一本化
         return re.sub(r'(?<!:)/+', '/', raw_url)
-        
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
@@ -75,7 +72,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    # 全件検索NGの絶対厳守クエリ
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -86,7 +82,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
         
         loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
         
-        # 🎯 台湾・海外データの完全強制除外
         if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]):
             continue
         if not any(pref in loc_pool for pref in PREFECTURES):
@@ -212,7 +207,9 @@ def handle_line_message(event):
             return
         if user_message == "戻る" and session_doc.exists:
             state = session_doc.to_dict()
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="メニュー", contents=create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]")))))
+            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
+            container = BubbleContainer.new_from_json_dict(create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]"))))
+            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="メニュー", contents=container))
             return
 
         requested_month = None
@@ -226,3 +223,121 @@ def handle_line_message(event):
             
             if target_d <= 10: decade_str = "上旬"
             elif target_d <= 20: decade_str = "中旬"
+            else: decade_str = "下旬"
+            
+            extracted_loc = None
+            for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形", "群馬", "栃木", "岩手", "大分", "鹿児島", "和歌山", "奈良", "山口"]:
+                if k in user_message: extracted_loc = k; break
+            
+            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=extracted_loc)
+            
+            if not base_photos:
+                reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、ご指定の時期（{target_m}月{decade_str} 前後30日間）の撮影地データはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作データが非常に充実しています。何月の撮影地をご覧になりますか？"
+                choices = [
+                    {"label": "🍁 11月の撮影地を見る", "text": "11月の撮影地を探す"},
+                    {"label": "❄️ 12月の撮影地を見る", "text": "12月の撮影地を探す"},
+                    {"label": "❌ やめる", "text": "やめる"}
+                ]
+                session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
+                # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
+                container = BubbleContainer.new_from_json_dict(create_ui_buttons(reply_text, choices))
+                line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="時期の選択", contents=container))
+                return
+
+            photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ", "雪景色", "山焼き", "ナノハナ", "紅葉", "落葉", "冬桜"]
+            subjects, point_names = [], []
+            for p in base_photos:
+                combined_text = str(p.get('Title', '')) + str(p.get('Subject', '')) + str(p.get('Area', ''))
+                for kw in photo_keywords:
+                    if kw in combined_text: subjects.append(kw)
+                pt = get_photo_place_name(p)
+                if pt and "県" not in pt and pt.lower() not in ["null", "nan", "none", "厳選撮影地"]: point_names.append(pt)
+
+            sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
+            point_ranks = [w[0] for w in Counter(point_names).most_common(3) if w[0]]
+            if not sub_ranks: sub_ranks = ["風景"]
+            if not point_ranks: point_ranks = ["厳選撮影地"]
+
+            sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
+            # 🎯 【タイポ完全クレンジング】混入していたロシア語の「я」を日本の正しい「や」に完全修正
+            point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
+            
+            reply_text = f"お出かけの条件でお探ししました。\n\n{target_m}月{decade_str}頃の時期（前後あわせて30日間）ですと、{sub_top_str}などの被写体が人気のようです。撮影ポイントとしては{point_top_str}などがございます。興味を感じるものはありますか？"
+            
+            choices = []
+            for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
+            for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
+            choices.append({"label": "❌ やめる", "text": "やめる"})
+
+            session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
+            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
+            container = BubbleContainer.new_from_json_dict(create_ui_buttons(reply_text, choices))
+            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="ご提案", contents=container))
+            return
+
+        state = session_doc.to_dict() or {}
+        raw_m = state.get("target_m") or state.get("month") or curr_m
+        if isinstance(raw_m, str):
+            m_match = re.search(r'(\d+)', raw_m)
+            target_m = int(m_match.group(1)) if m_match else curr_m
+        else:
+            target_m = int(raw_m)
+
+        raw_d = state.get("target_d") or curr_d
+        target_d = int(raw_d) if raw_d else curr_d
+        
+        if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
+            word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
+            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
+            
+            if not base_photos:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにく作品情報が見つかりませんでした。"))
+                return
+            
+            p1 = base_photos[0]
+            p2 = base_photos[1] if len(base_photos) > 1 else base_photos[0]
+            # 🎯 【完全修正】辞書を CarouselContainer に通して正式な形にラップして送信
+            container = CarouselContainer.new_from_json_dict(create_preview_carousel(p1, p2, word_name))
+            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="作品プレビュー", contents=container))
+            return
+
+        if "ここに行く:" in user_message:
+            word_name = user_message.replace("ここに行く:", "").strip()
+            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
+
+            if not base_photos:
+                 line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにくルート情報が見つかりませんでした。"))
+                 return
+            target_photo = random.choice(base_photos)
+
+            location = get_photo_place_name(target_photo)
+            session_ref.delete()
+
+            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
+            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
+
+            title = target_photo.get('Title') or "無題"
+            author = target_photo.get('Winner') or "不明"
+            camera = target_photo.get('Camera') or "情報なし"
+            lens = target_photo.get('Lens') or "情報なし"
+            settings = target_photo.get('Exposure') or "情報なし"
+            guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
+
+            reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
+            reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
+            
+            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
+            detail_container = BubbleContainer.new_from_json_dict(create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo)))
+            
+            line_bot_api.reply_message(reply_token, [
+                TextSendMessage(text=reply_wait_text),
+                TextSendMessage(text=reply_final_text),
+                FlexSendMessage(alt_text="ルート案内", contents=detail_container)
+            ])
+            return
+
+    except:
+        print(traceback.format_exc())
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
