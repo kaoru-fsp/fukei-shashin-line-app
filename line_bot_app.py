@@ -15,10 +15,10 @@ from collections import Counter
 app = Flask(__name__)
 
 # ==========================================================
-# 📸 定数定義（仕様書に準拠。将来のサーバー移転時もここを変えるだけ）
+# 📸 定数定義（仕様書に完全準拠）
 # ==========================================================
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
-TOKYO_LAT = 35.6895  # 東京の基準点（現在地リファレンス：新宿・都庁付近）
+TOKYO_LAT = 35.6895  # 現在地リファレンス：新宿
 TOKYO_LON = 139.6917
 
 # --- LINE / OpenAI API の初期化 ---
@@ -42,7 +42,7 @@ except Exception as e:
     print(f"Firestore initialization error: {e}")
 
 
-# --- 2点間の距離を算出するハヴェルサイン公式（半径250km判定用ツール） ---
+# --- 2点間の距離を算出するハヴェルサイン公式 ---
 def calculate_distance(lat1, lon1, lat2, lon2):
     rad_lat1, rad_lon1 = math.radians(lat1), math.radians(lon1)
     rad_lat2, rad_lon2 = math.radians(lat2), math.radians(lon2)
@@ -52,7 +52,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return 6371.0 * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 
-# --- ドキュメントから安全に緯度経度を抽出するロジック ---
+# --- ドキュメントから安全に緯度経度を抽出 ---
 def get_lat_lon(data):
     flat = {str(k).lower(): v for k, v in data.items() if v}
     lat = flat.get('latitude') or flat.get('lat')
@@ -60,12 +60,11 @@ def get_lat_lon(data):
     try:
         if lat is not None and lon is not None:
             return float(lat), float(lon)
-    except:
-        pass
+    except: pass
     return None
 
 
-# --- 項目「Place」が空欄の場合「Area」を表示する鉄則鉄則ルール対応抽出 ---
+# --- 項目「Place」が空欄の場合「Area」を表示するルール ---
 def get_photo_place_name(pdata):
     flat = {str(k).lower(): v for k, v in pdata.items() if v}
     place = flat.get('place') or pdata.get('Place')
@@ -77,7 +76,7 @@ def get_photo_place_name(pdata):
     return "未知の撮影地"
 
 
-# --- 🔗 仕様書に完全準拠したFUPCサーバー閲覧用画像URL生成パーツ ---
+# --- 🔗 仕様書に完全準拠した閲覧用画像URL生成 ---
 def generate_fupc_url(photo_data):
     flat = {str(k).lower(): v for k, v in photo_data.items() if v}
     published = str(flat.get('published') or photo_data.get('Published', '')).strip()
@@ -87,34 +86,7 @@ def generate_fupc_url(photo_data):
     return "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
 
 
-# --- 🛡️ インデックスエラーを100%回避して安全に対象データをロードする超高速関数 ---
-def get_filtered_photos(target_month, target_period):
-    photos_ref = db.collection('Master_Photos')
-    # 自動インデックスが保証されているMonth単発でロードし、Periodはメモリで安全に弾く
-    docs = photos_ref.where('Month', '==', target_month).stream()
-    
-    filtered_photos = []
-    for doc in docs:
-        pdata = doc.to_dict()
-        if not pdata: continue
-        
-        db_period = str(pdata.get('Period', '')).strip()
-        if db_period != target_period: continue
-            
-        coords = get_lat_lon(pdata)
-        if coords:
-            if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) <= 250.0:
-                filtered_photos.append(pdata)
-        else:
-            flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
-            pref = str(flat_data.get('prefecture') or pdata.get('Prefecture', ''))
-            if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
-                filtered_photos.append(pdata)
-                
-    return filtered_photos
-
-
-# --- 🗃️ 【大きな文字・大きなボタン】視認性抜群のカスタム選択肢メニューの組み立て ---
+# --- 🗃️ 大文字・大ボタン仕様のカスタムメニュー作成 ---
 def create_大文字選択肢_ui(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
@@ -135,7 +107,7 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# --- 🖼️ 【本物画像2点スライド仕様】過去の入賞作品を大画面で見せる紙芝居UI ---
+# --- 🖼️ 入賞作品2点スライド仕様の紙芝居UI ---
 def create_作品閲覧_ui(photo1, photo2, word_name):
     def make_slide(p):
         flat = {str(k).lower(): v for k, v in p.items() if v}
@@ -153,7 +125,6 @@ def create_作品閲覧_ui(photo1, photo2, word_name):
                 ]
             }
         }
-
     return {
         "type": "carousel",
         "contents": [
@@ -200,7 +171,8 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
           {"type": "box", "layout": "vertical", "margin": "xxl", "backgroundColor": "#f7f8fa", "cornerRadius": "md", "paddingAll": "md", "contents": [{"type": "text", "text": "🎓 【レベルアップ相談室・添削指導】", "weight": "bold", "size": "md", "color": "#e67e22"}, {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}]},
           {"type": "separator", "margin": "xxl"},
           {
-            "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
+            "type": "box",
+            "layout": "vertical", "margin": "md", "spacing": "sm",
             "contents": [
                 {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
                 {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
@@ -228,13 +200,13 @@ def handle_line_message(event):
         session_ref = db.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
 
-        # ─── ❌ 「やめる」ボタンのクローズ処置 ───
+        # ─── ❌ 「やめる」
         if user_message == "やめる":
             session_ref.delete()
             line_bot_api.reply_message(reply_token, TextSendMessage(text="ご用がありましたら、いつでもお声がけください。"))
             return
 
-        # ─── 🔙 「戻る」ボタンによる元の集計選択メニューへの復元 ───
+        # ─── 🔙 「戻る」
         if user_message == "戻る" and session_doc.exists:
             state = session_doc.to_dict()
             menu_text = state.get("menu_text", "")
@@ -243,18 +215,34 @@ def handle_line_message(event):
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュ提案メニュー", contents=create_大文字選択肢_ui(menu_text, choices)))
                 return
 
-        # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス × 半径250kmリアルタイム集計 ───
+        # ─── 📊 ①＆②: 36分割クエリ一撃必殺（超軽量・インデックス狙い撃ち） ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
-            base_photos = get_filtered_photos(target_month, target_period)
+            print("🚀 インデックス指定の高速マトリクス検索を開始します...")
+            photos_ref = db.collection('Master_Photos')
+            
+            # 💡 【超重要】月と旬の両方を最初から指定して、サーバーへの負荷を100分の1に激減
+            docs = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period).stream()
+            
+            base_photos = []
+            for doc in docs:
+                pdata = doc.to_dict()
+                if not pdata: continue
+                coords = get_lat_lon(pdata)
+                if coords:
+                    if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) <= 250.0:
+                        base_photos.append(pdata)
+                else:
+                    flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
+                    pref = str(flat_data.get('prefecture') or pdata.get('Prefecture', ''))
+                    if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
+                        base_photos.append(pdata)
 
-            # キーワード集計（アナリティクス）
+            # キーワード集計
             subjects, point_names, trends = [], [], []
             for p in base_photos:
                 flat = {str(k).lower(): v for k, v in p.items() if v}
-                
                 sub = flat.get('subject') or p.get('Subject')
                 if sub and str(sub).lower() != 'nan' and str(sub).strip(): subjects.append(str(sub).strip())
-                
                 pt = get_photo_place_name(p)
                 if pt and pt != "未知の撮影地": point_names.append(pt)
                 
@@ -287,7 +275,6 @@ def handle_line_message(event):
             for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
             choices.append({"label": "❌ やめる", "text": "やめる"})
 
-            # 重いJSONデータは一切保存せず、テキストと選択肢だけを安全ロック
             session_ref.set({
                 "month": target_month, "period": target_period,
                 "menu_text": reply_text, "menu_choices_json": json.dumps(choices)
@@ -296,11 +283,12 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=create_大文字選択肢_ui(reply_text, choices)))
             return
 
-        # ─── 🗄️ セッションが存在する場合の「紙芝居遷移」 ───
+        # ─── 🗄️ 紙芝居遷移ハンドリング ───
         state = session_doc.to_dict()
-        base_photos = get_filtered_photos(target_month, target_period)
+        base_photos = db.collection('Master_Photos').where('Month', '==', target_month).where('Period', '==', target_period).stream()
+        base_photos = [d.to_dict() for d in base_photos if d.to_dict()]
 
-        # ─── 📸 被写体 or ポイントボタンが押された場合（2枚スライド表示） ───
+        # ─── 📸 被写体 or ポイントが選ばれた場合 ───
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
             is_sub = "選ぶ被写体:" in user_message
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
@@ -340,11 +328,10 @@ def handle_line_message(event):
 
             location = get_photo_place_name(target_photo)
 
-            # 🟢 パターンA: 撮影ポイント（場所）が完結選定された場合
             if sel_type == "place" or "ポイント" in user_message:
-                session_ref.delete() # 完結のためセッション削除
+                session_ref.delete()
 
-                # LINEブラウザからGoogle Mapsアプリが起動する、クロスプラットフォーム公式URLに準拠
+                # 公式URLスキーム統合（LINE内からマップを1秒起動）
                 map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
                 route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
@@ -372,33 +359,38 @@ def handle_line_message(event):
                 
                 line_bot_api.reply_message(reply_token, [TextSendMessage(text=reply_text), FlexSendMessage(alt_text="最終ルート案内レポート", contents=bubble_json)])
                 return
-
-            # 🔵 パターンB: 被写体が選ばれた場合（周辺の具体的なポイント3択へ誘導）
             else:
                 reply_text = f"「{word_name}ですとこのあたりに撮りに行く方がおおいようです。」"
-                
                 extracted_places = []
                 for p in matched:
                     p_name = get_photo_place_name(p)
                     if p_name and p_name != "未知の撮影地" and p_name not in extracted_places:
                         extracted_places.append(p_name)
                         if len(extracted_places) >= 3: break
-                
                 if not extracted_places: extracted_places = ["周辺主要スポット"]
 
                 sub_choices = []
                 for pl in extracted_places:
                     sub_choices.append({"label": f"📍 ポイント: {pl}", "text": f"選ぶポイント: {pl}"})
-                sub_choices.append({"label": "❌ やめる", "text": "やめる"})
+                sub_choices.append({"label": "❌ やめる", "text": "やめる"} )
 
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="周辺の撮影ポイント提案", contents=create_大文字選択肢_ui(reply_text, sub_choices)))
                 return
 
     except Exception as e:
+        error_str = str(e)
         print(f"🔥 Critical StackTrace:\n{traceback.format_exc()}")
-        try:
-            line_bot_api.reply_message(reply_token, TextSendMessage(text="本棚の通信が一時的に瞬断しました。もう一度だけ「明日のおすすめ」とお声がけください。"))
-        except: pass
+        
+        # ─── ⚙️ 初回デプロイ時のみ必要なインデックス自動生成URLの抽出 ───
+        if "https://console.firebase.google.com" in error_str:
+            url_start = error_str.find("https://console.firebase.google.com")
+            index_url = error_str[url_start:].split()[0]
+            msg = f"⚙️ Firestoreの複合インデックス設定が必要です。\n以下のリンクを一度だけクリックして有効化してください（数分で完了します）：\n\n{index_url}"
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=msg))
+        else:
+            try:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="本棚の通信が一時的に瞬断しました。もう一度「明日のおすすめ」とお声がけください。"))
+            except: pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
