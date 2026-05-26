@@ -46,7 +46,7 @@ def generate_fupc_url(photo_data):
     
     if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        # 🎯 重複スラッシュ（//）を確実に単一の / に自動クレンジング
+        # 重複スラッシュ(//)を確実に単一の / に自動修正
         cleaned_url = re.sub(r'(?<!:)/+', '/', raw_url)
         return cleaned_url
     return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
@@ -63,7 +63,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    # 🎯 全件検索NGの絶対厳守クエリ
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -84,7 +83,6 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
-        # 🎯 【エラーの真犯人】secondary から不正な color 属性を完全消去！これでLINEに弾かれません
         buttons_contents.append({
             "type": "button",
             "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
@@ -97,29 +95,32 @@ def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🎯 クロフチカット（cover）を維持した標準カルーセル
+    # 🎯 【革新】不揃いな3枚目を廃止し、写真の下に直接「ここに行く」標準ボタンを配置！
+    # 🎯 これによりバブルの構造が100%完全一致するため、LINEの表示エラーが根底から消滅します
     return {
         "type": "carousel",
         "contents": [
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True}]}
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "md", 
+                    "contents": [
+                        {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
+                    ]
+                }
             },
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True}]}
-            },
-            {
-                "type": "bubble",
                 "body": {
                     "type": "box", "layout": "vertical", "spacing": "md", 
                     "contents": [
-                        {"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "xl", "margin": "md"},
-                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "sm"},
-                        {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"},
-                        {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}
+                        {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
+                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
             }
