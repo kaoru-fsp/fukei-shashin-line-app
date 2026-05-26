@@ -1,4 +1,4 @@
-import os
+vaimport os
 import json
 import random
 import re
@@ -81,36 +81,36 @@ def create_ui_buttons(reply_text, choices_list):
             "action": {"type": "message", "label": item["label"], "text": item["text"]},
             "style": "secondary", "color": "#e0e0e0", "margin": "md", "height": "md"
         })
-    # 🔎 案内文のサイズを「3xl（超特大）」、太字へ圧倒的拡大
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "3xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
+    # 🎯 案内テキストを強制的に 30px（いつもの倍以上）に指定
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "30px", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "sm", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🔎 作品プレビューカード：見出しを最大級の「4xl」、補足文字を「xxl」へ限界突破拡大
+    # 🎯 プレビューカード：地名を 36px、作品名・撮影者を 26px に絶対固定
     return {
         "type": "carousel",
         "contents": [
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u1, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "xxl", "color": "#444444", "wrap": True}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "36px", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t1}」\n(撮影: {a1} 様)", "size": "26px", "color": "#444444", "wrap": True}]}
             },
             {
                 "type": "bubble", "backgroundColor": "#ffffff",
                 "hero": {"type": "image", "url": u2, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
-                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "xxl", "color": "#444444", "wrap": True}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "36px", "wrap": True, "color": "#111111"}, {"type": "text", "text": f"「{t2}」\n(撮影: {a2} 様)", "size": "26px", "color": "#444444", "wrap": True}]}
             },
             {
                 "type": "bubble",
-                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "4xl", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
+                "body": {"type": "box", "layout": "vertical", "spacing": "lg", "contents": [{"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "36px", "margin": "md"}, {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm", "height": "md"}, {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}]}
             }
         ]
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🔎 最終案内：地名をLINE規格最大の「5xl」、全項目・プロ選評・現地解説を「xxl」へ強制巨大化
+    # 🎯 最終ルート案内：地名を 42px、項目名・スペック・選評本文すべてを 26px に一括で強制拡大
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -118,22 +118,22 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "xxl"},
-                {"type": "text", "text": location, "weight": "bold", "size": "5xl", "margin": "md", "wrap": True},
+                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "24px"},
+                {"type": "text", "text": location, "weight": "bold", "size": "42px", "margin": "md", "wrap": True},
                 {
                     "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
                     "contents": [
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "xxl", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "xxl", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "xxl", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "xxl", "flex": 5}]},
-                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "xxl", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "xxl", "flex": 5}]}
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": f"{title}\n(撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]},
+                        {"type": "box", "layout": "baseline", "spacing": "md", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "26px", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "26px", "flex": 5}]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "3xl", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "xxl", "color": "#222222", "margin": "lg", "lineSpacing": "md"}
+                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "30px", "color": "#111111"},
+                        {"type": "text", "text": guide, "wrap": True, "size": "26px", "color": "#222222", "margin": "lg", "lineSpacing": "sm"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
