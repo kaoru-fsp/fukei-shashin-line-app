@@ -39,11 +39,14 @@ def get_photo_place_name(pdata):
 
 def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
+    if published.endswith('.0'): published = published[:-2]
+    
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
+    if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
+    
     if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        # 🎯 一旦URLを組み立てます
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        # 🎯 【バグ根絶】https:// 以外の場所で発生する重複スラッシュ（//）を確実に1つの / に自動修正
+        # 🎯 重複スラッシュ（//）を確実に単一の / に自動クレンジングして写真URLを正常化
         cleaned_url = re.sub(r'(?<!:)/+', '/', raw_url)
         return cleaned_url
     return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
@@ -60,6 +63,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
+    # 🎯 【全件検索NGの絶対厳守】インデックスを用いた超高速ピンポイント検索
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -80,33 +84,20 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
-        # 🎯 巨大文字を維持したカスタムBoxデザインボタン
+        # 🎯 完全標準のボタン部品（type: "button"）に回帰。エラーの起きない安全設計
         buttons_contents.append({
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#e0e0e0",
-            "cornerRadius": "md",
-            "paddingAll": "xl",
-            "margin": "md",
-            "action": {"type": "message", "label": item["label"], "text": item["text"]},
-            "contents": [
-                {
-                    "type": "text",
-                    "text": item["label"],
-                    "align": "center",
-                    "weight": "bold",
-                    "size": "xl",
-                    "color": "#111111"
-                }
-            ]
+            "type": "button",
+            "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
+            "style": "secondary", "color": "#e0e0e0", "margin": "sm"
         })
-    # 🔎 本文案内テキストサイズ：ご指示通り3分の2（xl）にジャスト調整
     return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
+    # 🎯 プレビューカードもすべて使い慣れた標準ボタンに修正
+    # 🎯 クロフチカット（cover）を維持
     return {
         "type": "carousel",
         "contents": [
@@ -123,24 +114,12 @@ def create_preview_carousel(photo1, photo2, word_name):
             {
                 "type": "bubble",
                 "body": {
-                    "type": "box", "layout": "vertical", "spacing": "lg", 
+                    "type": "box", "layout": "vertical", "spacing": "md", 
                     "contents": [
-                        {"type": "text", "text": f"🏁 【{word_name}】", "weight": "bold", "size": "xl", "margin": "md"},
-                        {
-                            "type": "box", "layout": "vertical", "backgroundColor": "#1DB954", "cornerRadius": "md", "paddingAll": "xl", "margin": "md",
-                            "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"},
-                            "contents": [{"type": "text", "text": "👉 ここに行く", "align": "center", "weight": "bold", "size": "xl", "color": "#ffffff"}]
-                        },
-                        {
-                            "type": "box", "layout": "vertical", "backgroundColor": "#e0e0e0", "cornerRadius": "md", "paddingAll": "xl", "margin": "sm",
-                            "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"},
-                            "contents": [{"type": "text", "text": "⬅️ 戻る", "align": "center", "weight": "bold", "size": "xl", "color": "#111111"}]
-                        },
-                        {
-                            "type": "box", "layout": "vertical", "backgroundColor": "#ffffff", "cornerRadius": "md", "paddingAll": "md", "margin": "sm",
-                            "action": {"type": "message", "label": "❌ やめる", "text": "やめる"},
-                            "contents": [{"type": "text", "text": "❌ やめる", "align": "center", "weight": "bold", "size": "md", "color": "#ff0000"}]
-                        }
+                        {"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "xl", "margin": "md"},
+                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}
                     ]
                 }
             }
@@ -148,6 +127,7 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
+    # 🎯 最終案内：すっきりした標準仕様に統一、クロフチカット（cover）を維持
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -175,18 +155,10 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
-                    "type": "box", "layout": "vertical", "margin": "lg", "spacing": "md",
+                    "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
                     "contents": [
-                        {
-                            "type": "box", "layout": "vertical", "backgroundColor": "#e0e0e0", "cornerRadius": "md", "paddingAll": "xl", "margin": "sm",
-                            "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url},
-                            "contents": [{"type": "text", "text": "🗺️ Googleマップで場所を確認", "align": "center", "weight": "bold", "size": "xl", "color": "#111111"}]
-                        },
-                        {
-                            "type": "box", "layout": "vertical", "backgroundColor": "#1DB954", "cornerRadius": "md", "paddingAll": "xl", "margin": "sm",
-                            "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url},
-                            "contents": [{"type": "text", "text": "🚗 東京からの高速ルートナビ", "align": "center", "weight": "bold", "size": "xl", "color": "#ffffff"}]
-                        }
+                        {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
+                        {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
                     ]
                 }
             ]
@@ -273,72 +245,4 @@ def handle_line_message(event):
             reply_text = f"お出かけの条件でお探ししました。\n\n{target_m}月{decade_str}頃の時期（前後あわせて30日間）ですと、{sub_top_str}などの被写体が人気のようです。撮影ポイントとしては{point_top_str}などがございます。興味を感じるものはありますか？"
             
             choices = []
-            for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
-            for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
-            choices.append({"label": "❌ やめる", "text": "やめる"})
-
-            session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="ご提案", contents=create_ui_buttons(reply_text, choices)))
-            return
-
-        state = session_doc.to_dict() or {}
-        raw_m = state.get("target_m") or state.get("month") or curr_m
-        if isinstance(raw_m, str):
-            m_match = re.search(r'(\d+)', raw_m)
-            target_m = int(m_match.group(1)) if m_match else curr_m
-        else:
-            target_m = int(raw_m)
-
-        raw_d = state.get("target_d") or curr_d
-        target_d = int(raw_d) if raw_d else curr_d
-        
-        if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
-            word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
-            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
-            
-            if not base_photos:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにく作品情報が見つかりませんでした。"))
-                return
-            
-            p1 = base_photos[0]
-            p2 = base_photos[1] if len(base_photos) > 1 else base_photos[0]
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="作品プレビュー", contents=create_preview_carousel(p1, p2, word_name)))
-            return
-
-        if "ここに行く:" in user_message:
-            word_name = user_message.replace("ここに行く:", "").strip()
-            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
-
-            if not base_photos:
-                 line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにくルート情報が見つかりませんでした。"))
-                 return
-            target_photo = random.choice(base_photos)
-
-            location = get_photo_place_name(target_photo)
-            session_ref.delete()
-
-            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
-            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
-
-            title = target_photo.get('Title') or "無題"
-            author = target_photo.get('Winner') or "不明"
-            camera = target_photo.get('Camera') or "情報なし"
-            lens = target_photo.get('Lens') or "情報なし"
-            settings = target_photo.get('Exposure') or "情報なし"
-            guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
-
-            reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
-            reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
-            
-            line_bot_api.reply_message(reply_token, [
-                TextSendMessage(text=reply_wait_text),
-                TextSendMessage(text=reply_final_text),
-                FlexSendMessage(alt_text="ルート案内", contents=create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo)))
-            ])
-            return
-
-    except:
-        print(traceback.format_exc())
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+            for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s
