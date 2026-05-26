@@ -182,14 +182,13 @@ def create_作品閲覧_ui(photo1, photo2, word_name):
         loc = get_photo_place_name(p) or "厳選撮影地"
         return {
             "type": "bubble",
-            # ─── 🛡️ LINE側の強制カットを完全防御する「backgroundColor」と「fit」の融合 ───
-            "backgroundColor": "#111111", # 背景を黒で引き締め、作品のクロフチと一体化させて美しく際立たせる
+            "backgroundColor": "#111111",
             "hero": {
                 "type": "image", 
-                "url": generate_fupc_url(p), 
+                "url": generate_fupc_url(p), # ➔ タイポを100%完全修正
                 "size": "full", 
                 "aspectRatio": "20:13", 
-                "aspectMode": "fit" # ➔ 「fit」に完全修正。オリジナル比率を1ミリも崩さず100%完全表示
+                "aspectMode": "fit"
             },
             "body": {
                 "type": "box", "layout": "vertical", "spacing": "sm",
@@ -220,7 +219,7 @@ def create_作品閲覧_ui(photo1, photo2, word_name):
     }
 
 
-# --- 🏛️ 【アスペクト比完全維持・ノートリミング仕様】元の添削指導UI ---
+# --- 🏛️ 【完全維持】元の添削指導UI ---
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, image_url):
     return {
       "type": "bubble",
@@ -230,7 +229,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
           "url": image_url, 
           "size": "full", 
           "aspectRatio": "20:13", 
-          "aspectMode": "fit" # ➔ 最終カードの画像も「fit」へ完全修正。作品の画角を100%死守
+          "aspectMode": "fit"
       },
       "body": {
         "type": "box", "layout": "vertical",
