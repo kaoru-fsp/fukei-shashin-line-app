@@ -52,10 +52,9 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 
 # --- ドキュメントから安全に緯度経度を抽出 ---
-def get_lat_lon(data):
-    flat = {str(k).lower(): v for k, v in data.items() if v}
-    lat = flat.get('latitude') or flat.get('lat')
-    lon = flat.get('longitude') or flat.get('lon')
+def get_lat_lon(flat_data):
+    lat = flat_data.get('latitude') or flat_data.get('lat')
+    lon = flat_data.get('longitude') or flat_data.get('lon')
     try:
         if lat is not None and lon is not None:
             return float(lat), float(lon)
@@ -63,27 +62,27 @@ def get_lat_lon(data):
     return None
 
 
-# --- 項目「Place」が空欄の場合「Area」を表示するルール ---
-def get_photo_place_name(pdata):
-    flat = {str(k).lower(): v for k, v in pdata.items() if v}
-    place = flat.get('place') or pdata.get('Place')
+# --- 項目「Place」が空欄の場合「Area」や「Location」を表示する揺らぎ吸収ルール ---
+def get_photo_place_name(flat_data):
+    place = flat_data.get('place')
     if place and str(place).lower() != 'nan' and str(place).strip():
         return str(place).strip()
-    area = flat.get('area') or pdata.get('Area') or flat.get('location') or pdata.get('Location')
+    area = flat_data.get('area') or flat_data.get('location')
     if area and str(area).lower() != 'nan' and str(area).strip():
         return str(area).strip()
-    return ""
+    return "厳選撮影地"
 
 
-# ─── 🌸 【正真正銘の正解定義】FUPC公式URL生成関数 ───
-def generate_fupc_url(photo_data):
-    flat = {str(k).lower(): v for k, v in photo_data.items() if v}
-    published = str(flat.get('published') or photo_data.get('Published', '')).strip()
-    pic_file_name = str(flat.get('picfilename') or flat.get('pic_file_name') or photo_data.get('PicFileName', '')).strip()
-    return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
+# --- 🔗 仕様書に完全準拠した閲覧用画像URL生成 ---
+def generate_fupc_url(flat_data):
+    published = str(flat_data.get('published') or flat_data.get('year') or '').strip()
+    pic_file_name = str(flat_data.get('picfilename') or flat_data.get('pic_file_name') or '').strip()
+    if len(published) >= 4 and pic_file_name:
+        return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
+    return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
 
 
-# --- 🛡️ 直近10年限定×インテリジェント一撃クエリ抽出エンジン ---
+# --- 🛡️ 【完全更地化】余計な足切りを100%全廃した純粋データ抽出エンジン ---
 def get_filtered_photos(target_month, target_period, focus_keyword=None):
     photos_ref = db.collection('Master_Photos')
     
@@ -92,67 +91,71 @@ def get_filtered_photos(target_month, target_period, focus_keyword=None):
     try: month_candidates.append(int(m_num))
     except: pass
 
-    query = photos_ref.where('Month', 'in', month_candidates)
-    
-    if focus_keyword:
-        if "県" in focus_keyword or focus_keyword in ["長野", "山梨", "静岡", "福島", "山形", "新潟"]:
-            pref_name = focus_keyword if "県" in focus_keyword else f"{focus_keyword}県"
-            query = query.where('Prefecture', '==', pref_name)
+    # 1. まず今月の候補でクエリを発行
+    docs = []
+    try:
+        docs = list(photos_ref.where('Month', 'in', month_candidates).stream())
+    except:
+        pass
+        
+    # 💡 万が一フィールド名のズレ等でクエリが空振った場合は、先頭からダイレクトロードして手動救出
+    if not docs:
+        try:
+            docs = list(photos_ref.limit(300).stream())
+        except:
+            return []
 
-    docs = query.stream()
-    
-    now_year = datetime.now().year
     filtered_photos = []
-    
     for doc in docs:
         pdata = doc.to_dict()
         if not pdata: continue
         
-        db_period = str(pdata.get('Period', '')).strip()
-        if target_period not in db_period: continue
-            
-        flat_data = {str(k).lower(): v for k, v in pdata.items() if v}
-        pub = flat_data.get('published') or pdata.get('Published')
-        pic = flat_data.get('picfilename') or flat_data.get('pic_file_name') or pdata.get('PicFileName')
-        place_name = get_photo_place_name(pdata)
+        # ─── ⚡ 【超重要】全フィールドのキーを「小文字・空白なし」に完全統一 ───
+        # これにより、インポート時の大文字小文字のズレによるデータ失踪を永久に完全封鎖します
+        flat = {str(k).lower().strip(): v for k, v in pdata.items() if v is not None}
         
-        if not pub or not pic or not place_name: continue
-
-        try:
-            pub_year = int(str(pub)[:4])
-            if pub_year < (now_year - 10): 
-                continue
-        except:
+        # 月の合致チェック（手動救出・補正用）
+        db_month = str(flat.get('month', '')).strip().replace("月", "")
+        if db_month and (db_month != m_num and db_month != m_num.zfill(2) and target_month not in str(flat.get('month', ''))):
+            continue
+            
+        # 旬の合致チェック
+        db_period = str(flat.get('period', '')).strip()
+        if db_period and target_period not in db_period:
             continue
 
-        if focus_keyword and focus_keyword not in ["長野", "山梨", "静岡", "福島", "山形", "新潟", "長野県", "山梨県", "静岡県"]:
-            combined_text = str(pdata.get('Title', '')) + str(pdata.get('Location', '')) + place_name
-            if focus_keyword not in combined_text:
-                continue
+        # 🚨 AIが勝手に書いていた「10年限定」や「必須項目欠損によるcontinue足切り」をすべて永久に撤廃。
+        # データベースにあるがままの事実を100%そのまま生かします。
 
-        if not focus_keyword:
-            coords = get_lat_lon(pdata)
-            if coords:
-                if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) <= 250.0:
-                    filtered_photos.append(pdata)
-            else:
-                pref = str(flat_data.get('prefecture') or pdata.get('Prefecture', ''))
-                if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
-                    filtered_photos.append(pdata)
+        # ユーザーがキーワード（長野、滝など）を指定している場合の一撃部分一致抽出
+        if focus_keyword:
+            search_pool = (
+                str(flat.get('title', '')) + 
+                str(flat.get('location', '')) + 
+                str(flat.get('place', '')) + 
+                str(flat.get('area', '')) + 
+                str(flat.get('prefecture', ''))
+            )
+            if focus_keyword not in search_pool:
+                continue
         else:
-            filtered_photos.append(pdata)
-                
-    if not filtered_photos and not focus_keyword:
-        fallback_docs = photos_ref.where('Month', 'in', month_candidates).limit(100).stream()
-        for d in fallback_docs:
-            p = d.to_dict()
-            if p and p.get('PicFileName') and get_photo_place_name(p):
-                filtered_photos.append(p)
-                
+            # 地域指定がない1往復目のみ、都内近郊の範囲を優しくスキャン
+            coords = get_lat_lon(flat)
+            if coords:
+                if calculate_distance(TOKYO_LAT, TOKYO_LON, coords[0], coords[1]) > 250.0:
+                    continue
+            else:
+                pref = str(flat.get('prefecture', ''))
+                if pref and not any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
+                    continue
+                    
+        # 内部処理用に小文字統一データを引き渡す
+        filtered_photos.append(flat)
+        
     return filtered_photos
 
 
-# --- 🗃️ 大文字・大ボタン仕様 of カスタムメニュー作成 ---
+# --- 🗃️ 大文字・大ボタン仕様のカスタムメニュー作成 ---
 def create_大文字選択肢_ui(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
@@ -173,21 +176,17 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# --- 🖼️ 【FUPC完全統治・画角死守】入賞作品2点紙芝居UI ---
+# --- 🖼️ 【アスペクト比完全維持・ノートリ仕様 ＆ タイポ完全消滅】入賞作品2点紙芝居UI ---
 def create_作品閲覧_ui(photo1, photo2, word_name):
-    # ─── 🛡️ 1枚目のスライド生成（generate_fupc_urlに完全結合） ───
-    flat1 = {str(k).lower(): v for k, v in photo1.items() if v}
-    title1 = flat1.get('title') or flat1.get('subject') or photo1.get('Title') or "無題"
-    author1 = flat1.get('author') or flat1.get('winner') or photo1.get('Author') or "写真家"
-    loc1 = get_photo_place_name(photo1) or "厳選撮影地"
+    title1 = photo1.get('title') or "無題"
+    author1 = photo1.get('author') or photo1.get('winner') or "写真家"
+    loc1 = get_photo_place_name(photo1)
     img_url1 = generate_fupc_url(photo1)
 
-    # ─── 🛡️ 2枚目のスライド生成（uを完全にパースして結合完了） ───
-    flat2 = {str(k).lower(): v for k, v in photo2.items() if v}
-    title2 = flat2.get('title') or flat2.get('subject') or photo2.get('Title') or "無題"
-    author2 = flat2.get('author') or flat2.get('winner') or photo2.get('Author') or "写真家"
-    loc2 = get_photo_place_name(photo2) or "厳選撮影地"
-    img_url2 = generate_fupc_url(photo2) 
+    title2 = photo2.get('title') or "無題"
+    author2 = photo2.get('author') or photo2.get('winner') or "写真家"
+    loc2 = get_photo_place_name(photo2)
+    img_url2 = generate_fupc_url(photo2)
 
     return {
         "type": "carousel",
@@ -321,7 +320,7 @@ def handle_line_message(event):
 
         # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス集計 ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
-            print("🚀 超高速データ駆動型集計を開始...")
+            print("🚀 データ駆動型集計を開始...")
             
             extracted_loc = None
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形"]:
@@ -330,31 +329,30 @@ def handle_line_message(event):
             base_photos = get_filtered_photos(default_month, default_period, focus_keyword=extracted_loc)
 
             if not base_photos:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいま書棚を隈なくお探しいたしましたが、明日のご案内路にふさわしい名作の記録が、あいにく見つかりませんでした。少し時期やキーワードを変えてお声がけいただけますと幸いです。"))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいま書棚をお探しいたしましたが、明日のご案内路にふさわしい名作の記録が、あいにく見つかりませんでした。少し時期やキーワードを変えてお声がけいただけますと幸いです。"))
                 return
 
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "紅葉", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ"]
             
             subjects, point_names, trends = [], [], []
             for p in base_photos:
-                flat = {str(k).lower(): v for k, v in p.items() if v}
-                title_str = str(p.get('Title', ''))
-                loc_str = str(p.get('Location', ''))
+                title_str = str(p.get('title', ''))
+                loc_str = str(p.get('location', ''))
                 combined_text = title_str + loc_str + get_photo_place_name(p)
                 
                 for kw in photo_keywords:
                     if kw in combined_text: subjects.append(kw)
                 
                 pt = get_photo_place_name(p)
-                if pt: point_names.append(pt)
+                if pt and pt != "厳選撮影地": point_names.append(pt)
                 
-                pub = flat.get('published') or p.get('Published')
+                pub = p.get('published') or p.get('year')
                 try:
                     pub_year = int(str(pub)[:4])
                     if (now.year - 3) <= pub_year <= now.year:
                         for kw in photo_keywords:
                             if kw in combined_text: trends.append(kw)
-                        if pt: trends.append(pt)
+                        if pt and pt != "厳選撮影地": trends.append(pt)
                 except: pass
 
             sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
@@ -362,7 +360,7 @@ def handle_line_message(event):
             trend_ranks = [w[0] for w in Counter(trends).most_common(3) if w[0]]
 
             if not sub_ranks: sub_ranks = ["風景"]
-            if not point_ranks: point_ranks = [get_photo_place_name(base_photos[0]) if base_photos else "撮影地"]
+            if not point_ranks: point_ranks = [get_photo_place_name(base_photos[0]) if base_photos else "厳選地"]
 
             sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
             point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
@@ -388,7 +386,7 @@ def handle_line_message(event):
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_obj))
             return
 
-        # ─── 🗄️ 2往復目以降：一撃クエリ自動展開ルート ───
+        # ─── 🗄️ 2往復目以降：揺らぎなきデータ直結展開 ───
         state = session_doc.to_dict()
         target_month = state.get("month", default_month)
         target_period = state.get("period", default_period)
@@ -402,7 +400,7 @@ def handle_line_message(event):
 
             matched = []
             for p in base_photos:
-                combined_all_text = str(p.get('Title', '')) + str(p.get('Location', '')) + get_photo_place_name(p)
+                combined_all_text = str(p.get('title', '')) + str(p.get('location', '')) + get_photo_place_name(p)
                 if word_name in combined_all_text: matched.append(p)
                         
             if not matched: matched = base_photos[:2]
@@ -424,7 +422,7 @@ def handle_line_message(event):
 
             matched = []
             for p in base_photos:
-                combined_all_text = str(p.get('Title', '')) + str(p.get('Location', '')) + get_photo_place_name(p)
+                combined_all_text = str(p.get('title', '')) + str(p.get('location', '')) + get_photo_place_name(p)
                 if word_name in combined_all_text: matched.append(p)
             if not matched: matched = base_photos
             target_photo = random.choice(matched)
@@ -435,22 +433,16 @@ def handle_line_message(event):
             map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
             route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
-            flat_data = {str(k).lower(): v for k, v in target_photo.items() if v}
-            published = flat_data.get('published') or target_photo.get('Published')
-            pic_file_name = flat_data.get('picfilename') or flat_data.get('pic_file_name') or target_photo.get('PicFileName')
-            
-            pub_str = str(published).strip()
-            final_image_url = f"{IMAGE_BASE_VIEW.rstrip('/')}/{pub_str[:4]}/{pub_str}/{str(pic_file_name).strip()}"
+            title = target_photo.get('title') or "無題"
+            author = target_photo.get('author') or target_photo.get('winner') or "不明"
+            camera = target_photo.get('camera_body') or target_photo.get('camera') or "情報なし"
+            lens = target_photo.get('lens') or "情報なし"
+            settings = target_photo.get('exposure') or f"F{target_photo.get('aperture', '-')} / ISO {target_photo.get('iso', '-')}"
+            weather = target_photo.get('weather') or "不明"
+            guide = target_photo.get('guide_page') or target_photo.get('context_advice') or 'ルートナビ情報は本棚に保管されています。'
+            judge_comment = target_photo.get('judge_comment_summary') or target_photo.get('logic_advice') or '素晴らしい構図の名作です。'
 
-            title = flat_data.get('title') or flat_data.get('subject') or target_photo.get('Title') or "無題"
-            author = flat_data.get('author') or flat_data.get('winner') or target_photo.get('Author') or "不明"
-            camera = flat_data.get('camera_body') or flat_data.get('camera') or target_photo.get('Camera_Body') or "情報なし"
-            lens = flat_data.get('lens') or target_photo.get('Lens') or "情報なし"
-            settings = flat_data.get('exposure') or f"F{flat_data.get('aperture', '-')} / ISO {flat_data.get('iso', '-')}"
-            weather = flat_data.get('weather') or target_photo.get('Weather', '不明')
-            guide = flat_data.get('guide_page') or flat_data.get('context_advice') or 'ルートナビ情報は本棚に保管されています。'
-            judge_comment = flat_data.get('judge_comment_summary') or flat_data.get('logic_advice') or '素晴らしい構図の名作です。'
-
+            final_image_url = generate_fupc_url(target_photo)
             reply_text = f"「{location}ですね。わかりました。では{location}へのルートをご案内致します。」"
             
             final_bubble_obj = BubbleContainer.new_from_json_dict(create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, final_image_url))
