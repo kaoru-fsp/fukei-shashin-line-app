@@ -18,7 +18,6 @@ TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# 🎯 日本の47都道府県リスト（これ以外はすべて海外とみなして遮断します）
 PREFECTURES = [
     "北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島", "茨城", "栃木", "群馬",
     "埼玉", "千葉", "東京", "神奈川", "新潟", "富山", "石川", "福井", "山梨", "長野",
@@ -41,17 +40,19 @@ except Exception as e:
 
 def get_photo_place_name(pdata):
     place = str(pdata.get('Place', '')).strip()
+    # 🎯 全てのテキストから不可視文字 \u2060 を完全消去
+    place = place.replace('\u2060', '')
     if place and place.lower() not in ['nan', 'null', 'none', '']: return place
-    area = str(pdata.get('Area', '')).strip()
+    area = str(pdata.get('Area', '')).strip().replace('\u2060', '')
     if area and area.lower() not in ['nan', 'null', 'none', '']: return area
     return "厳選撮影地"
 
 def generate_fupc_url(photo_data):
-    published = str(photo_data.get('Published', '')).strip()
-    pic_file_name = str(photo_data.get('PicFileName', '')).strip()
+    published = str(photo_data.get('Published', '')).strip().replace('\u2060', '')
+    pic_file_name = str(photo_data.get('PicFileName', '')).strip().replace('\u2060', '')
     
     if published and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        # 🎯 お手本通りの、スラッシュが重複しない半角英数字URLを生成
+        # 🎯 見えないゴミ文字を完全に排除した状態で完璧に結合
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
         return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
@@ -76,11 +77,11 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
         pdata = doc.to_dict()
         if not pdata: continue
         
-        # 🎯 【台湾・海外100%完全除外ロジック】
         loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
-        if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ", "タイ"]):
+        loc_pool = loc_pool.replace('\u2060', '')
+        
+        if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]):
             continue
-        # 🎯 日本の47都道府県名が1文字も含まれていないデータは、一律ですべて海外とみなして強制スキップ
         if not any(pref in loc_pool for pref in PREFECTURES):
             continue
             
@@ -89,7 +90,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
                 str(pdata.get('Title', '')) + str(pdata.get('Area', '')) + 
                 str(pdata.get('Place', '')) + str(pdata.get('Subject', '')) + 
                 str(pdata.get('WinnerArea', ''))
-            )
+            ).replace('\u2060', '')
             if focus_keyword not in search_pool: continue
         filtered_photos.append(pdata)
     return filtered_photos
@@ -120,7 +121,6 @@ def create_preview_carousel(photo1, photo2, word_name):
                     "contents": [
                         {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
-                        {"type": "text", "text": f"🔗 URL: {u1}", "size": "xs", "color": "#888888", "wrap": True}, # 🎯 デバッグ用：生URLテキスト表示
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -133,7 +133,6 @@ def create_preview_carousel(photo1, photo2, word_name):
                     "contents": [
                         {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
                         {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
-                        {"type": "text", "text": f"🔗 URL: {u2}", "size": "xs", "color": "#888888", "wrap": True}, # 🎯 デバッグ用：生URLテキスト表示
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -142,7 +141,6 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🎯 【超重要】LINEに確実に送信を通すため、未知の属性や複雑な横並びを全廃し、最も頑丈なプレーン縦並びに完全修正しました
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -158,8 +156,7 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
                         {"type": "text", "text": f"🔶 作品名: {title}", "wrap": True, "color": "#111111", "size": "md"},
                         {"type": "text", "text": f"👤 撮影者: {author} 様", "wrap": True, "color": "#111111", "size": "md"},
                         {"type": "text", "text": f"📷 推奨機材: {camera} / {lens}", "wrap": True, "color": "#111111", "size": "md"},
-                        {"type": "text", "text": f"⚙️ 撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"},
-                        {"type": "text", "text": f"🔗 写真URL: {image_url}", "wrap": True, "color": "#0000ff", "size": "xs"} # 🎯 デバッグ用：生URLテキスト表示
+                        {"type": "text", "text": f"⚙️ 撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -245,7 +242,7 @@ def handle_line_message(event):
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ", "雪景色", "山焼き", "ナノハナ", "紅葉", "落葉", "冬桜"]
             subjects, point_names = [], []
             for p in base_photos:
-                combined_text = str(p.get('Title', '')) + str(p.get('Subject', '')) + str(p.get('Area', ''))
+                combined_text = (str(p.get('Title', '')) + str(p.get('Subject', '')) + str(p.get('Area', ''))).replace('\u2060', '')
                 for kw in photo_keywords:
                     if kw in combined_text: subjects.append(kw)
                 pt = get_photo_place_name(p)
@@ -309,14 +306,13 @@ def handle_line_message(event):
             map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
             route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
-            title = target_photo.get('Title') or "無題"
-            author = target_photo.get('Winner') or "不明"
-            camera = target_photo.get('Camera') or "情報なし"
-            lens = target_photo.get('Lens') or "情報なし"
-            settings = target_photo.get('Exposure') or "情報なし"
-            guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
+            title = (target_photo.get('Title') or "無題").replace('\u2060', '')
+            author = (target_photo.get('Winner') or "不明").replace('\u2060', '')
+            camera = (target_photo.get('Camera') or "情報なし").replace('\u2060', '')
+            lens = (target_photo.get('Lens') or "情報なし").replace('\u2060', '')
+            settings = (target_photo.get('Exposure') or "情報なし").replace('\u2060', '')
+            guide = (target_photo.get('Selection Comments') or '詳細な選評情報はありません。').replace('\u2060', '')
 
-            # 🎯 あなたに指定していただいたセリフ
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
