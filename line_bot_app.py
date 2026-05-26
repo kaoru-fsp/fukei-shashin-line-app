@@ -1,6 +1,235 @@
 import os
 import json
 import random
+import math
+import traceback
+from datetime import datetime
+from flask import Flask, request, abort
+from linebot import LineBotApi
+from linebot.models import TextSendMessage, FlexSendMessage
+import firebase_admin
+from firebase_admin import credentials, firestore
+from openai import OpenAI
+from collections import Counter
+
+app = Flask(__name__)
+
+# ==========================================================
+# 📸 定数定義（仕様書に準拠。将来のサーバー移転時もここを変えるだけ）
+# ==========================================================
+IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
+TOKYO_LAT = 35.6895  # 東京の基準点（現在地リファレンス：新宿・都庁付近）
+TOKYO_LON = 139.6917
+
+# --- LINE / OpenAI API の初期化 ---
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+ai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# --- Firebase / Firestore の初期化 ---
+db = None
+try:
+    firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
+    if firebase_creds_json:
+        creds_dict = json.loads(firebase_creds_json)
+        cred = credentials.Certificate(creds_dict)
+        firebase_admin.initialize_app(cred)
+        db = firestore.client()
+        print("Firestore initialized successfully.")
+except Exception as e:
+    print(f"Firestore initialization error: {e}")
+
+
+# --- 2点間の距離を算出するハヴェルサイン公式（半径250km判定用ツール） ---
+def calculate_distance(lat1, lon1, lat2, lon2):
+    rad_lat1, rad_lon1 = math.radians(lat1), math.radians(lon1)
+    rad_lat2, rad_lon2 = math.radians(lat2), math.radians(lon2)
+    d_lat = rad_lat2 - rad_lat1
+    d_lon = rad_lon2 - rad_lon1
+    a = math.sin(d_lat / 2) ** 2 + math.cos(rad_lat1) * math.cos(rad_lat2) * math.sin(d_lon / 2) ** 2
+    return 6371.0 * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
+
+
+# --- ドキュメントから安全に緯度経度を抽出するロジック ---
+def get_lat_lon(data):
+    flat = {str(k).lower(): v for k, v in data.items() if v}
+    lat = flat.get('latitude') or flat.get('lat')
+    lon = flat.get('longitude') or flat.get('lon')
+    try:
+        if lat is not None and lon is not None:
+            return float(lat), float(lon)
+    except:
+        pass
+    return None
+
+
+# --- 🔗 仕様書に完全準拠したFUPCサーバー閲覧用画像URL生成パーツ ---
+def generate_fupc_url(photo_data):
+    flat = {str(k).lower(): v for k, v in photo_data.items() if v}
+    published = str(flat.get('published') or photo_data.get('Published', '')).strip()
+    pic_file_name = str(flat.get('picfilename') or flat.get('pic_file_name') or photo_data.get('PicFileName', '')).strip()
+    if len(published) >= 4 and pic_file_name:
+        return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
+    return "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80"
+
+
+# --- 🎴 【大きな文字・大きなボタン】視認性抜群のカスタム選択肢メニューの組み立て ---
+def create_大文字選択肢_ui(reply_text, choices_list):
+    buttons_contents = []
+    for item in choices_list:
+        buttons_contents.append({
+            "type": "button",
+            "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
+            "style": "secondary", "color": "#f0f0f0", "margin": "sm"
+        })
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box", "layout": "vertical", "spacing": "md",
+            "contents": [
+                {"type": "text", "text": reply_text, "wrap": True, "size": "md", "color": "#111111", "weight": "bold"},
+                {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}
+            ]
+        }
+    }
+
+
+# --- 🖼️ 【本物画像2点スライド仕様】過去の入賞作品を大画面で見せる紙芝居UI ---
+def create_作品閲覧_ui(photo1, photo2, word_name):
+    def make_slide(p):
+        flat = {str(k).lower(): v for k, v in p.items() if v}
+        title = flat.get('title') or flat.get('subject') or p.get('Title', '無題')
+        author = flat.get('author') or flat.get('winner') or p.get('Author', '写真家')
+        loc = flat.get('location') or flat.get('area') or p.get('Location', '撮影地')
+        if flat.get('place') and str(flat.get('place')) != 'nan': loc = f"{loc} {flat.get('place')}"
+        return {
+            "type": "bubble",
+            "hero": {"type": "image", "url": generate_fupc_url(p), "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
+            "body": {
+                "type": "box", "layout": "vertical", "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": f"📍 {loc}", "weight": "bold", "size": "md", "wrap": True},
+                    {"type": "text", "text": f"「{title}」 (撮影: {author} 様)", "size": "sm", "color": "#555555", "wrap": True}
+                ]
+            }
+        }
+
+    return {
+        "type": "carousel",
+        "contents": [
+            make_slide(photo1),
+            make_slide(photo2),
+            {
+                "type": "bubble",
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "md", "alignItems": "center", "justifyContent": "center",
+                    "contents": [
+                        {"type": "text", "text": f"🏁 【{word_name}】のアプローチ", "weight": "bold", "size": "md", "margin": "md"},
+                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}
+                    ]
+                }
+            }
+        ]
+    }
+
+
+# --- 🏛️ 【完全維持 ＋ 地図ナビ対応】元の添削指導UI ---
+def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url):
+    global TARGET_IMAGE_URL
+    return {
+      "type": "bubble",
+      "hero": {"type": "image", "url": TARGET_IMAGE_URL, "size": "full", "aspectRatio": "20:13", "aspectMode": "cover"},
+      "body": {
+        "type": "box", "layout": "vertical",
+        "contents": [
+          {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "sm"},
+          {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "md", "wrap": True},
+          {
+            "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
+            "contents": [
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]},
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]},
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]}
+            ]
+          },
+          {"type": "separator", "margin": "xxl"},
+          {"type": "box", "layout": "vertical", "margin": "xxl", "contents": [{"type": "text", "text": "📖 【現地ナビ・アクセス】", "weight": "bold", "size": "md", "color": "#111111"}, {"type": "text", "text": guide, "wrap": True, "size": "sm", "color": "#555555", "margin": "md"}]},
+          {"type": "separator", "margin": "xxl"},
+          {"type": "box", "layout": "vertical", "margin": "xxl", "backgroundColor": "#f7f8fa", "cornerRadius": "md", "paddingAll": "md", "contents": [{"type": "text", "text": "🎓 【レベルアップ相談室・添削指導】", "weight": "bold", "size": "md", "color": "#e67e22"}, {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}]},
+          {"type": "separator", "margin": "xxl"},
+          {
+            "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
+            "contents": [
+                {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
+                {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
+            ]
+          }
+        ]
+      }
+    }
+
+
+# --- LINE Webhook 受信口 ---
+@app.route("/callback", methods=['POST'])
+def callback():
+    request_json = request.get_json()
+    events = request_json.get('events', [])
+    for event in events:
+        if event.get('type') == 'message' and event['message'].get('type') == 'text':
+            handle_line_message(event)
+    return 'OK', 200
+
+
+# --- 8. データベース連動型・対話アナリティクスエンジン ---
+def handle_line_message(event):
+    global TARGET_IMAGE_URL
+    user_id = event['source']['userId']
+    reply_token = event['replyToken']
+    user_message = event['message']['text'].strip()
+    
+    if db is None: return
+
+    now = datetime.now()
+    target_month = f"{now.month}月"
+    target_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
+
+    try:
+        session_ref = db.collection('User_Sessions').document(user_id)
+        session_doc = session_ref.get()
+
+        # ─── ❌ 「やめる」ボタンの即時クローズ処置 ───
+        if user_message == "やめる":
+            session_ref.delete()
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="ご用がありましたら、いつでもお声がけください。"))
+            return
+
+        # ─── 🔙 「戻る」ボタンによる元の集計選択メニューへの復元 ───
+        if user_message == "戻る" and session_doc.exists:
+            state = session_doc.to_dict()
+            menu_text = state.get("menu_text", "")
+            choices = json.loads(state.get("menu_choices_json", "[]"))
+            if menu_text and choices:
+                state["status"] = "SELECTING"
+                session_ref.set(state)
+                menu_json = create_大文字選択肢_ui(menu_text, choices)
+                line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュ提案メニュー", contents=menu_json))
+                return
+
+        # ─── 📊 ①＆②: 【1往復目 / 記憶がない状態】 36分割マトリクス × 半径250kmリアルタイム集計 ───
+        if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
+            print("初期集計を開始します...")
+            photos_ref = db.collection('Master_Photos')
+            docs = photos_ref.where('Month', '==', target_month).where('Period', '==', target_period).stream()
+            
+            base_photos = []
+            for doc in docs:
+                pdata = doc.to_dictimport os
+import json
+import random
 import traceback
 from datetime import datetime
 from flask import Flask, request, abort
