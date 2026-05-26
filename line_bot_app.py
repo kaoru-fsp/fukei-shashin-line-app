@@ -12,6 +12,7 @@ from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
+# 🎯 スラッシュの重なりを防ぐため、末尾のスラッシュを削除した綺麗なベースURL
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
@@ -42,8 +43,8 @@ def generate_fupc_url(photo_data):
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
     
     if published and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
-        return re.sub(r'(?<!:)/+', '/', raw_url)
+        # 🎯 【完全正常化】ご提示いただいたお手本の「正」のURLと1文字も違わず、寸分狂わずに結合します
+        return f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
@@ -58,6 +59,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
+    # 🎯 全件検索NG・海外除外の厳格インデックスクエリ
     query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
     docs = query.stream()
     
@@ -66,7 +68,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
         pdata = doc.to_dict()
         if not pdata: continue
         
-        # 🎯 【海外完全除外】クエリ直後の段階で「海外」データを根本からシャットアウト
+        # 海外候補の完全除外
         if "海外" in str(pdata.get('Area', '')) or "海外" in str(pdata.get('Place', '')):
             continue
             
@@ -89,12 +91,13 @@ def create_ui_buttons(reply_text, choices_list):
             "style": "secondary",
             "margin": "sm"
         })
-    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "3xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
+    return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
+    # 🎯 左右対称の2枚構成。下部に完全標準の「ここに行く」ボタンを配置。フチカット適用。
     return {
         "type": "carousel",
         "contents": [
@@ -104,8 +107,8 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "body": {
                     "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
-                        {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"},
-                        {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "3xl", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"📍 {l1}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t1}」 (撮影: {a1} 様)", "size": "md", "color": "#444444", "wrap": True},
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -116,8 +119,8 @@ def create_preview_carousel(photo1, photo2, word_name):
                 "body": {
                     "type": "box", "layout": "vertical", "spacing": "sm", 
                     "contents": [
-                        {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "4xl", "wrap": True, "color": "#111111"},
-                        {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "3xl", "color": "#444444", "wrap": True},
+                        {"type": "text", "text": f"📍 {l2}", "weight": "bold", "size": "xl", "wrap": True, "color": "#111111"},
+                        {"type": "text", "text": f"「{t2}」 (撮影: {a2} 様)", "size": "md", "color": "#444444", "wrap": True},
                         {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "md"}
                     ]
                 }
@@ -133,22 +136,24 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "2xl"},
-                {"type": "text", "text": location, "weight": "bold", "size": "5xl", "margin": "md", "wrap": True},
+                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "md"},
+                {"type": "text", "text": location, "weight": "bold", "size": "xxl", "margin": "md", "wrap": True},
                 {
-                    "type": "box", "layout": "vertical", "margin": "xl", "spacing": "md",
+                    "type": "box", "layout": "horizontal", "margin": "md",
                     "contents": [
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": f"{camera} / {lens}", "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]},
-                        {"type": "box", "layout": "horizontal", "margin": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#666666", "size": "3xl", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#111111", "size": "3xl", "flex": 5}]}
+                        {"type": "box", "layout": "vertical", "spacing": "sm", "contents": [
+                            {"type": "text", "text": f"作品名: {title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md"},
+                            {"type": "text", "text": f"推奨機材: {camera} / {lens}", "wrap": True, "color": "#111111", "size": "md"},
+                            {"type": "text", "text": f"撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"}
+                        ]}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
                 {
                     "type": "box", "layout": "vertical", "margin": "xxl",
                     "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "4xl", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "3xl", "color": "#222222", "margin": "lg"}
+                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "lg", "color": "#111111"},
+                        {"type": "text", "text": guide, "wrap": True, "size": "md", "color": "#222222", "margin": "lg"}
                     ]
                 },
                 {"type": "separator", "margin": "xxl"},
@@ -297,6 +302,7 @@ def handle_line_message(event):
             settings = target_photo.get('Exposure') or "情報なし"
             guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
 
+            # 🎯 ご指定いただいた温かいセリフを完全反映
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
