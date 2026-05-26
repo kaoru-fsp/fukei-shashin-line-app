@@ -51,13 +51,14 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return 6371.0 * (2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)))
 
 
-# --- 【CSV構造厳守】撮影地名またはエリア名を安全に返すルール ---
+# ─── 🛡️ 【null/nan 撃退カウンター】撮影地名を安全に美しく返す新ルール ───
 def get_photo_place_name(pdata):
     place = str(pdata.get('Place', '')).strip()
-    if place and place.lower() != 'nan': 
+    # 空っぽ、またはシステム用語の 'nan', 'null', 'none' だった場合は徹底スルー
+    if place and place.lower() not in ['nan', 'null', 'none', '']: 
         return place
     area = str(pdata.get('Area', '')).strip()
-    if area and area.lower() != 'nan': 
+    if area and area.lower() not in ['nan', 'null', 'none', '']: 
         return area
     return "厳選撮影地"
 
@@ -66,62 +67,46 @@ def get_photo_place_name(pdata):
 def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
-    if len(published) >= 4 and pic_file_name:
+    if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none']:
         return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
     return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
 
 
-# ─── 🛡️ 【ユーザー提案・マトリクス隣接スキャン】前後1つの旬を包括するデータ抽出エンジン ───
-def get_filtered_photos(target_month, target_period, focus_keyword=None):
+# ─── 🛡️ 【3段階セーフティネット対応】鉄壁のデータ抽出エンジン ───
+def get_filtered_photos(target_month, target_period=None, focus_keyword=None, force_ignore_date=False, force_ignore_month=False):
     if db is None: return []
     photos_ref = db.collection('contest_data_v2')
     
     m = int(target_month.replace("月", "").strip())
+    
+    if force_ignore_month:
+        docs = photos_ref.limit(100).stream()
+    else:
+        docs = photos_ref.where('Month', '==', m).stream()
+    
     p = 1 if target_period == "初旬" else 2 if target_period == "中旬" else 3
-        
-    target_slots = []
-    
-    # 前の旬を計算
-    if p == 1:
-        target_slots.append((12 if m == 1 else m - 1, 3))
-    else:
-        target_slots.append((m, p - 1))
-        
-    # 今の旬
-    target_slots.append((m, p))
-    
-    # 次の旬を計算
-    if p == 3:
-        target_slots.append((1 if m == 12 else m + 1, 1))
-    else:
-        target_slots.append((m, p + 1))
-        
-    query_months = list(set([slot[0] for slot in target_slots]))
-    docs = photos_ref.where('Month', 'in', query_months).stream()
+    target_slots = [(m, p)]
+    if p == 1: target_slots.append((12 if m == 1 else m - 1, 3))
+    else: target_slots.append((m, p - 1))
+    if p == 3: target_slots.append((1 if m == 12 else m + 1, 1))
+    else: target_slots.append((m, p + 1))
     
     filtered_photos = []
     for doc in docs:
         pdata = doc.to_dict()
         if not pdata: continue
         
-        try:
-            db_month = int(pdata.get('Month', 0))
-            db_day = int(pdata.get('Day', 0))
-            
-            if 1 <= db_day <= 10:
-                db_p = 1
-            elif 11 <= db_day <= 20:
-                db_p = 2
-            elif 21 <= db_day <= 31:
-                db_p = 3
-            else:
+        if not force_ignore_date and not force_ignore_month and target_period:
+            try:
+                db_month = int(pdata.get('Month', 0))
+                db_day = int(pdata.get('Day', 0))
+                db_p = 1 if 1 <= db_day <= 10 else 2 if 11 <= db_day <= 20 else 3
+                
+                if (db_month, db_p) not in target_slots:
+                    continue
+            except:
                 continue
                 
-            if (db_month, db_p) not in target_slots:
-                continue
-        except:
-            continue
-            
         pub = pdata.get('Published')
         pic = pdata.get('PicFileName')
         if not pub or not pic: continue
@@ -166,15 +151,19 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# ─── 🖼️ 【アスペクト比完全維持・CSVヘッダー完全連動】入賞作品2点紙芝居UI ───
+# ─── 🖼️ 【アスペクト比完全維持】入賞作品2点紙芝居UI ───
 def create_作品閲覧_ui(photo1, photo2, word_name):
     title1 = photo1.get('Title') or "無題"
     author1 = photo1.get('Winner') or "写真家"
+    if str(title1).lower() in ['null', 'nan', 'none', '']: title1 = "無題"
+    if str(author1).lower() in ['null', 'nan', 'none', '']: author1 = "写真家"
     loc1 = get_photo_place_name(photo1)
     img_url1 = generate_fupc_url(photo1)
 
     title2 = photo2.get('Title') or "無題"
     author2 = photo2.get('Winner') or "写真家"
+    if str(title2).lower() in ['null', 'nan', 'none', '']: title2 = "無題"
+    if str(author2).lower() in ['null', 'nan', 'none', '']: author2 = "写真家"
     loc2 = get_photo_place_name(photo2)
     img_url2 = generate_fupc_url(photo2)
 
@@ -223,6 +212,11 @@ def create_作品閲覧_ui(photo1, photo2, word_name):
 
 # ─── 🏛️ 【CSV構造100%完全直結】本物の選評案内UI ───
 def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, image_url):
+    if str(title).lower() in ['null', 'nan', 'none', '']: title = "無題"
+    if str(author).lower() in ['null', 'nan', 'none', '']: author = "写真家"
+    if str(camera).lower() in ['null', 'nan', 'none', '']: camera = "情報なし"
+    if str(lens).lower() in ['null', 'nan', 'none', '']: lens = "情報なし"
+    if str(settings).lower() in ['null', 'nan', 'none', '']: settings = "情報なし"
     return {
       "type": "bubble",
       "backgroundColor": "#ffffff",
@@ -272,7 +266,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 対話アナリティクスエンジン ---
+# --- 对话分析引擎 ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
@@ -298,7 +292,6 @@ def handle_line_message(event):
             menu_text = state.get("menu_text", "")
             choices = json.loads(state.get("menu_choices_json", "[]"))
             if menu_text and choices:
-                # 🚨 【衝突完全粉砕】type:flex 定義を廃止し、直で安全マッピング
                 flex_message = FlexSendMessage(
                     alt_text="コンシェルジュ提案メニュー",
                     contents=create_大文字選択肢_ui(menu_text, choices)
@@ -309,63 +302,83 @@ def handle_line_message(event):
         # ─── 📊 1往復目 ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
             extracted_loc = None
+            is_fallback_mode = False
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形"]:
                 if k in user_message: extracted_loc = k
                 
             base_photos = get_filtered_photos(default_month, default_period, focus_keyword=extracted_loc)
 
+            # 救済第2段階
+            if not base_photos and extracted_loc:
+                base_photos = get_filtered_photos(default_month, target_period=None, focus_keyword=extracted_loc, force_ignore_date=True)
+
+            # 代替提案ルートの起動（250km圏内スキャン）
+            if not base_photos and extracted_loc:
+                is_fallback_mode = True
+                base_photos = get_filtered_photos(default_month, default_period, focus_keyword=None)
+                if not base_photos:
+                    base_photos = get_filtered_photos(default_month, target_period=None, focus_keyword=None, force_ignore_date=True)
+                if not base_photos:
+                    base_photos = get_filtered_photos(default_month, focus_keyword=None, force_ignore_month=True)
+
             if not base_photos:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいまライブラリをお探しいたしましたが、明日のご案内路にふさわしい名作の記録が、あいにく見つかりませんでした。少し時期やキーワードを変えてお声がけいただけますと幸いです。"))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいまライブラリをお探しいたしましたが、あいにく名作の記録がまだ見つかりませんでした。データを追加して、再度お声がけいただけますと幸いです。"))
                 return
 
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "紅葉", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ"]
             
-            subjects, point_names, trends = [], [], []
+            subjects, point_names = [], []
             for p in base_photos:
                 combined_text = str(p.get('Title', '')) + str(p.get('Area', '')) + str(p.get('Subject', ''))
                 for kw in photo_keywords:
                     if kw in combined_text: subjects.append(kw)
                 
                 pt = get_photo_place_name(p)
-                if pt and "県" not in pt: point_names.append(pt)
-                
-                pub = p.get('Published')
-                try:
-                    pub_year = int(str(pub)[:4])
-                    if (now.year - 3) <= pub_year <= now.year:
-                        for kw in photo_keywords:
-                            if kw in combined_text: trends.append(kw)
-                        if pt and "県" not in pt: trends.append(pt)
-                except: pass
+                # ボタン用ランキング集計時、'null' や '厳選撮影地' などのノイズ名を除外
+                if pt and "県" not in pt and pt.lower() not in ["null", "nan", "none", "厳選撮影地"]: 
+                    point_names.append(pt)
 
             sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
             point_ranks = [w[0] for w in Counter(point_names).most_common(3) if w[0]]
-            trend_ranks = [w[0] for w in Counter(trends).most_common(3) if w[0]]
 
             if not sub_ranks: sub_ranks = ["風景"]
-            if not point_ranks: point_ranks = [get_photo_place_name(base_photos[0]) if base_photos else "厳選地"]
+            if not point_ranks: point_ranks = ["厳選撮影地"]
 
-            sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
-            point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
-            trend_str = f"最近は{trend_ranks[0]}を取りに行く方が増えているようです。" if trend_ranks else ""
-
-            reply_text = (
-                "お出かけは明日、東京都内からお車で、ということでよろしいですか？\n\n"
-                f"今の時期ですと、{sub_top_str}を撮りに行く方が多いようですね。 "
-                f"撮影ポイントとしては{point_top_str}が人気です。{trend_str}この中で興味を感じるものはありますか？"
-            )
-
-            choices = []
-            for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
-            for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
-            choices.append({"label": "❌ やめる", "text": "やめる"})
+            # ─── 🌟 セリフ構築（改行を完全美化） ───
+            if is_fallback_mode:
+                top_suggestions = sub_ranks[:1] + point_ranks[:1]
+                if len(top_suggestions) < 2: top_suggestions = sub_ranks[:2]
+                
+                word1 = top_suggestions[0]
+                word2 = top_suggestions[1] if len(top_suggestions) > 1 else "絶景"
+                
+                reply_text = (
+                    f"申し訳ありません。あいにく明日の条件に合う【{extracted_loc}】の名作データが現在のライブラリにございませんでした。\n\n"
+                    f"代わりと言うわけではありませんが、今頃の情報といたしましては東京近郊（250km圏内）では【{word1}】や【{word2}】などがよく撮られているようです。よろしければご案内致しましょうか？"
+                )
+                choices = [
+                    {"label": f"📸 {word1}をご案内", "text": f"選ぶ被写体: {word1}"},
+                    {"label": f"📍 {word2}をご案内", "text": f"選ぶポイント: {word2}"},
+                    {"label": "❌ やめる", "text": "やめる"}
+                ]
+            else:
+                sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
+                point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
+                reply_text = (
+                    "お出かけは明日、東京都内からお車で、ということでよろしいですか？\n\n"
+                    f"今の時期ですと、{sub_top_str}を撮りに行く方が多いようですね。 "
+                    f"撮影ポイントとしては{point_top_str}が人気です。この中で興味を感じるものはありますか？"
+                )
+                choices = []
+                for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
+                for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
+                choices.append({"label": "❌ やめる", "text": "やめる"})
 
             session_ref.set({
                 "month": default_month, "period": default_period,
                 "menu_text": reply_text, "menu_choices_json": json.dumps(choices)
             })
 
-            # 🚨 【衝突完全粉砕】FlexSendMessageを直撃インスタンス化に変更
             flex_message = FlexSendMessage(
                 alt_text="コンシェルジュからのご提案",
                 contents=create_大文字選択肢_ui(reply_text, choices)
@@ -382,6 +395,10 @@ def handle_line_message(event):
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
 
             base_photos = get_filtered_photos(target_month, target_period, focus_keyword=word_name)
+            if not base_photos:
+                base_photos = get_filtered_photos(target_month, target_period=None, focus_keyword=word_name, force_ignore_date=True)
+            if not base_photos:
+                base_photos = get_filtered_photos(target_month, focus_keyword=word_name, force_ignore_month=True)
 
             matched = []
             for p in base_photos:
@@ -393,7 +410,6 @@ def handle_line_message(event):
             p1 = matched[0]
             p2 = matched[1] if len(matched) > 1 else matched[0]
 
-            # 🚨 【衝突完全粉砕】
             flex_message = FlexSendMessage(
                 alt_text="入賞作品プレビュー",
                 contents=create_作品閲覧_ui(p1, p2, word_name)
@@ -406,6 +422,10 @@ def handle_line_message(event):
             word_name = user_message.replace("ここに行く:", "").strip()
 
             base_photos = get_filtered_photos(target_month, target_period, focus_keyword=word_name)
+            if not base_photos:
+                base_photos = get_filtered_photos(target_month, target_period=None, focus_keyword=word_name, force_ignore_date=True)
+            if not base_photos:
+                base_photos = get_filtered_photos(target_month, focus_keyword=word_name, force_ignore_month=True)
 
             matched = []
             for p in base_photos:
@@ -427,13 +447,16 @@ def handle_line_message(event):
             settings = target_photo.get('Exposure') or "情報なし"
             weather = target_photo.get('Weather') or "不明"
             
-            guide = target_photo.get('Selection Comments') or target_photo.get('SelectionComments') or 'ルートナビ情報はライブラリに保管されています。'
-            judge_comment = target_photo.get('Selection Comments') or target_photo.get('SelectionComments') or '素晴らしい構図の名作です。'
+            # 選評やコメント欄に 'null' が入っていた場合の防衛
+            guide = target_photo.get('Selection Comments') or target_photo.get('SelectionComments') or ''
+            judge_comment = guide
+            if not guide or str(guide).lower() in ['null', 'nan', 'none']:
+                guide = 'ルートナビ情報はライブラリに保管されています。'
+                judge_comment = '素晴らしい構図の名作です。'
 
             final_image_url = generate_fupc_url(target_photo)
             reply_text = f"「{location}ですね。わかりました。では{location}へのルートをご案内致します。」"
             
-            # 🚨 【衝突完全粉砕】
             final_bubble_obj = FlexSendMessage(
                 alt_text="最終ルート案内レポート",
                 contents=create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, final_image_url)
