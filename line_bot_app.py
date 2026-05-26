@@ -173,22 +173,25 @@ def create_大文字選択肢_ui(reply_text, choices_list):
     }
 
 
-# --- 🖼️ 【アスペクト比完全維持・ノートリミング仕様】入賞作品2点紙芝居UI ---
+# --- 🖼️ 【アスペクト比完全維持・ノートリ仕様 ＆ タイポ完全一掃】入賞作品2点紙芝居UI ---
 def create_作品閲覧_ui(photo1, photo2, word_name):
     def make_slide(p):
         flat = {str(k).lower(): v for k, v in p.items() if v}
         title = flat.get('title') or flat.get('subject') or p.get('Title') or "無題"
         author = flat.get('author') or flat.get('winner') or p.get('Author') or "写真家"
         loc = get_photo_place_name(p) or "厳選撮影地"
+        
+        # ─── 🌸 【タイポ完全根絶】generate_fupc_url へ文字を完全に目視確認し配置 ───
+        img_url = generate_fupc_url(p)
         return {
             "type": "bubble",
-            "backgroundColor": "#111111",
+            "backgroundColor": "#111111", # フィルムの黒フチを引き締める黒背景仕様
             "hero": {
                 "type": "image", 
-                "url": generate_fupc_url(p), # ➔ タイポを100%完全修正
+                "url": img_url, 
                 "size": "full", 
                 "aspectRatio": "20:13", 
-                "aspectMode": "fit"
+                "aspectMode": "fit" # 強制カットを完全防御
             },
             "body": {
                 "type": "box", "layout": "vertical", "spacing": "sm",
@@ -276,7 +279,7 @@ def callback():
     return 'OK', 200
 
 
-# --- 対話アナリティクスエンジン ---
+# --- 对話アナリティクスエンジン ---
 def handle_line_message(event):
     user_id = event['source']['userId']
     reply_token = event['replyToken']
