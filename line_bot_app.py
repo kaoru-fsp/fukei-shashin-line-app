@@ -7,7 +7,7 @@ from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
 from linebot.models import (
-    TextSendMessage, FlexSendMessage, BubbleContainer, CarouselContainer
+    TextSendMessage, FlexSendMessage
 )
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -62,7 +62,7 @@ def get_photo_place_name(pdata):
     return "厳選撮影地"
 
 
-# ─── 🌸 【FUPC公式】閲覧用画像URL生成関数（タイポ完全根絶） ───
+# ─── 🌸 【FUPC公式】閲覧用画像URL生成関数 ───
 def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
@@ -73,7 +73,7 @@ def generate_fupc_url(photo_data):
 
 # ─── 🛡️ 【CSV完全準拠】新フォルダ contest_data_v2 直結データ抽出エンジン ───
 def get_filtered_photos(target_month, target_period, focus_keyword=None):
-    # 🌟 文字化け・列ズレのない、新しく流し込んだ『contest_data_v2』を指定
+    if db is None: return []
     photos_ref = db.collection('contest_data_v2')
     
     # "5月" -> 5 (純粋な数値型)に変換してクエリを発行
@@ -87,7 +87,7 @@ def get_filtered_photos(target_month, target_period, focus_keyword=None):
         pdata = doc.to_dict()
         if not pdata: continue
         
-        # ─── ⚡ 【パズル解決】CSVに実在する Day（日付）から、今の上旬・中旬・下旬を自動判定 ───
+        # ─── ⚡ CSVに実在する Day（日付）から、今の上旬・中旬・下旬を自動判定 ───
         try:
             db_day = int(pdata.get('Day', 0))
             if target_period == "初旬" and not (1 <= db_day <= 10): continue
@@ -96,7 +96,6 @@ def get_filtered_photos(target_month, target_period, focus_keyword=None):
         except:
             continue
             
-        # 必須データの存在チェック（インプレース）
         pub = pdata.get('Published')
         pic = pdata.get('PicFileName')
         if not pub or not pic: continue
@@ -105,4 +104,331 @@ def get_filtered_photos(target_month, target_period, focus_keyword=None):
         if focus_keyword:
             search_pool = (
                 str(pdata.get('Title', '')) + 
-                str
+                str(pdata.get('Area', '')) + 
+                str(pdata.get('Place', '')) + 
+                str(pdata.get('Subject', ''))
+            )
+            if focus_keyword not in search_pool:
+                continue
+        else:
+            # 1往復目は東京近郊エリアをカバーする包括フィルタ（裏設定として完全隠蔽）
+            area_str = str(pdata.get('Area', ''))
+            if area_str and not any(x in area_str for x in ["長野", "山梨", "静岡", "群馬", "新潟", "埼玉", "東京", "千葉", "神奈川"]):
+                continue
+                
+        filtered_photos.append(pdata)
+        
+    return filtered_photos
+
+
+# --- 🗃️ 大文字・大ボタン仕様のカスタムメニュー作成 ---
+def create_大文字選択肢_ui(reply_text, choices_list):
+    buttons_contents = []
+    for item in choices_list:
+        buttons_contents.append({
+            "type": "button",
+            "action": {"type": "message", "label": item["label"][:15], "text": item["text"]},
+            "style": "secondary", "color": "#f0f0f0", "margin": "sm"
+        })
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box", "layout": "vertical", "spacing": "md",
+            "contents": [
+                {"type": "text", "text": reply_text, "wrap": True, "size": "md", "color": "#111111", "weight": "bold"},
+                {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}
+            ]
+        }
+    }
+
+
+# ─── 🖼️ 【アスペクト比完全維持・CSVヘッダー完全連動】入賞作品2点紙芝居UI ───
+def create_作品閲覧_ui(photo1, photo2, word_name):
+    title1 = photo1.get('Title') or "無題"
+    author1 = photo1.get('Winner') or "写真家"
+    loc1 = get_photo_place_name(photo1)
+    img_url1 = generate_fupc_url(photo1)
+
+    title2 = photo2.get('Title') or "無題"
+    author2 = photo2.get('Winner') or "写真家"
+    loc2 = get_photo_place_name(photo2)
+    img_url2 = generate_fupc_url(photo2)
+
+    return {
+        "type": "carousel",
+        "contents": [
+            {
+                "type": "bubble",
+                "backgroundColor": "#111111",
+                "hero": {"type": "image", "url": img_url1, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": f"📍 {loc1}", "weight": "bold", "size": "md", "wrap": True, "color": "#ffffff"},
+                        {"type": "text", "text": f"「{title1}」 (撮影: {author1} 様)", "size": "sm", "color": "#cccccc", "wrap": True}
+                    ]
+                }
+            },
+            {
+                "type": "bubble",
+                "backgroundColor": "#111111",
+                "hero": {"type": "image", "url": img_url2, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": f"📍 {loc2}", "weight": "bold", "size": "md", "wrap": True, "color": "#ffffff"},
+                        {"type": "text", "text": f"「{title2}」 (撮影: {author2} 様)", "size": "sm", "color": "#cccccc", "wrap": True}
+                    ]
+                }
+            },
+            {
+                "type": "bubble",
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "md",
+                    "contents": [
+                        {"type": "text", "text": f"🏁 【{word_name}】の選択", "weight": "bold", "size": "md", "margin": "md"},
+                        {"type": "button", "action": {"type": "message", "label": "👉 ここに行く", "text": f"ここに行く: {word_name}"}, "style": "primary", "color": "#1DB954", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "⬅️ 戻る", "text": "戻る"}, "style": "secondary", "margin": "sm"},
+                        {"type": "button", "action": {"type": "message", "label": "❌ やめる", "text": "やめる"}, "style": "link", "color": "#ff0000", "margin": "sm"}
+                    ]
+                }
+            }
+        ]
+    }
+
+
+# ─── 🏛️ 【CSV構造100%完全直結】本物の選評案内UI ───
+def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, image_url):
+    return {
+      "type": "bubble",
+      "backgroundColor": "#ffffff",
+      "hero": {"type": "image", "url": image_url, "size": "full", "aspectRatio": "20:13", "aspectMode": "fit"},
+      "body": {
+        "type": "box", "layout": "vertical",
+        "contents": [
+          {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "sm"},
+          {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "md", "wrap": True},
+          {
+            "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
+            "contents": [
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "作品名", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": f"{title} (撮影: {author} 様)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]},
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "推奨機材", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]},
+              {"type": "box", "layout": "baseline", "spacing": "sm", "contents": [{"type": "text", "text": "撮影設定", "color": "#aaaaaa", "size": "sm", "flex": 2}, {"type": "text", "text": settings, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}]}
+            ]
+          },
+          {"type": "separator", "margin": "xxl"},
+          {"type": "box", "layout": "vertical", "margin": "xxl", "contents": [{"type": "text", "text": "📖 【現地ナビ・アクセス】", "weight": "bold", "size": "md", "color": "#111111"}, {"type": "text", "text": guide, "wrap": True, "size": "sm", "color": "#555555", "margin": "md"}]},
+          {"type": "separator", "margin": "xxl"},
+          {"type": "box", "layout": "vertical", "margin": "xxl", "backgroundColor": "#f7f8fa", "cornerRadius": "md", "paddingAll": "md", "contents": [{"type": "text", "text": "🎓 【レベルアップ相談室・選評】", "weight": "bold", "size": "md", "color": "#e67e22"}, {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}]},
+          {"type": "separator", "margin": "xxl"},
+          {
+            "type": "box",
+            "layout": "vertical", "margin": "md", "spacing": "sm",
+            "contents": [
+                {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
+                {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954"}
+            ]
+          }
+        ]
+      }
+    }
+
+
+# --- Webhook 受信口 ---
+@app.route("/callback", methods=['POST'])
+def callback():
+    try:
+        request_json = request.get_json()
+        events = request_json.get('events', [])
+        for event in events:
+            if event.get('type') == 'message' and event['message'].get('type') == 'text':
+                handle_line_message(event)
+    except Exception as e:
+        print(f"🔥 Webhook Error: {traceback.format_exc()}")
+    return 'OK', 200
+
+
+# --- 対話アナリティクスエンジン ---
+def handle_line_message(event):
+    user_id = event['source']['userId']
+    reply_token = event['replyToken']
+    user_message = event['message']['text'].strip()
+    
+    if db is None: return
+
+    now = datetime.now()
+    default_month = f"{now.month}月"
+    default_period = "初旬" if now.day <= 10 else "中旬" if now.day <= 20 else "下旬"
+
+    try:
+        session_ref = db.collection('User_Sessions').document(user_id)
+        session_doc = session_ref.get()
+
+        if user_message == "やめる":
+            session_ref.delete()
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="ご用がありましたら、いつでもお声がけください。"))
+            return
+
+        # ─── 🔄 「戻る」ボタンの処理（一発パースガード仕様） ───
+        if user_message == "戻る" and session_doc.exists:
+            state = session_doc.to_dict()
+            menu_text = state.get("menu_text", "")
+            choices = json.loads(state.get("menu_choices_json", "[]"))
+            if menu_text and choices:
+                flex_message = FlexSendMessage.new_from_json_dict({
+                    "type": "flex",
+                    "altText": "コンシェルジュ提案メニュー",
+                    "contents": create_大文字選択肢_ui(menu_text, choices)
+                })
+                line_bot_api.reply_message(reply_token, flex_message)
+                return
+
+        # ─── 📊 1往復目：純度100%のCSVヘッダー直結データ集計 ───
+        if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
+            extracted_loc = None
+            for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形"]:
+                if k in user_message: extracted_loc = k
+                
+            base_photos = get_filtered_photos(default_month, default_period, focus_keyword=extracted_loc)
+
+            if not base_photos:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいま書棚をお探しいたしましたが、明日のご案内路にふさわしい名作の記録が、あいにく見つかりませんでした。少し時期やキーワードを変えてお声がけいただけますと幸いです。"))
+                return
+
+            photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "紅葉", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ"]
+            
+            subjects, point_names, trends = [], [], []
+            for p in base_photos:
+                combined_text = str(p.get('Title', '')) + str(p.get('Area', '')) + str(p.get('Subject', ''))
+                for kw in photo_keywords:
+                    if kw in combined_text: subjects.append(kw)
+                
+                pt = get_photo_place_name(p)
+                if pt and "県" not in pt: point_names.append(pt)
+                
+                pub = p.get('Published')
+                try:
+                    pub_year = int(str(pub)[:4])
+                    if (now.year - 3) <= pub_year <= now.year:
+                        for kw in photo_keywords:
+                            if kw in combined_text: trends.append(kw)
+                        if pt and "県" not in pt: trends.append(pt)
+                except: pass
+
+            sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
+            point_ranks = [w[0] for w in Counter(point_names).most_common(3) if w[0]]
+            trend_ranks = [w[0] for w in Counter(trends).most_common(3) if w[0]]
+
+            if not sub_ranks: sub_ranks = ["風景"]
+            if not point_ranks: point_ranks = [get_photo_place_name(base_photos[0]) if base_photos else "厳選地"]
+
+            sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
+            point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
+            trend_str = f"最近は{trend_ranks[0]}を取りに行く方が増えているようです。" if trend_ranks else ""
+
+            reply_text = (
+                "お出かけは明日、東京都内からお車で、ということでよろしいですか？\n\n"
+                f"今の時期ですと、{sub_top_str}を撮りに行く方が多いようですね。 "
+                f"撮影ポイントとしては{point_top_str}が人気です。{trend_str}この中で興味を感じるものはありますか？"
+            )
+
+            choices = []
+            for s in sub_ranks[:2]: choices.append({"label": f"📸 被写体: {s}", "text": f"選ぶ被写体: {s}"})
+            for p in point_ranks[:2]: choices.append({"label": f"📍 ポイント: {p}", "text": f"選ぶポイント: {p}"})
+            choices.append({"label": "❌ やめる", "text": "やめる"})
+
+            session_ref.set({
+                "month": default_month, "period": default_period,
+                "menu_text": reply_text, "menu_choices_json": json.dumps(choices)
+            })
+
+            # ─── ⚡ 【一発パースガード仕様】安全な組み立てへ変更 ───
+            flex_message = FlexSendMessage.new_from_json_dict({
+                "type": "flex",
+                "altText": "コンシェルジュからのご提案",
+                "contents": create_大文字選択肢_ui(reply_text, choices)
+            })
+            line_bot_api.reply_message(reply_token, flex_message)
+            return
+
+        # ─── 🗄️ 2往復目以降（カルーセル展開ルート） ───
+        state = session_doc.to_dict()
+        target_month = state.get("month", default_month)
+        target_period = state.get("period", default_period)
+        
+        if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
+            word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
+
+            base_photos = get_filtered_photos(target_month, target_period, focus_keyword=word_name)
+            if not base_photos: 
+                base_photos = get_filtered_photos(target_month, target_period, focus_keyword=None)
+
+            matched = []
+            for p in base_photos:
+                combined_all_text = str(p.get('Title', '')) + str(p.get('Area', '')) + get_photo_place_name(p) + str(p.get('Subject', ''))
+                if word_name in combined_all_text: matched.append(p)
+                        
+            if not matched: matched = base_photos[:2]
+
+            p1 = matched[0]
+            p2 = matched[1] if len(matched) > 1 else matched[0]
+
+            # ─── ⚡ 【一発パースガード仕様】カルーセルも完全防護 ───
+            flex_message = FlexSendMessage.new_from_json_dict({
+                "type": "flex",
+                "altText": "入賞作品プレビュー",
+                "contents": create_作品閲覧_ui(p1, p2, word_name)
+            })
+            line_bot_api.reply_message(reply_token, flex_message)
+            return
+
+        # ─── 🏁 「👉 ここに行く」最終案内ルート ───
+        if "ここに行く:" in user_message:
+            word_name = user_message.replace("ここに行く:", "").strip()
+
+            base_photos = get_filtered_photos(target_month, target_period, focus_keyword=word_name)
+            if not base_photos:
+                base_photos = get_filtered_photos(target_month, target_period, focus_keyword=None)
+
+            matched = []
+            for p in base_photos:
+                combined_all_text = str(p.get('Title', '')) + str(p.get('Area', '')) + get_photo_place_name(p) + str(p.get('Subject', ''))
+                if word_name in combined_all_text: matched.append(p)
+            if not matched: matched = base_photos
+            target_photo = random.choice(matched)
+
+            location = get_photo_place_name(target_photo)
+            session_ref.delete()
+
+            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
+            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
+
+            title = target_photo.get('Title') or "無題"
+            author = target_photo.get('Winner') or "不明"
+            camera = target_photo.get('Camera') or "情報なし"
+            lens = target_photo.get('Lens') or "情報なし"
+            settings = target_photo.get('Exposure') or "情報なし"
+            weather = target_photo.get('Weather') or "不明"
+            
+            # Selection Comments を安全に抽出
+            guide = target_photo.get('Selection Comments') or target_photo.get('SelectionComments') or 'ルートナビ情報は本棚に保管されています。'
+            judge_comment = target_photo.get('Selection Comments') or target_photo.get('SelectionComments') or '素晴らしい構図の名作です。'
+
+            final_image_url = generate_fupc_url(target_photo)
+            reply_text = f"「{location}ですね。わかりました。では{location}へのルートをご案内致します。」"
+            
+            # ─── ⚡ 【一発パースガード仕様】最終レポートも完全防護 ───
+            final_bubble_obj = FlexSendMessage.new_from_json_dict({
+                "type": "flex",
+                "altText": "最終ルート案内レポート",
+                "contents": create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url, final_image_url)
+            })
+            line_bot_api.reply_message(reply_token, [TextSendMessage(text=reply_text), final_bubble_obj])
+            return
+
+    except Exception as e:
+        print(f"🔥 Critical: {traceback.format_exc()}")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
