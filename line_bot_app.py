@@ -22,11 +22,11 @@ IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search/"
 TOKYO_LAT = 35.6895  # 現在地リファレンス：新宿
 TOKYO_LON = 139.6917
 
-# --- 1. LINE API の初期化 ---
+# --- LINE API の初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# --- 2. Firebase / Firestore の初期化（必要なインポートを完全配置） ---
+# --- Firebase / Firestore の初期化 ---
 db = None
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
@@ -63,7 +63,7 @@ def get_lat_lon(data):
     return None
 
 
-# --- 【仕様準拠】項目「Place」が空欄の場合「Area」を表示するルール ---
+# --- 項目「Place」が空欄の場合「Area」を表示するルール ---
 def get_photo_place_name(pdata):
     flat = {str(k).lower(): v for k, v in pdata.items() if v}
     place = flat.get('place') or pdata.get('Place')
@@ -83,13 +83,15 @@ def generate_fupc_url(photo_data):
     return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
 
 
-# --- 🛡️ 表記ゆれを完全吸収してDBからデータを引き出す関数 ---
-def get_filtered_photos(target_month, target_period):
+# --- 🛡️ 【距離判定自動解除ロジック搭載】データフィルター関数 ---
+def get_filtered_photos(target_month, target_period, ignore_distance=False):
     photos_ref = db.collection('Master_Photos')
     
     m_num = target_month.replace("月", "").strip()
     month_candidates = [m_num, m_num.zfill(2), f"{m_num}月", f"{m_num}月 "]
-    
+    try: month_candidates.append(int(m_num))
+    except: pass
+
     docs = photos_ref.where('Month', 'in', month_candidates).stream()
 
     filtered_photos = []
@@ -107,6 +109,11 @@ def get_filtered_photos(target_month, target_period):
         
         if not pub or not pic or not place_name or len(str(pub).strip()) < 4:
             continue
+
+        # ─── ⚡ 【最重要】地域指定がある場合は250キロ制限を完全無視して100%救出 ───
+        if ignore_distance:
+            filtered_photos.append(pdata)
+            continue
             
         coords = get_lat_lon(pdata)
         if coords:
@@ -117,14 +124,8 @@ def get_filtered_photos(target_month, target_period):
             if any(x in pref for x in ["東京", "神奈川", "千葉", "埼玉", "茨城", "栃木", "群馬", "山梨", "長野", "静岡", "福島", "新潟"]):
                 filtered_photos.append(pdata)
                 
-    # ─── 🛡️ 不正なしセーフティネット: 万が一、距離計算等で空振った場合も
-    # データベース由来以外のフェイクを混ぜるのを100%禁止し、DBの先頭から確実に補填する
-    if not filtered_photos:
-        fallback_docs = photos_ref.limit(50).stream()
-        for d in fallback_docs:
-            p = d.to_dict()
-            if p and p.get('Published') and p.get('PicFileName') and get_photo_place_name(p):
-                filtered_photos.append(p)
+    if not filtered_photos and not ignore_distance:
+        return get_filtered_photos(target_month, target_period, ignore_distance=True)
                 
     return filtered_photos
 
@@ -267,7 +268,6 @@ def handle_line_message(event):
             menu_text = state.get("menu_text", "")
             choices = json.loads(state.get("menu_choices_json", "[]"))
             if menu_text and choices:
-                # ─── ⚡ 【型エラー解決】辞書からLINE公式オブジェクトへ厳密にパースして返却する ───
                 menu_obj = BubbleContainer.new_from_json_dict(create_大文字選択肢_ui(menu_text, choices))
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュ提案メニュー", contents=menu_obj))
                 return
@@ -275,20 +275,19 @@ def handle_line_message(event):
         # ─── 📊 ①＆②: 【1往復目】 36分割マトリクス集計 ───
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]):
             print("🚀 初期データ駆動型集計を開始します...")
-            base_photos = get_filtered_photos(default_month, default_period)
-
-            # ─── 🛡️ 品格保持：システム都合のエラー文は1文字も漏らさず美しく受け流す ───
-            if not base_photos:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいま書棚を隈なくお探しいたしましたが、明日のご案内路にふさわしい名作の記録が、あいにく見つかりませんでした。少し時期やキーワードを変えてお声がけいただけますと幸いです。"))
-                return
+            
+            # 初期状態でも、もしユーザーが「長野」など地域をすでに口にしていたら距離制限を最初から解除する
+            ignore_dist = any(k in user_message for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形"])
+            base_photos = get_filtered_photos(default_month, default_period, ignore_distance=ignore_dist)
 
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "紅葉", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ"]
             
             subjects, point_names, trends = [], [], []
             for p in base_photos:
+                flat = {str(k).lower(): v for k, v in p.items() if v}
                 title_str = str(p.get('Title', ''))
                 loc_str = str(p.get('Location', ''))
-                combined_text = title_str + loc_str
+                combined_text = title_str + loc_str + get_photo_place_name(p)
                 
                 for kw in photo_keywords:
                     if kw in combined_text: subjects.append(kw)
@@ -296,7 +295,6 @@ def handle_line_message(event):
                 pt = get_photo_place_name(p)
                 if pt: point_names.append(pt)
                 
-                flat = {str(k).lower(): v for k, v in p.items() if v}
                 pub = flat.get('published') or p.get('Published')
                 try:
                     pub_year = int(str(pub)[:4])
@@ -306,12 +304,12 @@ def handle_line_message(event):
                         if pt: trends.append(pt)
                 except: pass
 
-            sub_ranks = [w[0] for w in Counter(subjects).most_common(3)]
-            point_ranks = [w[0] for w in Counter(point_names).most_common(3)]
-            trend_ranks = [w[0] for w in Counter(trends).most_common(3)]
+            sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
+            point_ranks = [w[0] for w in Counter(point_names).most_common(3) if w[0]]
+            trend_ranks = [w[0] for w in Counter(trends).most_common(3) if w[0]]
 
             if not sub_ranks: sub_ranks = ["風景"]
-            if not point_ranks: point_ranks = ["厳選地"]
+            if not point_ranks: point_ranks = [get_photo_place_name(base_photos[0]) if base_photos else "撮影地"]
 
             sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
             point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
@@ -333,16 +331,17 @@ def handle_line_message(event):
                 "menu_text": reply_text, "menu_choices_json": json.dumps(choices)
             })
 
-            # ─── ⚡ 【型エラー解決】大ボタンメニューをLINE公式オブジェクトへ厳密変換 ───
             menu_obj = BubbleContainer.new_from_json_dict(create_大文字選択肢_ui(reply_text, choices))
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="コンシェルジュからのご提案", contents=menu_obj))
             return
 
-        # ─── 🗄️ 2往復目以降：固定記憶からの自動展開ルート ───
+        # ─── 🗄️ 2往復目以降：目的地優先ルート ───
         state = session_doc.to_dict()
         target_month = state.get("month", default_month)
         target_period = state.get("period", default_period)
-        base_photos = get_filtered_photos(target_month, target_period)
+        
+        # 💡 ボタン選択の2往復目以降は、距離制限（250キロ）を100%完全解除してデータ欠損を完全ガード
+        base_photos = get_filtered_photos(target_month, target_period, ignore_distance=True)
 
         # ─── 📸 被写体 or ポイントボタンが押された場合（2枚スライド表示） ───
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
@@ -363,7 +362,6 @@ def handle_line_message(event):
             state["selected_word"] = word_name
             session_ref.set(state)
 
-            # ─── ⚡ 【型エラー解決】2枚スライド紙芝居をLINE公式オブジェクトへ厳密変換 ───
             carousel_obj = CarouselContainer.new_from_json_dict(create_作品閲覧_ui(p1, p2, word_name))
             line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="入賞作品プレビュー", contents=carousel_obj))
             return
@@ -385,7 +383,6 @@ def handle_line_message(event):
             if sel_type == "place" or "ポイント" in user_message:
                 session_ref.delete()
 
-                # クロスプラットフォーム完全対応の公式ユニバーサルリンクに完全刷新
                 map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
                 route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
@@ -407,7 +404,6 @@ def handle_line_message(event):
 
                 reply_text = f"「{location}ですね。わかりました。では{location}へのルートをご案内致します。」"
                 
-                # ─── ⚡ 【型エラー解決】最終の添削指導UIをLINE公式オブジェクトへ厳密変換 ───
                 final_bubble_obj = BubbleContainer.new_from_json_dict(create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment, map_url, route_url))
                 line_bot_api.reply_message(reply_token, [TextSendMessage(text=reply_text), FlexSendMessage(alt_text="最終ルート案内レポート", contents=final_bubble_obj)])
                 return
@@ -428,18 +424,16 @@ def handle_line_message(event):
                     sub_choices.append({"label": f"📍 ポイント: {pl}", "text": f"選ぶポイント: {pl}"})
                 sub_choices.append({"label": "❌ やめる", "text": "やめる"})
 
-                # ─── ⚡ 【型エラー解決】被写体選択時の周辺ポイント大ボタンをオブジェクトへ厳密変換 ───
                 sub_menu_obj = BubbleContainer.new_from_json_dict(create_大文字選択肢_ui(reply_text, sub_choices))
                 line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="周辺の撮影ポイント提案", contents=sub_menu_obj))
                 return
 
     except Exception as e:
-        # 万が一の際も、品格を崩さずに丁寧にお詫びを返して通信を維持する
-        print(f"🔥 Serious Logic Crash:\n{traceback.format_exc()}")
+        print(f"🔥 Critical: {traceback.format_exc()}")
         try:
             line_bot_api.reply_message(reply_token, TextSendMessage(text="誠に恐れ入ります。ただいま書棚の通信が一時的に混み合っております。お手数ですが、もう一度お声がけいただけますと幸いです。"))
         except: pass
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0 
