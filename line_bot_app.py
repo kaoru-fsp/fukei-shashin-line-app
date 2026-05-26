@@ -41,7 +41,11 @@ def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
     pic_file_name = str(photo_data.get('PicFileName', '')).strip()
     if len(published) >= 4 and pic_file_name and pic_file_name.lower() not in ['nan', 'null', 'none', '']:
-        return f"{IMAGE_BASE_VIEW.rstrip('/')}/{published[:4]}/{published}/{pic_file_name}"
+        # 🎯 一旦URLを組み立てます
+        raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
+        # 🎯 【バグ根絶】https:// 以外の場所で発生する重複スラッシュ（//）を確実に1つの / に自動修正
+        cleaned_url = re.sub(r'(?<!:)/+', '/', raw_url)
+        return cleaned_url
     return "https://fupc.photo/PicsDB/PicsDB4Search/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
@@ -76,7 +80,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
     for item in choices_list:
-        # 🎯 標準ボタンを廃止し、文字サイズ制限のないカスタムBoxボタンへ変更
+        # 🎯 巨大文字を維持したカスタムBoxデザインボタン
         buttons_contents.append({
             "type": "box",
             "layout": "vertical",
@@ -91,19 +95,18 @@ def create_ui_buttons(reply_text, choices_list):
                     "text": item["label"],
                     "align": "center",
                     "weight": "bold",
-                    "size": "xl", # 🔎 ボタンの文字サイズを限界突破（前回の倍以上）
+                    "size": "xl",
                     "color": "#111111"
                 }
             ]
         })
-    # 🔎 案内文（ここ）をご指示通り3分の2（xl）に縮小調整
+    # 🔎 本文案内テキストサイズ：ご指示通り3分の2（xl）にジャスト調整
     return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
     t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
     t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
     
-    # 🔎 カルーセル内もすべてカスタム大文字ボタンに一元化
     return {
         "type": "carousel",
         "contents": [
@@ -145,8 +148,6 @@ def create_preview_carousel(photo1, photo2, word_name):
     }
 
 def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
-    # 🔎 本文項目、選評、解説文をすべて「md 〜 lg」の調和の取れたサイズに補正。
-    # 🔎 最下部のナビボタン2つを、2倍サイズ巨大化カスタムBoxボタンへ変更。
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
