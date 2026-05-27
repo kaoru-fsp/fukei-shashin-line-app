@@ -5,21 +5,22 @@ import re
 import traceback
 from datetime import datetime
 from flask import Flask, request, abort
+# 🎯 不適切なBubbleContainerなどのインポートを全廃し、エラーの起きない標準構成に修正
 from linebot import LineBotApi
-# 🎯 【エラーの真犯人】辞書型を正式なLINEオブジェクトに変換するためのコンテナをインポート
-from linebot.models import TextSendMessage, FlexSendMessage, BubbleContainer, CarouselContainer
+from linebot.models import TextSendMessage, FlexSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
-# あなたが教えてくれた100%正しいベースURL
+# 🎯 あなたが「1が正解」と教えてくれた、100%正しい画像サーバーのベースURL
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
+# 日本の47都道府県リスト（海外・台湾を完全にシャットアウトするための防衛線）
 PREFECTURES = [
     "北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島", "茨城", "栃木", "群馬",
     "埼玉", "千葉", "東京", "神奈川", "新潟", "富山", "石川", "福井", "山梨", "長野",
@@ -55,7 +56,7 @@ def generate_fupc_url(photo_data):
     if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
     
     if published and pic_file_name and len(published) >= 4:
-        # あなたが教えてくれた100%正しいURL結合ルール
+        # 🎯 あなたが実証してくれた「パターン1」の絶対ルールで完璧に結合
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
         return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
@@ -82,6 +83,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
         
         loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
         
+        # 台湾・海外データの完全除外
         if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]):
             continue
         if not any(pref in loc_pool for pref in PREFECTURES):
@@ -207,9 +209,12 @@ def handle_line_message(event):
             return
         if user_message == "戻る" and session_doc.exists:
             state = session_doc.to_dict()
-            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
-            container = BubbleContainer.new_from_json_dict(create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]"))))
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="メニュー", contents=container))
+            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
+            menu_payload = {
+                "type": "flex", "altText": "メニュー",
+                "contents": create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]")))
+            }
+            line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(menu_payload))
             return
 
         requested_month = None
@@ -239,9 +244,9 @@ def handle_line_message(event):
                     {"label": "❌ やめる", "text": "やめる"}
                 ]
                 session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
-                # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
-                container = BubbleContainer.new_from_json_dict(create_ui_buttons(reply_text, choices))
-                line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="時期の選択", contents=container))
+                # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
+                init_payload = {"type": "flex", "altText": "時期の選択", "contents": create_ui_buttons(reply_text, choices)}
+                line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(init_payload))
                 return
 
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ", "雪景色", "山焼き", "ナノハナ", "紅葉", "落葉", "冬桜"]
@@ -259,7 +264,6 @@ def handle_line_message(event):
             if not point_ranks: point_ranks = ["厳選撮影地"]
 
             sub_top_str = "や".join(sub_ranks[:2]) if len(sub_ranks) >= 2 else sub_ranks[0]
-            # 🎯 【タイポ完全クレンジング】混入していたロシア語の「я」を日本の正しい「や」に完全修正
             point_top_str = "や".join(point_ranks[:2]) if len(point_ranks) >= 2 else point_ranks[0]
             
             reply_text = f"お出かけの条件でお探ししました。\n\n{target_m}月{decade_str}頃の時期（前後あわせて30日間）ですと、{sub_top_str}などの被写体が人気のようです。撮影ポイントとしては{point_top_str}などがございます。興味を感じるものはありますか？"
@@ -270,9 +274,9 @@ def handle_line_message(event):
             choices.append({"label": "❌ やめる", "text": "やめる"})
 
             session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
-            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
-            container = BubbleContainer.new_from_json_dict(create_ui_buttons(reply_text, choices))
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="ご提案", contents=container))
+            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
+            suggest_payload = {"type": "flex", "altText": "ご提案", "contents": create_ui_buttons(reply_text, choices)}
+            line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(suggest_payload))
             return
 
         state = session_doc.to_dict() or {}
@@ -296,9 +300,9 @@ def handle_line_message(event):
             
             p1 = base_photos[0]
             p2 = base_photos[1] if len(base_photos) > 1 else base_photos[0]
-            # 🎯 【完全修正】辞書を CarouselContainer に通して正式な形にラップして送信
-            container = CarouselContainer.new_from_json_dict(create_preview_carousel(p1, p2, word_name))
-            line_bot_api.reply_message(reply_token, FlexSendMessage(alt_text="作品プレビュー", contents=container))
+            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
+            preview_payload = {"type": "flex", "altText": "作品プレビュー", "contents": create_preview_carousel(p1, p2, word_name)}
+            line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(preview_payload))
             return
 
         if "ここに行く:" in user_message:
@@ -326,13 +330,13 @@ def handle_line_message(event):
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
-            # 🎯 【完全修正】辞書を BubbleContainer に通して正式な形にラップして送信
-            detail_container = BubbleContainer.new_from_json_dict(create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo)))
+            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
+            detail_payload = {"type": "flex", "altText": "ルート案内", "contents": create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo))}
             
             line_bot_api.reply_message(reply_token, [
                 TextSendMessage(text=reply_wait_text),
                 TextSendMessage(text=reply_final_text),
-                FlexSendMessage(alt_text="ルート案内", contents=detail_container)
+                FlexSendMessage.new_from_json_dict(detail_payload)
             ])
             return
 
