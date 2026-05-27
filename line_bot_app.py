@@ -7,8 +7,9 @@ from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi
 from linebot.models import TextSendMessage, FlexSendMessage
-import firebase_admin
-from firebase_admin import credentials, firestore
+# 🎯 公式の最深部接続パーツと認証パーツで、エラーを100%回避
+from google.cloud import firestore
+from google.oauth2 import service_account
 from collections import Counter
 
 app = Flask(__name__)
@@ -26,34 +27,24 @@ PREFECTURES = [
     "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島", "沖縄"
 ]
 
-# 🎯 【2つの金庫の鍵を準備】
-db_default = None  # アジア側 (default)
-db_us = None       # アメリカ側 (14号分〜)
+db_default = None  # 1つ目：アジア金庫 (default) -> Location master & 13号分
+db_us = None       # 2つ目：アメリカ金庫 (fupc-db14など) -> 14号分〜
 
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
     if firebase_creds_json:
         creds_dict = json.loads(firebase_creds_json)
-        cred = credentials.Certificate(creds_dict)
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred)
+        project_id = creds_dict.get('project_id')
+        cred = service_account.Credentials.from_service_account_info(creds_dict)
         
-        # 1. まず標準のアジア金庫 (default) に接続
-        db_default = firestore.client(database='(default)')
+        # 🎯 アジア(default)とUSの両方の金庫の鍵を公式手順で安全に解錠
+        db_default = firestore.Client(project=project_id, database='(default)', credentials=cred)
         
-        # 2. 環境変数にUSのデータベース名があれば、そっちの金庫の鍵も開ける
         secondary_db_name = os.environ.get('FIRESTORE_SECONDARY_DB_NAME')
         if secondary_db_name:
-            db_us = firestore.client(database=secondary_db_name)
+            db_us = firestore.Client(project=project_id, database=secondary_db_name, credentials=cred)
 except Exception as e:
     print(f"Firebase Init Error: {e}")
-
-def get_photo_place_name(pdata):
-    place = str(pdata.get('Place', '')).strip()
-    if place and place.lower() not in ['nan', 'null', 'none', '']: return place
-    area = str(pdata.get('Area', '')).strip()
-    if area and area.lower() not in ['nan', 'null', 'none', '']: return area
-    return "厳選撮影地"
 
 def generate_fupc_url(photo_data):
     published = str(photo_data.get('Published', '')).strip()
@@ -63,13 +54,14 @@ def generate_fupc_url(photo_data):
     if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
     
     if published and pic_file_name and len(published) >= 4:
+        # 🎯 あなたが実証した「パターン1」の絶対ルール
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
         return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
-def get_filtered_photos(current_month, current_day, focus_keyword=None):
-    # 2つの金庫からかき集めた全データを一時的に入れるプール
-    all_raw_docs = []
+def get_location_guides(current_month, current_day, focus_keyword=None):
+    """【第1段階】時期（PeriodIdx）を持つ Location master から案内データを抽出"""
+    if db_default is None: return []
     
     if current_day <= 10: d = 1
     elif current_day <= 20: d = 2
@@ -80,49 +72,61 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    collection_names = ["photo master", "photo_master", "Location master", "Location_master"]
+    loc_cols = ["Location master", "Location_master"]
+    raw_guides = []
     
-    # 🎯 【ガサ入れ作戦：第1弾】アジア金庫 (default) からの取得
-    if db_default:
-        for col in collection_names:
+    # アジアルート・USルートの両方から案内を回収
+    for db_client in [db_default, db_us]:
+        if not db_client: continue
+        for col in loc_cols:
             try:
-                query = db_default.collection(col).where('PeriodIdx', 'in', target_slots)
-                all_raw_docs.extend(list(query.stream()))
+                query = db_client.collection(col).where('PeriodIdx', 'in', target_slots)
+                for doc in query.stream():
+                    gdata = doc.to_dict()
+                    if gdata: raw_guides.append(gdata)
             except:
                 continue
-
-    # 🎯 【ガサ入れ作戦：第2弾】アメリカ金庫 (14号分〜) からの取得
-    if db_us:
-        for col in collection_names:
-            try:
-                query = db_us.collection(col).where('PeriodIdx', 'in', target_slots)
-                all_raw_docs.extend(list(query.stream()))
-            except:
-                continue
-
-    filtered_photos = []
-    for doc in all_raw_docs:
-        pdata = doc.to_dict()
-        if not pdata: continue
+                
+    # キーワード（「長野」など）があれば絞り込み
+    filtered_guides = []
+    for g in raw_guides:
+        loc_pool = str(g.get('Area', '')) + str(g.get('Place', '')) + str(g.get('Title', '')) + str(g.get('Notes', ''))
         
-        loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
+        # 台湾・海外の完全弾きフィルター
+        if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]): continue
+        if not any(pref in loc_pool for pref in PREFECTURES): continue
         
-        # 台湾・海外の100%完全除外
-        if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]):
-            continue
-        if not any(pref in loc_pool for pref in PREFECTURES):
-            continue
-            
         if focus_keyword:
-            search_pool = (
-                str(pdata.get('Title', '')) + str(pdata.get('Area', '')) + 
-                str(pdata.get('Place', '')) + str(pdata.get('Subject', '')) + 
-                str(pdata.get('WinnerArea', ''))
-            )
-            if focus_keyword not in search_pool: continue
-        filtered_photos.append(pdata)
+            if focus_keyword not in loc_pool: continue
+            
+        filtered_guides.append(g)
         
-    return filtered_photos
+    return filtered_guides
+
+def fetch_photo_by_dnumb(dnumb_value):
+    """【第2段階】共通の鍵（dNumb）を使って、15,000件の photo master から写真を一本釣り"""
+    if not dnumb_value: return None
+    
+    # 型のブレ（文字列の'105'、数値の105）を両方一発で仕留めるクエリを生成
+    search_ids = [dnumb_value, str(dnumb_value)]
+    try:
+        search_ids.append(int(float(dnumb_value)))
+    except:
+        pass
+        
+    photo_cols = ["photo master", "photo_master"]
+    
+    for db_client in [db_default, db_us]:
+        if not db_client: continue
+        for col in photo_cols:
+            try:
+                query = db_client.collection(col).where('dNumb', 'in', search_ids)
+                for doc in query.stream():
+                    pdata = doc.to_dict()
+                    if pdata: return pdata
+            except:
+                continue
+    return None
 
 def create_ui_buttons(reply_text, choices_list):
     buttons_contents = []
@@ -136,8 +140,8 @@ def create_ui_buttons(reply_text, choices_list):
     return {"type": "bubble", "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": [{"type": "text", "text": reply_text, "wrap": True, "size": "xl", "color": "#111111", "weight": "bold"}, {"type": "box", "layout": "vertical", "spacing": "xs", "contents": buttons_contents}]}}
 
 def create_preview_carousel(photo1, photo2, word_name):
-    t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", get_photo_place_name(photo1), generate_fupc_url(photo1)
-    t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", get_photo_place_name(photo2), generate_fupc_url(photo2)
+    t1, a1, l1, u1 = photo1.get('Title') or "無題", photo1.get('Winner') or "写真家", photo1.get('Place') or "厳選撮影地", generate_fupc_url(photo1)
+    t2, a2, l2, u2 = photo2.get('Title') or "無題", photo2.get('Winner') or "写真家", photo2.get('Place') or "厳選撮影地", generate_fupc_url(photo2)
     
     return {
         "type": "carousel",
@@ -169,7 +173,18 @@ def create_preview_carousel(photo1, photo2, word_name):
         ]
     }
 
-def create_detail_ui(location, title, author, camera, lens, settings, weather, guide, map_url, route_url, image_url):
+def create_detail_ui(location, title, author, camera, lens, settings, guide_info, image_url):
+    """🎯 【レベルアップリレーション】写真データと、新CSVのガイド情報を完全ドッキング"""
+    access = guide_info.get('Access') or "現地案内を参照してください。"
+    best_time = guide_info.get('BestTime') or "終日"
+    light = guide_info.get('Light') or "現場の状況に合わせて調整"
+    filters = guide_info.get('Filter') or "なし"
+    notes = guide_info.get('Notes') or ""
+    
+    # 地図リンクの生成
+    map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
+    route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
+
     return {
         "type": "bubble",
         "backgroundColor": "#ffffff",
@@ -177,27 +192,29 @@ def create_detail_ui(location, title, author, camera, lens, settings, weather, g
         "body": {
             "type": "box", "layout": "vertical",
             "contents": [
-                {"type": "text", "text": "🌸 AIコンシェルジュ厳選提案", "weight": "bold", "color": "#1DB954", "size": "md"},
+                {"type": "text", "text": "🌸 AIコンシェルジュ撮影ナビ", "weight": "bold", "color": "#1DB954", "size": "md"},
                 {"type": "text", "text": location, "weight": "bold", "size": "xxl", "margin": "md", "wrap": True},
                 {
+                    "type": "box", "layout": "vertical", "margin": "md", "spacing": "xs",
+                    "contents": [
+                        {"type": "text", "text": f"作品名: {title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "sm"},
+                        {"type": "text", "text": f"推奨機材: {camera} / {lens}", "wrap": True, "color": "#555555", "size": "sm"},
+                        {"type": "text", "text": f"撮影設定: {settings} / フィルター: {filters}", "wrap": True, "color": "#555555", "size": "sm"}
+                    ]
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "box", "layout": "vertical", "margin": "md", "spacing": "xs",
+                    "contents": [
+                        {"type": "text", "text": "🧭 【アクセス・攻略情報】", "weight": "bold", "size": "md", "color": "#111111"},
+                        {"type": "text", "text": f"■ 行き方:\n{access}", "wrap": True, "size": "sm", "color": "#222222", "margin": "xs"},
+                        {"type": "text", "text": f"■ ベスト時間帯: {best_time} / 光線: {light}", "wrap": True, "size": "sm", "color": "#222222"},
+                        {"type": "text", "text": f"■ 注意事項: {notes}" if notes else "", "wrap": True, "size": "sm", "color": "#cc0000"}
+                    ]
+                },
+                {"type": "separator", "margin": "md"},
+                {
                     "type": "box", "layout": "vertical", "margin": "md", "spacing": "sm",
-                    "contents": [
-                        {"type": "text", "text": f"作品名: {title} (撮影: {author} 様)", "wrap": True, "color": "#111111", "size": "md"},
-                        {"type": "text", "text": f"推奨機材: {camera} / {lens}", "wrap": True, "color": "#111111", "size": "md"},
-                        {"type": "text", "text": f"撮影設定: {settings}", "wrap": True, "color": "#111111", "size": "md"}
-                    ]
-                },
-                {"type": "separator", "margin": "xxl"},
-                {
-                    "type": "box", "layout": "vertical", "margin": "xxl",
-                    "contents": [
-                        {"type": "text", "text": "📖 【詳細・選評・アクセス】", "weight": "bold", "size": "lg", "color": "#111111"},
-                        {"type": "text", "text": guide, "wrap": True, "size": "md", "color": "#222222", "margin": "lg"}
-                    ]
-                },
-                {"type": "separator", "margin": "xxl"},
-                {
-                    "type": "box", "layout": "vertical", "margin": "lg", "spacing": "sm",
                     "contents": [
                         {"type": "button", "action": {"type": "uri", "label": "🗺️ Googleマップで場所を確認", "uri": map_url}, "style": "secondary"},
                         {"type": "button", "action": {"type": "uri", "label": "🚗 東京からの高速ルートナビ", "uri": route_url}, "style": "primary", "color": "#1DB954", "margin": "sm"}
@@ -243,8 +260,7 @@ def handle_line_message(event):
 
         requested_month = None
         m_match = re.search(r'(\d+)月', user_message)
-        if m_match:
-            requested_month = int(m_match.group(1))
+        if m_match: requested_month = int(m_match.group(1))
 
         if not session_doc.exists or any(k in user_message for k in ["明日", "おすすめ", "お勧め", "撮影"]) or requested_month:
             target_m = requested_month if requested_month else curr_m
@@ -258,10 +274,11 @@ def handle_line_message(event):
             for k in ["長野", "山梨", "静岡", "福島", "新潟", "山形", "群馬", "栃木", "岩手", "大分", "鹿児島", "和歌山", "奈良", "山口"]:
                 if k in user_message: extracted_loc = k; break
             
-            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=extracted_loc)
+            # 【第1段階】Location masterから今月のおすすめ案内を全回収
+            guides = get_location_guides(target_m, target_d, focus_keyword=extracted_loc)
             
-            if not base_photos:
-                reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、ご指定の時期（{target_m}月{decade_str} 前後30日間）の撮影地データはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作データが非常に充実しています。何月の撮影地をご覧になりますか？"
+            if not guides:
+                reply_text = f"お出かけの条件でお探ししました。\n\nあいにく、ご指定の時期（{target_m}月{decade_str} 前後30日間）の撮影ガイドはまだ登録されていないようです。\n現在、11月や12月の秋・冬の名作ガイドが非常に充実しています。何月の撮影地をご覧になりますか？"
                 choices = [
                     {"label": "🍁 11月の撮影地を見る", "text": "11月の撮影地を探す"},
                     {"label": "❄️ 12月の撮影地を見る", "text": "12月の撮影地を探す"},
@@ -272,14 +289,15 @@ def handle_line_message(event):
                 line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(init_payload))
                 return
 
+            # ガイドから被写体や地名を集計してバラエティ豊かなボタンを生成
             photo_keywords = ["新緑", "滝", "富士山", "残雪", "桜", "茶畑", "新幹線", "清流", "海岸", "雲海", "ツツジ", "雪景色", "山焼き", "ナノハナ", "紅葉", "落葉", "冬桜"]
             subjects, point_names = [], []
-            for p in base_photos:
-                combined_text = str(p.get('Title', '')) + str(p.get('Subject', '')) + str(p.get('Area', ''))
+            for g in guides:
+                combined_text = str(g.get('Title', '')) + str(g.get('Notes', '')) + str(g.get('Place', ''))
                 for kw in photo_keywords:
                     if kw in combined_text: subjects.append(kw)
-                pt = get_photo_place_name(p)
-                if pt and "県" not in pt and pt.lower() not in ["null", "nan", "none", "厳選撮影地"]: point_names.append(pt)
+                pt = str(g.get('Place', '')).strip()
+                if pt and "県" not in pt and pt.lower() not in ["null", "nan", "none"]: point_names.append(pt)
 
             sub_ranks = [w[0] for w in Counter(subjects).most_common(3) if w[0]]
             point_ranks = [w[0] for w in Counter(point_names).most_common(3) if w[0]]
@@ -302,56 +320,64 @@ def handle_line_message(event):
             return
 
         state = session_doc.to_dict() or {}
-        raw_m = state.get("target_m") or state.get("month") or curr_m
-        if isinstance(raw_m, str):
-            m_match = re.search(r'(\d+)', raw_m)
-            target_m = int(m_match.group(1)) if m_match else curr_m
-        else:
-            target_m = int(raw_m)
-
-        raw_d = state.get("target_d") or curr_d
-        target_d = int(raw_d) if raw_d else curr_d
+        target_m = int(state.get("target_m", curr_m))
+        target_d = int(state.get("target_d", curr_d))
         
         if "選ぶ被写体:" in user_message or "選ぶポイント:" in user_message:
             word_name = user_message.replace("選ぶ被写体:", "").replace("選ぶポイント:", "").strip()
-            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
+            guides = get_location_guides(target_m, target_d, focus_keyword=word_name)
             
-            if not base_photos:
+            if not guides:
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにく作品情報が見つかりませんでした。"))
                 return
             
-            p1 = base_photos[0]
-            p2 = base_photos[1] if len(base_photos) > 1 else base_photos[0]
+            # 🎯 【リレーション発動】案内データに紐づく写真を photo master から一本釣り
+            photos = []
+            for g in guides:
+                p = fetch_photo_by_dnumb(g.get('Related_dNumb'))
+                if p: photos.append(p)
+                if len(photos) >= 2: break
+                
+            if not photos:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="撮影地データはありますが、作品写真がまだ登録されていないようです。"))
+                return
+                
+            p1 = photos[0]
+            p2 = photos[1] if len(photos) > 1 else photos[0]
             preview_payload = {"type": "flex", "altText": "作品プレビュー", "contents": create_preview_carousel(p1, p2, word_name)}
             line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(preview_payload))
             return
 
         if "ここに行く:" in user_message:
             word_name = user_message.replace("ここに行く:", "").strip()
-            base_photos = get_filtered_photos(target_m, target_d, focus_keyword=word_name)
+            guides = get_location_guides(target_m, target_d, focus_keyword=word_name)
 
-            if not base_photos:
+            if not guides:
                  line_bot_api.reply_message(reply_token, TextSendMessage(text="あいにくルート情報が見つかりませんでした。"))
                  return
-            target_photo = random.choice(base_photos)
+                 
+            # ランダムに1つの案内をチョイス
+            target_guide = random.choice(guides)
+            target_photo = fetch_photo_by_dnumb(target_guide.get('Related_dNumb'))
+            
+            if not target_photo:
+                 line_bot_api.reply_message(reply_token, TextSendMessage(text="作品詳細写真の読み込みに失敗しました。"))
+                 return
 
-            location = get_photo_place_name(target_photo)
+            location = target_guide.get('Place') or target_photo.get('Place') or "厳選撮影地"
             session_ref.delete()
-
-            map_url = f"https://www.google.com/maps/search/?api=1&query={location}"
-            route_url = f"https://www.google.com/maps/dir/?api=1&origin={TOKYO_LAT},{TOKYO_LON}&destination={location}&travelmode=driving"
 
             title = target_photo.get('Title') or "無題"
             author = target_photo.get('Winner') or "不明"
             camera = target_photo.get('Camera') or "情報なし"
             lens = target_photo.get('Lens') or "情報なし"
             settings = target_photo.get('Exposure') or "情報なし"
-            guide = target_photo.get('Selection Comments') or '詳細な選評情報はありません。'
 
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
-            detail_payload = {"type": "flex", "altText": "ルート案内", "contents": create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo))}
+            # 🎯 写真データとガイド情報をガチャンとマージして送信
+            detail_payload = {"type": "flex", "altText": "ルート案内", "contents": create_detail_ui(location, title, author, camera, lens, settings, target_guide, generate_fupc_url(target_photo))}
             
             line_bot_api.reply_message(reply_token, [
                 TextSendMessage(text=reply_wait_text),
