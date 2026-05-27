@@ -5,7 +5,6 @@ import re
 import traceback
 from datetime import datetime
 from flask import Flask, request, abort
-# 🎯 不適切なBubbleContainerなどのインポートを全廃し、エラーの起きない標準構成に修正
 from linebot import LineBotApi
 from linebot.models import TextSendMessage, FlexSendMessage
 import firebase_admin
@@ -13,14 +12,12 @@ from firebase_admin import credentials, firestore
 from collections import Counter
 
 app = Flask(__name__)
-# 🎯 あなたが「1が正解」と教えてくれた、100%正しい画像サーバーのベースURL
 IMAGE_BASE_VIEW = "https://fupc.photo/PicsDB/PicsDB4Search"
 TOKYO_LAT, TOKYO_LON = 35.6895, 139.6917
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# 日本の47都道府県リスト（海外・台湾を完全にシャットアウトするための防衛線）
 PREFECTURES = [
     "北海道", "青森", "岩手", "宮城", "秋田", "山形", "福島", "茨城", "栃木", "群馬",
     "埼玉", "千葉", "東京", "神奈川", "新潟", "富山", "石川", "福井", "山梨", "長野",
@@ -29,7 +26,10 @@ PREFECTURES = [
     "佐賀", "長崎", "熊本", "大分", "宮崎", "鹿児島", "沖縄"
 ]
 
-db = None
+# 🎯 【2つの金庫の鍵を準備】
+db_default = None  # アジア側 (default)
+db_us = None       # アメリカ側 (14号分〜)
+
 try:
     firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS')
     if firebase_creds_json:
@@ -37,7 +37,14 @@ try:
         cred = credentials.Certificate(creds_dict)
         if not firebase_admin._apps:
             firebase_admin.initialize_app(cred)
-        db = firestore.client()
+        
+        # 1. まず標準のアジア金庫 (default) に接続
+        db_default = firestore.client(database='(default)')
+        
+        # 2. 環境変数にUSのデータベース名があれば、そっちの金庫の鍵も開ける
+        secondary_db_name = os.environ.get('FIRESTORE_SECONDARY_DB_NAME')
+        if secondary_db_name:
+            db_us = firestore.client(database=secondary_db_name)
 except Exception as e:
     print(f"Firebase Init Error: {e}")
 
@@ -56,13 +63,13 @@ def generate_fupc_url(photo_data):
     if pic_file_name.endswith('.0'): pic_file_name = pic_file_name[:-2]
     
     if published and pic_file_name and len(published) >= 4:
-        # 🎯 あなたが実証してくれた「パターン1」の絶対ルールで完璧に結合
         raw_url = f"{IMAGE_BASE_VIEW}/{published[:4]}/{published}/{pic_file_name}"
         return re.sub(r'(?<!:)/+', '/', raw_url)
     return f"{IMAGE_BASE_VIEW}/default.jpg"
 
 def get_filtered_photos(current_month, current_day, focus_keyword=None):
-    if db is None: return []
+    # 2つの金庫からかき集めた全データを一時的に入れるプール
+    all_raw_docs = []
     
     if current_day <= 10: d = 1
     elif current_day <= 20: d = 2
@@ -73,17 +80,34 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
     next_idx = 1 if curr_idx == 36 else curr_idx + 1
     target_slots = [prev_idx, curr_idx, next_idx]
     
-    query = db.collection('contest_data_v2').where('PeriodIdx', 'in', target_slots)
-    docs = query.stream()
+    collection_names = ["photo master", "photo_master", "Location master", "Location_master"]
     
+    # 🎯 【ガサ入れ作戦：第1弾】アジア金庫 (default) からの取得
+    if db_default:
+        for col in collection_names:
+            try:
+                query = db_default.collection(col).where('PeriodIdx', 'in', target_slots)
+                all_raw_docs.extend(list(query.stream()))
+            except:
+                continue
+
+    # 🎯 【ガサ入れ作戦：第2弾】アメリカ金庫 (14号分〜) からの取得
+    if db_us:
+        for col in collection_names:
+            try:
+                query = db_us.collection(col).where('PeriodIdx', 'in', target_slots)
+                all_raw_docs.extend(list(query.stream()))
+            except:
+                continue
+
     filtered_photos = []
-    for doc in docs:
+    for doc in all_raw_docs:
         pdata = doc.to_dict()
         if not pdata: continue
         
         loc_pool = str(pdata.get('Area', '')) + str(pdata.get('Place', '')) + str(pdata.get('WinnerArea', ''))
         
-        # 台湾・海外データの完全除外
+        # 台湾・海外の100%完全除外
         if any(x in loc_pool for x in ["台湾", "海外", "中国", "韓国", "アメリカ"]):
             continue
         if not any(pref in loc_pool for pref in PREFECTURES):
@@ -97,6 +121,7 @@ def get_filtered_photos(current_month, current_day, focus_keyword=None):
             )
             if focus_keyword not in search_pool: continue
         filtered_photos.append(pdata)
+        
     return filtered_photos
 
 def create_ui_buttons(reply_text, choices_list):
@@ -194,13 +219,13 @@ def callback():
 
 def handle_line_message(event):
     user_id, reply_token, user_message = event['source']['userId'], event['replyToken'], event['message']['text'].strip()
-    if db is None: return
+    if db_default is None: return
     now = datetime.now()
     curr_m = now.month
     curr_d = now.day
 
     try:
-        session_ref = db.collection('User_Sessions').document(user_id)
+        session_ref = db_default.collection('User_Sessions').document(user_id)
         session_doc = session_ref.get()
 
         if user_message == "やめる":
@@ -209,7 +234,6 @@ def handle_line_message(event):
             return
         if user_message == "戻る" and session_doc.exists:
             state = session_doc.to_dict()
-            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
             menu_payload = {
                 "type": "flex", "altText": "メニュー",
                 "contents": create_ui_buttons(state.get("menu_text", ""), json.loads(state.get("menu_choices_json", "[]")))
@@ -244,7 +268,6 @@ def handle_line_message(event):
                     {"label": "❌ やめる", "text": "やめる"}
                 ]
                 session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
-                # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
                 init_payload = {"type": "flex", "altText": "時期の選択", "contents": create_ui_buttons(reply_text, choices)}
                 line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(init_payload))
                 return
@@ -274,7 +297,6 @@ def handle_line_message(event):
             choices.append({"label": "❌ やめる", "text": "やめる"})
 
             session_ref.set({"target_m": target_m, "target_d": target_d, "menu_text": reply_text, "menu_choices_json": json.dumps(choices)})
-            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
             suggest_payload = {"type": "flex", "altText": "ご提案", "contents": create_ui_buttons(reply_text, choices)}
             line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(suggest_payload))
             return
@@ -300,7 +322,6 @@ def handle_line_message(event):
             
             p1 = base_photos[0]
             p2 = base_photos[1] if len(base_photos) > 1 else base_photos[0]
-            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
             preview_payload = {"type": "flex", "altText": "作品プレビュー", "contents": create_preview_carousel(p1, p2, word_name)}
             line_bot_api.reply_message(reply_token, FlexSendMessage.new_from_json_dict(preview_payload))
             return
@@ -330,7 +351,6 @@ def handle_line_message(event):
             reply_wait_text = f"かしこまりました。では{location}の詳しい案内をご用意いたしますのでしばらくお待ちください。"
             reply_final_text = "こちらでございます。どうか安全で楽しく撮影を！"
             
-            # 🎯 【完全修正】公式の「new_from_json_dict」を使って完璧な送信データを生成
             detail_payload = {"type": "flex", "altText": "ルート案内", "contents": create_detail_ui(location, title, author, camera, lens, settings, target_photo.get('Weather'), guide, map_url, route_url, generate_fupc_url(target_photo))}
             
             line_bot_api.reply_message(reply_token, [
