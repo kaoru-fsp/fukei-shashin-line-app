@@ -73,7 +73,7 @@ def create_添削_ui(location, title, author, camera, lens, settings, weather, g
       "type": "bubble",
       "hero": {
         "type": "image",
-        "url": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?auto=format&fit=crop&w=1000&q=80",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/d/d4/One_White_Square.png",
         "size": "full",
         "aspectRatio": "20:13",
         "aspectMode": "cover"
