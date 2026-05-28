@@ -63,16 +63,14 @@ def get_beautiful_url(keyword, title, location):
     if any(k in text for k in ["海", "川", "滝", "湖", "水"]): return IMAGE_POOL["water"]
     return IMAGE_POOL["default"]
 
-# 📍 緯度経度による半径250km計算（ハバーシン公式）＆ 都道府県フォールバック
-TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '長野県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
+TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
 
 def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
-    """データに座標があれば厳密に計算、なければ東京起点250km圏内県リストで瞬時に判定"""
     try:
         lat_d = float(data.get('Latitude', 0))
         lng_d = float(data.get('Longitude', 0))
         if lat_d != 0 and lng_d != 0:
-            R = 6371.0 # 地球の半径 (km)
+            R = 6371.0
             dlat = math.radians(lat_d - lat_now)
             dlng = math.radians(lng_d - lng_now)
             a = math.sin(dlat/2)**2 + math.cos(math.radians(lat_now)) * math.cos(math.radians(lat_d)) * math.sin(dlng/2)**2
@@ -105,7 +103,7 @@ def build_initial_card(photo_id, data):
                     "size": "full",
                     "aspectRatio": "16:10",
                     "aspectMode": "cover",
-                    "cornerRadius": "md",
+                    # ❌ エラーの原因だった cornerRadius を完全に消去！！！
                     "action": {"type": "postback", "data": f"action=artwork_info&id={photo_id}"}
                 },
                 {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "lg", "wrap": True, "color": "#111111"},
@@ -226,7 +224,6 @@ def build_location_detail_card(photo_id, data, current_db):
     }
 
 def build_carousel_suggestions(suggestions, title_text="💡 コンシェルジュの追加提案スポット"):
-    """追加提案用スポットを綺麗に並べる横スクロールカルーセル"""
     bubbles = []
     for idx, (d_id, item) in enumerate(suggestions[:3]):
         loc = item.get('Location', 'おすすめ撮影地')
@@ -270,15 +267,12 @@ def callback():
     return 'OK', 200
 
 def handle_line_message(event):
-    """【真のセンターピン検索】時期ウィンドウ（前5後10）＋半径250km圏内＆追加提案エンジン"""
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
 
-    # 1. 🗓️ 【センターピン：時期ウィンドウの自動生成（計16日間）】
-    # 「明日」なら明日を起点に、前5日・後10日の日付リストから上中下旬のカバー期間を完璧にマッピング
-    base_date = datetime.now() + timedelta(days=1) # 明日
+    base_date = datetime.now() + timedelta(days=1)
     
     target_periods = []
     for i in range(-5, 11):
@@ -289,9 +283,8 @@ def handle_line_message(event):
         elif day <= 20: p = "中旬"
         else: p = "下旬"
         target_periods.append(f"{m}月{p}")
-    target_periods = list(set(target_periods)) # 重複排除
+    target_periods = list(set(target_periods))
 
-    # 2. 🧠 AIによる目的地指定の看破
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -310,34 +303,23 @@ def handle_line_message(event):
         intent_keyword = intent.get("keyword", "朝焼け")
     except: pass
 
-    # 3. 🗺️ 【総当たりゼロ・並行ツイントラック検索】
-    # ① 指定地メイン検索 ＆ ② 現在地中心半径250km検索 を同時に裏で成立させる
     ref = current_db.collection('Master_Photos')
-    
     main_pool = []
-    radius_pool = [] # 現在地半径250kmのバックアップ・追加提案用
+    radius_pool = []
 
     try:
-        # A. 【現在地中心半径250km検索（常に裏で走らせる）】
-        # 時期ウィンドウ（被る都道府県を高速シミュレーション抽出してインデックス全域スキャン）
-        # デモを想定し、金庫のランダムな位置から250km圏内かつ時期ウィンドウに被るデータを効率サンプリング
         rand_seed = random.randint(0, 14000)
         all_docs = ref.order_by('__name__').start_at([f"photo_{rand_seed}"]).limit(800).stream()
         
         for doc in all_docs:
             d = doc.to_dict()
-            # 時期ウィンドウに合致するかチェック
-            d_month = str(d.get('Month', ''))
-            d_period = str(d.get('Period', ''))
-            d_time_str = f"{d_month}月{d_period}"
+            d_time_str = f"{d.get('Month', '')}月{d.get('Period', '')}"
             
-            # データ側に時期情報があり、かつ16日間のウィンドウに掠っているか
             if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
                 if is_within_250km(d):
                     radius_pool.append((doc.id, d))
                     if len(radius_pool) >= 10: break
 
-        # B. 【地域指定メイン検索】
         if intent_pref:
             pref_docs = ref.where('Prefecture', '==', intent_pref).limit(30).stream()
             for doc in pref_docs:
@@ -346,26 +328,19 @@ def handle_line_message(event):
                 if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
                     main_pool.append((doc.id, d))
         else:
-            # 地域指定がない場合は、現在地250km圏内プールをそのままメインに昇格
             main_pool = list(radius_pool)
 
     except Exception as e: print(f"Sniper Engine Error: {e}", flush=True)
 
-    # 4. 🔀 【不作時のコンシェルジュ追加提案ジャッジ】
     if not main_pool:
-        # 万が一メインが空なら250kmプールをフォールバックに
-        main_pool = list(radius_pool) if radius_pool else [( "photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"} )]
+        main_pool = list(radius_pool) if radius_pool else [("photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"})]
 
     doc_id, target_data = main_pool[0]
-    
-    # 🗣️ ヒット数が少ない（または地域指定でカツカツ）なら250km圏内から追加提案
     additional_suggestions = [r for r in radius_pool if r[0] != doc_id]
 
-    # 天気セリフ
     weather = target_data.get('Weather', '').strip()
     weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
 
-    # セリフの構築（完璧な文脈分岐）
     if intent_pref and len(main_pool) <= 1:
         greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日を起点とする半月の時期ウィンドウで『{intent_pref}』をお調べですね。現地は少し候補が限られますが、現在地から半径250キロ圏内まで広げますと、今時分このような絶景ポイントもございますよ"
     elif intent_pref:
@@ -374,11 +349,8 @@ def handle_line_message(event):
         greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。現在地から半径250キロ圏内の、今まさに『旬』を迎えるポイントをご案内いたします"
 
     messages_to_send = [TextSendMessage(text=greeting)]
-    
-    # メインの初動カード（最優先見出し：撮影地）
     messages_to_send.append(GachiFlexMessage(alt_text="撮影地ナビゲーションカード", contents_dict=build_initial_card(doc_id, target_data)))
 
-    # 🎁 【追加提案カルーセルの合流】指定地ヒット微少、または地域指定無しの時、裏の250km検索結果をドッキング！
     if additional_suggestions and (not intent_pref or len(main_pool) <= 1):
         messages_to_send.append(GachiFlexMessage(alt_text="コンシェルジュ追加提案", contents_dict=build_carousel_suggestions(additional_suggestions)))
 
