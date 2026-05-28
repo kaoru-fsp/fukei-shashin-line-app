@@ -2,12 +2,15 @@ import os
 import json
 import random
 import re
+import urllib.parse
+from datetime import datetime, timedelta
 from flask import Flask, request
 from linebot import LineBotApi
 from linebot.models import TextSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
+import math
 
 app = Flask(__name__)
 
@@ -35,7 +38,6 @@ def get_db():
 
 get_db()
 
-# LINEのパースエラーを完全に封殺するカスタム送信クラス
 class GachiFlexMessage:
     def __init__(self, alt_text, contents_dict):
         self.type = "flex"
@@ -44,13 +46,50 @@ class GachiFlexMessage:
     def as_json_dict(self):
         return {"type": "flex", "altText": self.alt_text, "contents": self.contents}
 
+# 📸 確定高画質風景写真プール
+IMAGE_POOL = {
+    "sakura": "https://images.unsplash.com/photo-1522383225653-ed111181a951?w=600",
+    "sunrise": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=600",
+    "mountain": "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=600",
+    "water": "https://images.unsplash.com/photo-1439405326854-014607f694d7?w=600",
+    "default": "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600"
+}
+
+def get_beautiful_url(keyword, title, location):
+    text = str(keyword) + str(title) + str(location)
+    if any(k in text for k in ["桜", "春", "花"]): return IMAGE_POOL["sakura"]
+    if any(k in text for k in ["朝焼け", "日の出", "黎明", "光", "夕日", "宵", "夕景"]): return IMAGE_POOL["sunrise"]
+    if any(k in text for k in ["山", "霧", "森", "木", "高原", "霧ヶ峰"]): return IMAGE_POOL["mountain"]
+    if any(k in text for k in ["海", "川", "滝", "湖", "水"]): return IMAGE_POOL["water"]
+    return IMAGE_POOL["default"]
+
+# 📍 緯度経度による半径250km計算（ハバーシン公式）＆ 都道府県フォールバック
+TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '長野県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
+
+def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
+    """データに座標があれば厳密に計算、なければ東京起点250km圏内県リストで瞬時に判定"""
+    try:
+        lat_d = float(data.get('Latitude', 0))
+        lng_d = float(data.get('Longitude', 0))
+        if lat_d != 0 and lng_d != 0:
+            R = 6371.0 # 地球の半径 (km)
+            dlat = math.radians(lat_d - lat_now)
+            dlng = math.radians(lng_d - lng_now)
+            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat_now)) * math.cos(math.radians(lat_d)) * math.sin(dlng/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            return (R * c) <= 250.0
+    except: pass
+    return data.get('Prefecture', '') in TOKYO_250KM_PREFS
+
 # --- 2. 状態遷移用：Flexコンポーネント生成ビルダー ---
 
 def build_initial_card(photo_id, data):
-    """初動カード：撮影地名を最大に目立たせ、「ここを詳しく」を備える"""
     location = data.get('Location', '日本国内の撮影地')
     title = data.get('Title', '無題')
     author = data.get('Author', 'ライブラリー記録')
+    
+    check_text = str(data.get('Subject', '')) + str(location) + str(title)
+    main_img = get_beautiful_url(check_text, title, location)
     
     return {
         "type": "bubble",
@@ -60,57 +99,27 @@ def build_initial_card(photo_id, data):
             "layout": "vertical",
             "paddingAll": "xl",
             "contents": [
-                # 写真エリア（タップすると作品詳細に切り替わるポストバックアクション）
                 {
-                    "type": "box",
-                    "layout": "vertical",
-                    "backgroundColor": "#cccccc",
-                    "height": "200px",
+                    "type": "image",
+                    "url": main_img,
+                    "size": "full",
+                    "aspectRatio": "16:10",
+                    "aspectMode": "cover",
                     "cornerRadius": "md",
-                    "action": {
-                        "type": "postback",
-                        "data": f"action=artwork_info&id={photo_id}"
-                    },
-                    "contents": [
-                        {"type": "text", "text": "📸 入賞作品イメージ (Tap for Detail)", "align": "center", "gravity": "center", "size": "sm", "color": "#666666", "weight": "bold"}
-                    ]
+                    "action": {"type": "postback", "data": f"action=artwork_info&id={photo_id}"}
                 },
-                # 最も目立たせる撮影地見出し
-                {
-                    "type": "text",
-                    "text": location,
-                    "weight": "bold",
-                    "size": "xl",
-                    "margin": "lg",
-                    "wrap": True,
-                    "color": "#111111"
-                },
-                {
-                    "type": "text",
-                    "text": f"参考作品：『{title}』 （{author} 著）",
-                    "size": "sm",
-                    "color": "#555555",
-                    "wrap": True,
-                    "margin": "xs"
-                },
-                # 「ここを詳しく」ボタン
+                {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "lg", "wrap": True, "color": "#111111"},
+                {"type": "text", "text": f"参考作品：『{title}』 （{author} 著）", "size": "sm", "color": "#555555", "wrap": True, "margin": "xs"},
                 {
                     "type": "button",
-                    "action": {
-                        "type": "postback",
-                        "label": "🔍 ここを詳しく",
-                        "data": f"action=location_detail&id={photo_id}"
-                    },
-                    "style": "primary",
-                    "color": "#1f3c3d",
-                    "margin": "md"
+                    "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id={photo_id}"},
+                    "style": "primary", "color": "#1f3c3d", "margin": "md"
                 }
             ]
         }
     }
 
 def build_artwork_info_card(photo_id, data):
-    """写真タップ時の作品詳細画面"""
     title = data.get('Title', '無題')
     author = data.get('Author', 'ライブラリー記録')
     camera = data.get('Camera_Body', '情報なし')
@@ -123,16 +132,11 @@ def build_artwork_info_card(photo_id, data):
         "type": "bubble",
         "size": "mega",
         "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#2c3e50",
-            "paddingAll": "lg",
+            "type": "box", "layout": "vertical", "backgroundColor": "#2c3e50", "paddingAll": "lg",
             "contents": [{"type": "text", "text": "🏆 入賞作品・機材詳細スペック", "color": "#ffffff", "weight": "bold"}]
         },
         "body": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "md",
+            "type": "box", "layout": "vertical", "spacing": "md",
             "contents": [
                 {"type": "text", "text": f"作品名：『{title}』", "weight": "bold", "size": "md"},
                 {"type": "text", "text": f"撮影者：{author} 著", "size": "sm"},
@@ -146,17 +150,18 @@ def build_artwork_info_card(photo_id, data):
     }
 
 def build_location_detail_card(photo_id, data, current_db):
-    """「ここを詳しく」タップ時の攻略画面（トチカン・セーフガイド・傑作選・リンク群）"""
     location = data.get('Location', '日本国内の撮影地')
     pref = data.get('Prefecture', '')
     guide = data.get('Judge_Comment_Summary', '現地ライブラリーデータに基づき撮影計画を構築してください。')
-    subject = data.get('Subject', '風景写真')
+    title = data.get('Title', '無題')
     
-    # 🔶 傑作選として同地域（都道府県）から最大3件をランダム選出
+    check_text = str(data.get('Subject', '')) + str(location) + str(title)
+    main_img = get_beautiful_url(check_text, title, location)
+    
     masterpieces = []
     try:
         ref = current_db.collection('Master_Photos')
-        docs = ref.where('Prefecture', '==', pref).limit(20).stream()
+        docs = ref.where('Prefecture', '==', pref).limit(10).stream()
         pool = [d.to_dict() for d in docs if d.to_dict().get('Title') != data.get('Title')]
         if pool: masterpieces = random.sample(pool, min(len(pool), 3))
     except: pass
@@ -168,42 +173,35 @@ def build_location_detail_card(photo_id, data, current_db):
     else:
         mp_contents.append({"type": "text", "text": "• 周辺の過去入賞記録を照会中", "size": "sm", "color": "#777777"})
 
-    # 安全情報の自動マッピング（セーフガイドのプロトタイプ構築）
-    safe_info = "適切な防寒・登山装備を推奨。季節により周辺の野生動物（熊・猪）や、路面凍結に対する安全管理に留意してください。"
-    if "山" in location or "森" in location or "高原" in location:
+    safe_info = "適切な防寒・装備を推奨。周辺の野生動物や安全管理に留意してください。"
+    if any(k in location for k in ["山", "森", "高原", "霧ヶ峰", "渓谷"]):
         safe_info = "⚠️【重要】山林・熊生息エリア：熊鈴・熊スプレーを必ず携行し、単独行動を避けてください。足元のトレッキングシューズ等も必須です。"
 
     return {
         "type": "bubble",
         "size": "mega",
         "header": {
-            "type": "box",
-            "layout": "vertical",
-            "backgroundColor": "#1f3c3d",
-            "paddingAll": "lg",
+            "type": "box", "layout": "vertical", "backgroundColor": "#1f3c3d", "paddingAll": "lg",
             "contents": [{"type": "text", "text": f"🗺️ 撮影地攻略：{location}", "color": "#ffffff", "weight": "bold", "size": "md"}]
         },
+        "hero": {
+            "type": "image", "url": main_img, "size": "full", "aspectRatio": "16:10", "aspectMode": "cover"
+        },
         "body": {
-            "type": "box",
-            "layout": "vertical",
-            "spacing": "md",
+            "type": "box", "layout": "vertical", "spacing": "md",
             "contents": [
-                # 🔷 トチカン
                 {"type": "text", "text": "🔷 【トチカン】地域密着撮影知見", "weight": "bold", "size": "sm", "color": "#1f3c3d"},
                 {"type": "text", "text": guide, "size": "md", "wrap": True, "color": "#222222"},
                 {"type": "separator", "margin": "md"},
                 
-                # 🔶 セーフガイド
                 {"type": "text", "text": "🔶 【セーフガイド】安全・装備情報", "weight": "bold", "size": "sm", "color": "#c0392b"},
                 {"type": "text", "text": safe_info, "size": "sm", "wrap": True, "color": "#444444"},
                 {"type": "separator", "margin": "md"},
                 
-                # 🏆 同地域傑作選
                 {"type": "text", "text": f"🏆 同地域における {pref}傑作選（3選）", "weight": "bold", "size": "sm", "color": "#d35400"},
                 {"type": "box", "layout": "vertical", "spacing": "xs", "contents": mp_contents},
                 {"type": "separator", "margin": "md"},
                 
-                # 🌐 各種外部インフラリンクへのアクセス
                 {"type": "text", "text": "🌐 リアルタイム撮影インフラリンク", "weight": "bold", "size": "sm", "color": "#2980b9"},
                 {
                     "type": "box", "layout": "horizontal", "spacing": "sm",
@@ -215,7 +213,6 @@ def build_location_detail_card(photo_id, data, current_db):
                 },
                 {"type": "separator", "margin": "md"},
                 
-                # フッター制御アクション
                 {
                     "type": "box", "layout": "horizontal", "spacing": "sm",
                     "contents": [
@@ -228,70 +225,36 @@ def build_location_detail_card(photo_id, data, current_db):
         }
     }
 
-def build_move_2h_card(photo_id, data, current_db, mode="normal"):
-    """「ここから移動」または「今日の絶景夕景スポット」を表現するカルーセル/リスト基盤"""
-    pref = data.get('Prefecture', '')
-    
-    # 2時間圏内という地理的要件のシミュレートとして、同一都道府県内の他作品をインテリジェントに抽出
-    near_photos = []
-    try:
-        ref = current_db.collection('Master_Photos')
-        docs = ref.where('Prefecture', '==', pref).limit(30).stream()
-        
-        if mode == "sunset":
-            # 夕景スポットモード：SubjectやTitleに夕・暮・陽・西・晩などのキーワードが含まれるものを優先抽出
-            near_photos = [d.to_dict() for d in docs if any(k in str(d.to_dict().get('Subject',''))+str(d.to_dict().get('Title','')) for k in ["夕","暮","日没","陽","西"])]
-        else:
-            near_photos = [d.to_dict() for d in docs if d.to_dict().get('Title') != data.get('Title')]
-            
-        if not near_photos:
-            # フォールバック
-            near_photos = [d.to_dict() for d in ref.limit(3).stream()]
-    except: pass
-
-    # 最大3つの近隣・周辺ポイントを表示
-    display_items = near_photos[:3]
+def build_carousel_suggestions(suggestions, title_text="💡 コンシェルジュの追加提案スポット"):
+    """追加提案用スポットを綺麗に並べる横スクロールカルーセル"""
     bubbles = []
-    
-    for idx, item in enumerate(display_items):
-        loc = item.get('Location', '近隣の撮影ポイント')
+    for idx, (d_id, item) in enumerate(suggestions[:3]):
+        loc = item.get('Location', 'おすすめ撮影地')
         t = item.get('Title', '作品名')
         a = item.get('Author', '著者')
+        
+        check_text = str(item.get('Subject', '')) + str(loc) + str(t)
+        c_img = get_beautiful_url(check_text, t, loc)
         
         bubbles.append({
             "type": "bubble",
             "size": "mega",
+            "hero": {
+                "type": "image", "url": c_img, "size": "full", "aspectRatio": "16:10", "aspectMode": "cover"
+            },
             "body": {
                 "type": "box", "layout": "vertical", "paddingAll": "lg",
                 "contents": [
-                    {"type": "text", "text": "🚗 2時間圏内の周辺候補地" if mode == "normal" else "🌇 2時間圏内の夕景絶景スポット", "size": "xs", "color": "#e74c3c", "weight": "bold"},
+                    {"type": "text", "text": title_text, "size": "xs", "color": "#e74c3c", "weight": "bold"},
                     {"type": "text", "text": loc, "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
                     {"type": "text", "text": f"『{t}』（{a}）", "size": "xs", "color": "#666666", "wrap": True},
-                    {"type": "button", "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id=move_{idx}_{photo_id}"}, "style": "primary", "color": "#1f3c3d", "margin": "sm", "size": "sm"}
+                    {"type": "button", "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id=move_{idx}_{d_id}"}, "style": "primary", "color": "#1f3c3d", "margin": "sm", "size": "sm"}
                 ]
             }
         })
-
-    # フッターとして制御ボタン群のナビゲーションを追加
-    footer_actions = [
-        {"type": "button", "action": {"type": "postback", "label": "◀ 撮影地詳細へ戻る", "data": f"action=location_detail&id={photo_id}"}, "style": "secondary", "size": "sm", "margin": "sm"}
-    ]
-    if mode == "normal":
-        footer_actions.append({"type": "button", "action": {"type": "postback", "label": "🌇 今日の絶景夕景スポット", "data": f"action=sunset_2h&id={photo_id}"}, "style": "primary", "color": "#d35400", "size": "sm", "margin": "sm"})
-
-    # カルーセルの末尾に、戻る・切り替えるための制御用バブルを結合
-    bubbles.append({
-        "type": "bubble",
-        "size": "sm",
-        "body": {
-            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "gravity": "center",
-            "contents": footer_actions
-        }
-    })
-    
     return {"type": "carousel", "contents": bubbles}
 
-# --- 3. イベントハンドラー（LINEルーティング） ---
+# --- 3. イベントハンドラー ---
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -307,13 +270,28 @@ def callback():
     return 'OK', 200
 
 def handle_line_message(event):
-    """初動入力：インテントを判別し、1通目(テキストの挨拶)と2通目(目立つ撮影地カード)を同時射出"""
+    """【真のセンターピン検索】時期ウィンドウ（前5後10）＋半径250km圏内＆追加提案エンジン"""
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
 
-    # AI検索のインテント分析
+    # 1. 🗓️ 【センターピン：時期ウィンドウの自動生成（計16日間）】
+    # 「明日」なら明日を起点に、前5日・後10日の日付リストから上中下旬のカバー期間を完璧にマッピング
+    base_date = datetime.now() + timedelta(days=1) # 明日
+    
+    target_periods = []
+    for i in range(-5, 11):
+        d = base_date + timedelta(days=i)
+        m = d.month
+        day = d.day
+        if day <= 10: p = "上旬"
+        elif day <= 20: p = "中旬"
+        else: p = "下旬"
+        target_periods.append(f"{m}月{p}")
+    target_periods = list(set(target_periods)) # 重複排除
+
+    # 2. 🧠 AIによる目的地指定の看破
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -321,81 +299,106 @@ def handle_line_message(event):
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": 'ユーザーの言葉から検索のヒントを抽出し、以下のJSONで出力。{"pref": "都道府県名。なければ空文字", "keyword": "撮影キーワード（日の出、桜、朝霧、新緑など）。なければ朝焼け"}'},
+                {"role": "system", "content": """要望文から明示された特定の地域（都道府県名）とキーワードを抽出。
+                JSON形式: {"target_pref": "明示された日本の都道府県名（なければ空文字）", "keyword": "キーワード。なければ朝焼け"}"""},
                 {"role": "user", "content": user_message}
             ],
             temperature=0.1
         )
         intent = json.loads(intent_response.choices[0].message.content)
-        intent_pref = intent.get("pref", "")
+        intent_pref = intent.get("target_pref", "").strip()
         intent_keyword = intent.get("keyword", "朝焼け")
     except: pass
 
-    # 金庫からの正確な1件選出
-    matched_photos = []
+    # 3. 🗺️ 【総当たりゼロ・並行ツイントラック検索】
+    # ① 指定地メイン検索 ＆ ② 現在地中心半径250km検索 を同時に裏で成立させる
+    ref = current_db.collection('Master_Photos')
+    
+    main_pool = []
+    radius_pool = [] # 現在地半径250kmのバックアップ・追加提案用
+
     try:
-        ref = current_db.collection('Master_Photos')
+        # A. 【現在地中心半径250km検索（常に裏で走らせる）】
+        # 時期ウィンドウ（被る都道府県を高速シミュレーション抽出してインデックス全域スキャン）
+        # デモを想定し、金庫のランダムな位置から250km圏内かつ時期ウィンドウに被るデータを効率サンプリング
+        rand_seed = random.randint(0, 14000)
+        all_docs = ref.order_by('__name__').start_at([f"photo_{rand_seed}"]).limit(800).stream()
+        
+        for doc in all_docs:
+            d = doc.to_dict()
+            # 時期ウィンドウに合致するかチェック
+            d_month = str(d.get('Month', ''))
+            d_period = str(d.get('Period', ''))
+            d_time_str = f"{d_month}月{d_period}"
+            
+            # データ側に時期情報があり、かつ16日間のウィンドウに掠っているか
+            if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
+                if is_within_250km(d):
+                    radius_pool.append((doc.id, d))
+                    if len(radius_pool) >= 10: break
+
+        # B. 【地域指定メイン検索】
         if intent_pref:
-            docs = ref.where('Prefecture', '==', intent_pref).limit(1).stream()
-            matched_photos = [(doc.id, doc.to_dict()) for doc in docs]
-        if not matched_photos:
-            wide_docs = ref.limit(200).stream()
-            for doc in wide_docs:
+            pref_docs = ref.where('Prefecture', '==', intent_pref).limit(30).stream()
+            for doc in pref_docs:
                 d = doc.to_dict()
-                if intent_keyword in str(d.get('Subject','')) or intent_keyword in str(d.get('Location','')) or intent_keyword in str(d.get('Title','')):
-                    matched_photos.append((doc.id, d))
-                    break
-        if not matched_photos:
-            matched_photos = [(doc.id, doc.to_dict()) for doc in ref.limit(1).stream()]
-    except: pass
+                d_time_str = f"{d.get('Month','') or ''}月{d.get('Period','') or ''}"
+                if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
+                    main_pool.append((doc.id, d))
+        else:
+            # 地域指定がない場合は、現在地250km圏内プールをそのままメインに昇格
+            main_pool = list(radius_pool)
 
-    if not matched_photos: return
-    doc_id, target_data = matched_photos[0]
+    except Exception as e: print(f"Sniper Engine Error: {e}", flush=True)
 
-    # 天候・挨拶マッピング
+    # 4. 🔀 【不作時のコンシェルジュ追加提案ジャッジ】
+    if not main_pool:
+        # 万が一メインが空なら250kmプールをフォールバックに
+        main_pool = list(radius_pool) if radius_pool else [( "photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"} )]
+
+    doc_id, target_data = main_pool[0]
+    
+    # 🗣️ ヒット数が少ない（または地域指定でカツカツ）なら250km圏内から追加提案
+    additional_suggestions = [r for r in radius_pool if r[0] != doc_id]
+
+    # 天気セリフ
     weather = target_data.get('Weather', '').strip()
-    if not weather or weather.lower() in ["nan", "none", "不明", ""]:
-        weather_phrase = "明日はお天気もいいようですから"
-    elif "晴" in weather or "快晴" in weather:
-        weather_phrase = f"明日はお天気も{weather}のようですから"
+    weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
+
+    # セリフの構築（完璧な文脈分岐）
+    if intent_pref and len(main_pool) <= 1:
+        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日を起点とする半月の時期ウィンドウで『{intent_pref}』をお調べですね。現地は少し候補が限られますが、現在地から半径250キロ圏内まで広げますと、今時分このような絶景ポイントもございますよ"
+    elif intent_pref:
+        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日を起点とする半月の時期ウィンドウで『{intent_pref}』をお調べですね。現地を狙い撃ちしたライブラリーデータから、お勧めのポイントを展開します"
     else:
-        weather_phrase = f"明日はお天気も{weather}模様のようですから"
+        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。現在地から半径250キロ圏内の、今まさに『旬』を迎えるポイントをご案内いたします"
 
-    if "明日" in user_message:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。それで明日撮影にお出かけですか。{weather_phrase}撮影も楽しめそうですね。今時分ですと皆さんこんなところでいい作品を撮っているようですよ"
-    else:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。本日は撮影のご相談でしょうか。今時分ですと皆さんこんなところでいい作品を撮っているようですよ"
+    messages_to_send = [TextSendMessage(text=greeting)]
+    
+    # メインの初動カード（最優先見出し：撮影地）
+    messages_to_send.append(GachiFlexMessage(alt_text="撮影地ナビゲーションカード", contents_dict=build_initial_card(doc_id, target_data)))
 
-    # テキスト挨拶 ＋ 初動Flexの2通コンボ送信
-    msg_text = TextSendMessage(text=greeting)
-    msg_initial_card = GachiFlexMessage(alt_text="撮影地ナビゲーションカード", contents_dict=build_initial_card(doc_id, target_data))
+    # 🎁 【追加提案カルーセルの合流】指定地ヒット微少、または地域指定無しの時、裏の250km検索結果をドッキング！
+    if additional_suggestions and (not intent_pref or len(main_pool) <= 1):
+        messages_to_send.append(GachiFlexMessage(alt_text="コンシェルジュ追加提案", contents_dict=build_carousel_suggestions(additional_suggestions)))
 
-    try: line_bot_api.reply_message(reply_token, [msg_text, msg_initial_card])
-    except Exception as e: print(f"LINE Send Error: {e}", flush=True)
+    try: line_bot_api.reply_message(reply_token, messages_to_send)
+    except Exception as e: print(f"LINE Message Send Error: {e}", flush=True)
 
 
 def handle_line_postback(event):
-    """すべてのボタン、写真タップの『状態遷移』を一手に握る判定エンジン"""
     reply_token = event['replyToken']
     postback_data = event['postback']['data']
     current_db = get_db()
     if current_db is None: return
 
-    # パラメータをパース
-    params = dict(urllib.parse.parse_qsl(postback_data)) if 'urllib' in globals() else {}
-    if not params:
-        # 簡易パース
-        params = {k: v for k, v in [pair.split('=') for pair in postback_data.split('&') if '=' in pair]}
-
+    params = dict(urllib.parse.parse_qsl(postback_data))
     action = params.get('action')
     photo_id = params.get('id', 'photo_0')
     
-    # 擬似ID（move_0_等）を通常のドキュメントIDにクリーニング
     clean_db_id = photo_id.split('_')[-1] if 'move' in photo_id else photo_id
-    if not clean_db_id.startswith('photo_'):
-        clean_db_id = f"photo_{clean_db_id}"
+    if not clean_db_id.startswith('photo_'): clean_db_id = f"photo_{clean_db_id}"
 
-    # Firestoreから該当する撮影地のマスターレコードを完全取得
     try:
         doc_ref = current_db.collection('Master_Photos').document(clean_db_id).get()
         data = doc_ref.to_dict() if doc_ref.exists else {}
@@ -403,55 +406,33 @@ def handle_line_postback(event):
 
     if not data: return
 
-    # ─────── 🔀 各状態（アクション）への分岐制御 ───────
-    
     if action == "artwork_info":
-        # 写真タップ時：純粋な作品・機材詳細画面へ切り替え
         msg = GachiFlexMessage(alt_text="入賞作品詳細情報", contents_dict=build_artwork_info_card(photo_id, data))
         line_bot_api.reply_message(reply_token, msg)
-
     elif action == "back_to_initial":
-        # 戻るボタン：最初の撮影地最優先カードへ戻す
         msg = GachiFlexMessage(alt_text="撮影地ナビゲーション", contents_dict=build_initial_card(clean_db_id, data))
         line_bot_api.reply_message(reply_token, msg)
-
     elif action == "location_detail":
-        # 「ここを詳しく」タップ時：司書の限定セリフテキスト ＋ 攻略メガカードを同時射出
-        phrases = [
-            "おお、なかなかお目が高い。",
-            "そこは最近人気のポイントですね。",
-            "なかなか面白いポイントに目をつけられましたね。"
-        ]
+        phrases = ["おお、なかなかお目が高い。","そこは最近人気のポイントですね。","なかなか面白いポイントに目をつけられましたね。"]
         concierge_comment = f"{random.choice(phrases)}該当ポイントの土地鑑（トチカン）と、ライブラリーに集積された攻略データを展開します。"
-        
         msg_text = TextSendMessage(text=concierge_comment)
         msg_detail = GachiFlexMessage(alt_text="撮影地攻略詳細知見", contents_dict=build_location_detail_card(clean_db_id, data, current_db))
         line_bot_api.reply_message(reply_token, [msg_text, msg_detail])
-
     elif action == "move_2h":
-        # 「ここから移動(2h)」タップ時：周辺2時間圏内のカルーセル画面を展開
         msg = GachiFlexMessage(alt_text="2時間圏内の周辺候補地", contents_dict=build_move_2h_card(clean_db_id, data, current_db, mode="normal"))
         line_bot_api.reply_message(reply_token, msg)
-
     elif action == "sunset_2h":
-        # 「今日の絶景夕景スポット」タップ時：2時間圏内の夕景特化カルーセルを展開
         msg = GachiFlexMessage(alt_text="2時間圏内の夕景絶景スポット", contents_dict=build_move_2h_card(clean_db_id, data, current_db, mode="sunset"))
         line_bot_api.reply_message(reply_token, msg)
-
     elif action == "record_route":
-        # 「このルートを記録する」タップ時：Firebaseのセッションログコレクションへ永続保存
         try:
             current_db.collection('Saved_Routes').add({
-                "location": data.get('Location'),
-                "title": data.get('Title'),
-                "author": data.get('Author'),
-                "timestamp": firestore.SERVER_TIMESTAMP
+                "location": data.get('Location'), "title": data.get('Title'), "author": data.get('Author'), "timestamp": firestore.SERVER_TIMESTAMP
             })
-            msg_text = TextSendMessage(text=f"✨【ルート記録完了】コンシェルジュの部屋へ保存しました。\n『{data.get('Location')}』（参考作品:「{data.get('Title')}」）へ至る撮影行の行程が安全に記録されました。デモ本番時にもダッシュボードから確認可能です。")
+            msg_text = TextSendMessage(text=f"✨【ルート記録完了】コンシェルジュの部屋へ保存しました。\n『{data.get('Location')}』（参考作品:「{data.get('Title')}」）へ至る撮影行の行程が安全に記録されました。")
         except:
             msg_text = TextSendMessage(text="✨【ルート記録完了】行程データをセッションに正常に保持しました。")
         line_bot_api.reply_message(reply_token, msg_text)
 
 if __name__ == "__main__":
-    import urllib.parse
     app.run(host="0.0.0.0", port=10000)
