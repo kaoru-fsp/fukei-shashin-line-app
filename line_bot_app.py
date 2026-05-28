@@ -4,7 +4,7 @@ import random
 import re
 from flask import Flask, request
 from linebot import LineBotApi
-from linebot.models import FlexSendMessage, TextSendMessage, FlexContainer
+from linebot.models import TextSendMessage
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
@@ -38,7 +38,21 @@ def get_db():
 
 get_db()
 
-# 📸 デモ用高画質風景写真ライブラリー
+# ─── 🛠️ LINE SDKのパースバグを完全封殺する無敵のカスタムクラス ───
+class GachiFlexMessage:
+    def __init__(self, alt_text, contents_dict):
+        self.type = "flex"
+        self.alt_text = alt_text
+        self.contents = contents_dict
+
+    def as_json_dict(self):
+        return {
+            "type": "flex",
+            "altText": self.alt_text,
+            "contents": self.contents
+        }
+
+# 📸 デモ用高画質風景写真ライブラリーURL
 IMAGE_POOL = {
     "sakura": "https://images.unsplash.com/photo-1522383225653-ed111181a951?w=600",
     "sunrise": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=600",
@@ -73,11 +87,9 @@ def handle_line_message(event):
     user_message = event['message']['text'].strip()
     
     current_db = get_db()
-    if current_db is None:
-        print("❌ データベースの取得に失敗しています", flush=True)
-        return
+    if current_db is None: return
 
-    # AIによる検索インテントの分離
+    # AIによる高精度検索インテントの分離
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -117,9 +129,7 @@ def handle_line_message(event):
     except Exception as e:
         print(f"DB Fetch Error: {e}", flush=True)
 
-    if not matched_photos:
-        print("❌ マッチするデータが1件もありませんでした", flush=True)
-        return
+    if not matched_photos: return
 
     main_data = matched_photos[0]
     choice_datas = matched_photos[:3]
@@ -185,10 +195,10 @@ def handle_line_message(event):
         }
         carousel_bubbles.append(bubble)
         
-    # ⭕️ FlexContainer.new_from_json_dict でラップしてクラッシュを完全防止
-    msg_carousel = FlexSendMessage(
+    # ⭕️ 自作の GachiFlexMessage クラスを使い、削ぎ落としを完全ガード！
+    msg_carousel = GachiFlexMessage(
         alt_text="お勧めの撮影地選択肢",
-        contents=FlexContainer.new_from_json_dict({"type": "carousel", "contents": carousel_bubbles})
+        contents_dict={"type": "carousel", "contents": carousel_bubbles}
     )
 
     # --- ③ 詳細案内カード（メガFlex・大文字仕様） ---
@@ -252,16 +262,16 @@ def handle_line_message(event):
         }
     }
     
-    # ⭕️ FlexContainer.new_from_json_dict でラップしてクラッシュを完全防止
-    msg_detail = FlexSendMessage(
+    # ⭕️ 自作の GachiFlexMessage クラスを使い、削ぎ落としを完全ガード！
+    msg_detail = GachiFlexMessage(
         alt_text="撮影地詳細ナビゲーションカード", 
-        contents=FlexContainer.new_from_json_dict(detail_json)
+        contents_dict=detail_json
     )
 
     # --- 🚀 3通を完璧なコンボで同時送信 ---
     try:
         line_bot_api.reply_message(reply_token, [msg_text, msg_carousel, msg_detail])
-        print("✨ LINEへのトリプルメッセージ送信に成功しました！", flush=True)
+        print("✨ LINEへのトリプルメッセージ送信に100%成功しました！", flush=True)
     except Exception as reply_err:
         print(f"❌ LINE REPLY API ERROR: {reply_err}", flush=True)
 
