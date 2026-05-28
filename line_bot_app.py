@@ -46,13 +46,24 @@ class GachiFlexMessage:
     def as_json_dict(self):
         return {"type": "flex", "altText": self.alt_text, "contents": self.contents}
 
+# 💥【表記揺れ・小文字化完全破壊ゲッター】大文字小文字のバグを細胞レベルで無効化
+def g(d, *keys, default=""):
+    if not d: return default
+    for k in keys:
+        if k in d and d[k] is not None and str(d[k]).strip() not in ["", "nan", "NaN", "None", "null"]:
+            return str(d[k]).strip()
+    # 完全にキーが見つからない場合の、最低限のフォールバック
+    if "location" in keys and ("Prefecture" in d or "prefecture" in d):
+        return f"{g(d, 'Prefecture', 'prefecture')}の極上撮影地"
+    return default
+
 # 📍 半径250km圏内判定
 TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
 
 def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
     try:
-        lat_d = float(data.get('Latitude', 0))
-        lng_d = float(data.get('Longitude', 0))
+        lat_d = float(g(data, 'Latitude', 'latitude', default=0))
+        lng_d = float(g(data, 'Longitude', 'longitude', default=0))
         if lat_d != 0 and lng_d != 0:
             R = 6371.0
             dlat = math.radians(lat_d - lat_now)
@@ -61,18 +72,15 @@ def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
             c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
             return (R * c) <= 250.0
     except: pass
-    return data.get('Prefecture', '') in TOKYO_250KM_PREFS
+    return g(data, 'Prefecture', 'prefecture') in TOKYO_250KM_PREFS
 
 # --- 2. 状態遷移用：Flexコンポーネント生成ビルダー ---
 
 def build_single_bubble(photo_id, item, base_url, title_text="📌 旬の厳選おすすめ撮影地"):
-    loc = item.get('Location', 'おすすめ撮影地')
-    t = item.get('Title', '作品名')
-    a = item.get('Author', '著者')
-    pic_name = item.get('PicFileName', '').strip()
-    
-    if not pic_name or pic_name.lower() in ['nan', 'none', '']:
-        pic_name = "default.jpg"
+    loc = g(item, 'Location', 'location', 'place', 'Place', default="日本国内の絶景ポイント")
+    t = g(item, 'Title', 'title', default="無題の傑作")
+    a = g(item, 'Author', 'author', default="匿名写真家")
+    pic_name = g(item, 'PicFileName', 'picfilename', default="default.jpg")
         
     clean_base = base_url if base_url.endswith('/') else base_url + '/'
     img_url = f"{clean_base}static/images/{pic_name}"
@@ -104,13 +112,13 @@ def build_single_bubble(photo_id, item, base_url, title_text="📌 旬の厳選�
     }
 
 def build_artwork_info_card(photo_id, data):
-    title = data.get('Title', '無題')
-    author = data.get('Author', 'ライブラリー記録')
-    camera = data.get('Camera_Body', '情報なし')
-    lens = data.get('Lens', '情報なし')
-    aperture = data.get('Aperture', '-')
-    iso = data.get('ISO', '-')
-    focal = data.get('Focal_Length', '-')
+    t = g(data, 'Title', 'title', default="無題の傑作")
+    a = g(data, 'Author', 'author', default="匿名写真家")
+    camera = g(data, 'Camera_Body', 'camera_body', 'camera', default="情報なし")
+    lens = g(data, 'Lens', 'lens', default="情報なし")
+    aperture = g(data, 'Aperture', 'aperture', default="-")
+    iso = g(data, 'ISO', 'iso', default="-")
+    focal = g(data, 'Focal_Length', 'focal_length', default="-")
     
     return {
         "type": "bubble", "size": "mega",
@@ -121,8 +129,8 @@ def build_artwork_info_card(photo_id, data):
         "body": {
             "type": "box", "layout": "vertical", "spacing": "md",
             "contents": [
-                {"type": "text", "text": f"作品名：『{title}』", "weight": "bold", "size": "md"},
-                {"type": "text", "text": f"撮影者：{author} 著", "size": "sm"},
+                {"type": "text", "text": f"作品名：『{t}』", "weight": "bold", "size": "md"},
+                {"type": "text", "text": f"撮影者：{a} 著", "size": "sm"},
                 {"type": "separator"},
                 {"type": "text", "text": f"■ カメラ: {camera}", "size": "sm"},
                 {"type": "text", "text": f"■ レンズ: {lens}", "size": "sm"},
@@ -133,11 +141,10 @@ def build_artwork_info_card(photo_id, data):
     }
 
 def build_location_detail_card(photo_id, data, current_db, base_url):
-    location = data.get('Location', '日本国内の撮影地')
-    pref = data.get('Prefecture', '')
-    guide = data.get('Judge_Comment_Summary', '現地ライブラリーデータに基づき撮影計画を構築してください。')
-    pic_name = data.get('PicFileName', '').strip()
-    if not pic_name or pic_name.lower() in ['nan', 'none', '']: pic_name = "default.jpg"
+    location = g(data, 'Location', 'location', 'place', 'Place', default="日本国内の絶景ポイント")
+    pref = g(data, 'Prefecture', 'prefecture', default="")
+    guide = g(data, 'Judge_Comment_Summary', 'judge_comment_summary', default="現地ライブラリーデータに基づき撮影計画を構築してください。")
+    pic_name = g(data, 'PicFileName', 'picfilename', default="default.jpg")
     
     clean_base = base_url if base_url.endswith('/') else base_url + '/'
     img_url = f"{clean_base}static/images/{pic_name}"
@@ -146,14 +153,14 @@ def build_location_detail_card(photo_id, data, current_db, base_url):
     try:
         ref = current_db.collection('Master_Photos')
         docs = ref.where('Prefecture', '==', pref).limit(10).stream()
-        pool = [d.to_dict() for d in docs if d.to_dict().get('Title') != data.get('Title')]
+        pool = [d.to_dict() for d in docs if g(d.to_dict(), 'Title', 'title') != g(data, 'Title', 'title')]
         if pool: masterpieces = random.sample(pool, min(len(pool), 3))
     except: pass
 
     mp_contents = []
     if masterpieces:
         for mp in masterpieces:
-            mp_contents.append({"type": "text", "text": f"• 『{mp.get('Title','無題')}』（{mp.get('Author','')}）", "size": "sm", "color": "#333333", "wrap": True})
+            mp_contents.append({"type": "text", "text": f"• 『{g(mp, 'Title', 'title')}』（{g(mp, 'Author', 'author')}）", "size": "sm", "color": "#333333", "wrap": True})
     else:
         mp_contents.append({"type": "text", "text": "• 周辺の過去入賞記録を照会中", "size": "sm", "color": "#777777"})
 
@@ -237,138 +244,6 @@ def handle_line_message(event):
     current_db = get_db()
     if current_db is None: return
     
-    # 💥【HTTPS強制置換ガード】Render内部通信による http:// 判定を殺し、LINE仕様の https:// に100%固定
-    base_url = request.host_url
+    base_url = os.environ.get('RENDER_EXTERNAL_URL', request.host_url).strip()
     if base_url.startswith("http://"):
-        base_url = base_url.replace("http://", "https://", 1)
-
-    base_date = datetime.now() + timedelta(days=1)
-    
-    target_periods = []
-    for i in range(-5, 11):
-        d = base_date + timedelta(days=i)
-        m = d.month
-        day = d.day
-        p = "上旬" if day <= 10 else "中旬" if day <= 20 else "下旬"
-        target_periods.append((m, p))
-    target_periods = list(set(target_periods))
-
-    intent_pref = ""
-    intent_keyword = "朝焼け"
-    try:
-        intent_response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[{"role": "system", "content": "地域名とキーワード抽出"}, {"role": "user", "content": user_message}],
-            temperature=0.1
-        )
-        intent = json.loads(intent_response.choices[0].message.content)
-        intent_pref = intent.get("target_pref", "").strip()
-        intent_keyword = intent.get("keyword", "朝焼け")
-    except: pass
-
-    ref = current_db.collection('Master_Photos')
-    precise_seasonal_pool = []
-    try:
-        for m_val, p_val in target_periods:
-            for m_str in [str(m_val), f"{m_val:02d}"]:
-                docs = ref.where('Month', '==', m_str).stream()
-                for doc in docs:
-                    d = doc.to_dict()
-                    if str(d.get('Period', '')).strip() == p_val:
-                        precise_seasonal_pool.append((doc.id, d))
-    except Exception as e: print(f"Firestore Snipe Error: {e}", flush=True)
-
-    main_pool = []
-    radius_pool = []
-
-    for d_id, d in precise_seasonal_pool:
-        if is_within_250km(d): radius_pool.append((d_id, d))
-        if intent_pref and d.get('Prefecture', '') == intent_pref: main_pool.append((d_id, d))
-
-    if not intent_pref: main_pool = list(radius_pool)
-
-    def score_item(item_tuple):
-        _, d = item_tuple
-        return 1 if intent_keyword in str(d.get('Subject','')) + str(d.get('Location','')) + str(d.get('Title','')) else 0
-
-    main_pool.sort(key=score_item, reverse=True)
-    radius_pool.sort(key=score_item, reverse=True)
-
-    if not main_pool: main_pool = list(radius_pool)
-    if not main_pool:
-        rand_ref = ref.order_by('__name__').start_at([f"photo_{random.randint(0, 14000)}"]).limit(3).stream()
-        main_pool = [(doc.id, doc.to_dict()) for doc in rand_ref]
-
-    carousel_bubbles = []
-    for d_id, item in main_pool[:3]:
-        carousel_bubbles.append(build_single_bubble(d_id, item, base_url))
-
-    msg_carousel = GachiFlexMessage(
-        alt_text="今が旬のおすすめ撮影地3選",
-        contents_dict={"type": "carousel", "contents": carousel_bubbles}
-    )
-
-    weather_val = main_pool[0][1].get('Weather', '')
-    weather = str(weather_val).strip() if weather_val else ""
-    weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
-
-    if intent_pref:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日の撮影に向けて『{intent_pref}』でお探しですね。現地を狙い撃ちした知見データから、今の季節に最も素晴らしい表情を見せてくれるおすすめのポイントを厳選いたしました。"
-    else:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。今の季節にまさに『旬』を迎えているおすすめのポイントをご案内いたします。スクロールして気になる場所をお選びください。"
-
-    msg_text = TextSendMessage(text=greeting)
-
-    try: line_bot_api.reply_message(reply_token, [msg_text, msg_carousel])
-    except Exception as e: print(f"LINE Message Send Error: {e}", flush=True)
-
-
-def handle_line_postback(event):
-    reply_token = event['replyToken']
-    postback_data = event['postback']['data']
-    current_db = get_db()
-    if current_db is None: return
-    
-    # 💥 ポストバック側も漏れなくHTTPSに強制置換
-    base_url = request.host_url
-    if base_url.startswith("http://"):
-        base_url = base_url.replace("http://", "https://", 1)
-
-    params = dict(urllib.parse.parse_qsl(postback_data))
-    action = params.get('action')
-    photo_id = params.get('id', 'photo_0')
-    clean_db_id = photo_id.split('_')[-1] if 'move' in photo_id else photo_id
-    if not clean_db_id.startswith('photo_'): clean_db_id = f"photo_{clean_db_id}"
-
-    try:
-        doc_ref = current_db.collection('Master_Photos').document(clean_db_id).get()
-        data = doc_ref.to_dict() if doc_ref.exists else {}
-    except: data = {}
-
-    if not data: return
-
-    if action == "artwork_info":
-        msg = GachiFlexMessage(alt_text="入賞作品詳細情報", contents_dict=build_artwork_info_card(photo_id, data))
-        line_bot_api.reply_message(reply_token, msg)
-    elif action == "back_to_initial":
-        msg = GachiFlexMessage(alt_text="撮影地ナビゲーション", contents_dict=build_single_bubble(clean_db_id, data, base_url))
-        line_bot_api.reply_message(reply_token, msg)
-    elif action == "location_detail":
-        concierge_comment = "該当ポイントの攻略知見を展開します。"
-        msg_text = TextSendMessage(text=concierge_comment)
-        msg_detail = GachiFlexMessage(alt_text="撮影地攻略詳細知見", contents_dict=build_location_detail_card(clean_db_id, data, current_db, base_url))
-        line_bot_api.reply_message(reply_token, [msg_text, msg_detail])
-    elif action == "move_2h":
-        ref = current_db.collection('Master_Photos')
-        near_photos = []
-        try:
-            docs = ref.where('Prefecture', '==', data.get('Prefecture','')).limit(10).stream()
-            near_photos = [(doc.id, doc.to_dict()) for doc in docs if doc.id != clean_db_id]
-        except: pass
-        if not near_photos: near_photos = [(clean_db_id, data)]
-        msg = GachiFlexMessage(alt_text="2時間圏内の周辺候補地", contents_dict=build_carousel_suggestions(near_photos, base_url))
-        line_bot_api.reply_message(reply_token, msg)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+        base_url = base_url.replace("http://", "https
