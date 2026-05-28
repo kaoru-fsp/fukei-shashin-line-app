@@ -4,7 +4,7 @@ import random
 import re
 from flask import Flask, request
 from linebot import LineBotApi
-from linebot.models import FlexSendMessage, TextSendMessage
+from linebot.models import FlexSendMessage, TextSendMessage, FlexContainer
 import firebase_admin
 from firebase_admin import credentials, firestore
 from openai import OpenAI
@@ -32,18 +32,19 @@ def get_db():
             except ValueError: pass
             db = firestore.client()
             return db
-    except Exception: pass
+    except Exception as e:
+        print(f"Firebase Init Error: {e}", flush=True)
     return None
 
 get_db()
 
-# 📸 デモを華やかに彩る、超高画質風景写真の厳選ライブラリーURL
+# 📸 デモ用高画質風景写真ライブラリー
 IMAGE_POOL = {
-    "sakura": "https://images.unsplash.com/photo-1522383225653-ed111181a951?w=600", # 満開の桜
-    "sunrise": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=600", # 朝焼け
-    "mountain": "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=600", # 霧・山・高原
-    "water": "https://images.unsplash.com/photo-1439405326854-014607f694d7?w=600", # 水面・滝・湖
-    "default": "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600" # 壮大な大自然
+    "sakura": "https://images.unsplash.com/photo-1522383225653-ed111181a951?w=600",
+    "sunrise": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=600",
+    "mountain": "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=600",
+    "water": "https://images.unsplash.com/photo-1439405326854-014607f694d7?w=600",
+    "default": "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600"
 }
 
 def get_beautiful_url(keyword, title, location):
@@ -62,7 +63,8 @@ def callback():
         for event in events:
             if event.get('type') == 'message' and event['message'].get('type') == 'text':
                 handle_line_message(event)
-    except Exception: pass
+    except Exception as e:
+        print(f"Callback Root Error: {e}", flush=True)
     return 'OK', 200
 
 # --- 2. コンシェルジュ・リッチUIエンジン ---
@@ -71,9 +73,11 @@ def handle_line_message(event):
     user_message = event['message']['text'].strip()
     
     current_db = get_db()
-    if current_db is None: return
+    if current_db is None:
+        print("❌ データベースの取得に失敗しています", flush=True)
+        return
 
-    # AIによる高精度検索インテントの分離
+    # AIによる検索インテントの分離
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -89,9 +93,10 @@ def handle_line_message(event):
         intent = json.loads(intent_response.choices[0].message.content)
         intent_pref = intent.get("pref", "")
         intent_keyword = intent.get("keyword", "朝焼け")
-    except: pass
+    except Exception as e:
+        print(f"AI Intent Error: {e}", flush=True)
 
-    # 金庫（純度100%の1085件）からの複数候補スキャン
+    # 金庫からの複数候補スキャン
     matched_photos = []
     try:
         ref = current_db.collection('Master_Photos')
@@ -109,15 +114,17 @@ def handle_line_message(event):
                     
         if not matched_photos:
             matched_photos = [doc.to_dict() for doc in ref.limit(3).stream()]
-    except: pass
+    except Exception as e:
+        print(f"DB Fetch Error: {e}", flush=True)
 
-    if not matched_photos: return
+    if not matched_photos:
+        print("❌ マッチするデータが1件もありませんでした", flush=True)
+        return
 
-    # メイン決定版と、カルーセル（選択肢）用の複数候補をセット
     main_data = matched_photos[0]
     choice_datas = matched_photos[:3]
 
-    # 純度100%のデータをマッピング
+    # データマッピング
     title = main_data.get('Title', '無題')
     location = main_data.get('Location', '日本国内の撮影地')
     author = main_data.get('Author', 'ライブラリー記録')
@@ -131,7 +138,6 @@ def handle_line_message(event):
 
     settings = f"F{aperture} ／ ISO {iso} ／ {focal}mm"
     
-    # お天気セリフのマッピング（日本語崩壊防止）
     if not weather or weather.lower() in ["nan", "none", "不明", ""]:
         weather_phrase = "明日はお天気もいいようですから"
         weather_display = "晴れ"
@@ -142,7 +148,7 @@ def handle_line_message(event):
         weather_phrase = f"明日はお天気も{weather}模様のようですから"
         weather_display = weather
 
-    # --- ✨ ① 「ようこそ〜」のくだりを120%活かしたテキストメッセージ ---
+    # --- ① 「ようこそ〜」の下りを活かしたテキストメッセージ ---
     if "明日" in user_message:
         greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。それで明日撮影にお出かけですか。{weather_phrase}撮影も楽しめそうですね。今時分ですと皆さんこんなところでいい作品を撮っているようですよ"
     else:
@@ -150,7 +156,7 @@ def handle_line_message(event):
     
     msg_text = TextSendMessage(text=greeting)
 
-    # --- 📸 ② 写真付き選択肢（カルーセルFlex） ---
+    # --- ② 写真付き選択肢（カルーセルFlex） ---
     carousel_bubbles = []
     for c in choice_datas:
         c_title = c.get('Title', '無題')
@@ -179,12 +185,13 @@ def handle_line_message(event):
         }
         carousel_bubbles.append(bubble)
         
+    # ⭕️ FlexContainer.new_from_json_dict でラップしてクラッシュを完全防止
     msg_carousel = FlexSendMessage(
         alt_text="お勧めの撮影地選択肢",
-        contents={"type": "carousel", "contents": carousel_bubbles}
+        contents=FlexContainer.new_from_json_dict({"type": "carousel", "contents": carousel_bubbles})
     )
 
-    # --- 📖 ③ 【完全体】詳細案内カード（文字が潰れないメガ仕様・余白ゼロ） ---
+    # --- ③ 詳細案内カード（メガFlex・大文字仕様） ---
     main_img = get_beautiful_url(intent_keyword, title, location)
     detail_json = {
         "type": "bubble",
@@ -245,12 +252,18 @@ def handle_line_message(event):
         }
     }
     
-    msg_detail = FlexSendMessage(alt_text="撮影地詳細ナビゲーションカード", contents=detail_json)
+    # ⭕️ FlexContainer.new_from_json_dict でラップしてクラッシュを完全防止
+    msg_detail = FlexSendMessage(
+        alt_text="撮影地詳細ナビゲーションカード", 
+        contents=FlexContainer.new_from_json_dict(detail_json)
+    )
 
     # --- 🚀 3通を完璧なコンボで同時送信 ---
     try:
         line_bot_api.reply_message(reply_token, [msg_text, msg_carousel, msg_detail])
-    except Exception: pass
+        print("✨ LINEへのトリプルメッセージ送信に成功しました！", flush=True)
+    except Exception as reply_err:
+        print(f"❌ LINE REPLY API ERROR: {reply_err}", flush=True)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
