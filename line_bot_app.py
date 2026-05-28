@@ -236,18 +236,22 @@ def handle_line_message(event):
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
-
+    
+    # 💥【HTTPS強制置換ガード】Render内部通信による http:// 判定を殺し、LINE仕様の https:// に100%固定
     base_url = request.host_url
+    if base_url.startswith("http://"):
+        base_url = base_url.replace("http://", "https://", 1)
+
     base_date = datetime.now() + timedelta(days=1)
     
-    parsed_periods = []
+    target_periods = []
     for i in range(-5, 11):
         d = base_date + timedelta(days=i)
         m = d.month
         day = d.day
         p = "上旬" if day <= 10 else "中旬" if day <= 20 else "下旬"
-        parsed_periods.append((m, p))
-    parsed_periods = list(set(parsed_periods))
+        target_periods.append((m, p))
+    target_periods = list(set(target_periods))
 
     intent_pref = ""
     intent_keyword = "朝焼け"
@@ -259,19 +263,14 @@ def handle_line_message(event):
             temperature=0.1
         )
         intent = json.loads(intent_response.choices[0].message.content)
-        pref_val = intent.get("target_pref", "")
-        intent_pref = str(pref_val).strip() if pref_val else ""
-        kw_val = intent.get("keyword", "朝焼け")
-        intent_keyword = str(kw_val).strip() if kw_val else "朝焼け"
+        intent_pref = intent.get("target_pref", "").strip()
+        intent_keyword = intent.get("keyword", "朝焼け")
     except: pass
 
     ref = current_db.collection('Master_Photos')
     precise_seasonal_pool = []
-    
-    # ⚡️【Firestoreインデックスエラーの完全撲滅】
-    # 複数whereによるIndexRequiredエラーを防ぐため、自動索引のあるMonth単体で取得し、PeriodはPython側で超高速安全にフィルタリング！
     try:
-        for m_val, p_val in parsed_periods:
+        for m_val, p_val in target_periods:
             for m_str in [str(m_val), f"{m_val:02d}"]:
                 docs = ref.where('Month', '==', m_str).stream()
                 for doc in docs:
@@ -310,7 +309,6 @@ def handle_line_message(event):
         contents_dict={"type": "carousel", "contents": carousel_bubbles}
     )
 
-    # ⚡️【NoneTypeエラーの完全防殺】
     weather_val = main_pool[0][1].get('Weather', '')
     weather = str(weather_val).strip() if weather_val else ""
     weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
@@ -332,7 +330,11 @@ def handle_line_postback(event):
     current_db = get_db()
     if current_db is None: return
     
+    # 💥 ポストバック側も漏れなくHTTPSに強制置換
     base_url = request.host_url
+    if base_url.startswith("http://"):
+        base_url = base_url.replace("http://", "https://", 1)
+
     params = dict(urllib.parse.parse_qsl(postback_data))
     action = params.get('action')
     photo_id = params.get('id', 'photo_0')
