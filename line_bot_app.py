@@ -38,7 +38,7 @@ def get_db():
 
 get_db()
 
-# ─── 🛠️ LINE SDKのパースバグを完全封殺する無敵のカスタムクラス ───
+# ─── 🛠️ LINE SDKのパースバグを完全封殺するカスタムクラス ───
 class GachiFlexMessage:
     def __init__(self, alt_text, contents_dict):
         self.type = "flex"
@@ -195,13 +195,12 @@ def handle_line_message(event):
         }
         carousel_bubbles.append(bubble)
         
-    # ⭕️ 自作の GachiFlexMessage クラスを使い、削ぎ落としを完全ガード！
     msg_carousel = GachiFlexMessage(
         alt_text="お勧めの撮影地選択肢",
         contents_dict={"type": "carousel", "contents": carousel_bubbles}
     )
 
-    # --- ③ 詳細案内カード（メガFlex・大文字仕様） ---
+    # --- ③ 詳細案内カード（メガFlex・仕様完全準拠版） ---
     main_img = get_beautiful_url(intent_keyword, title, location)
     detail_json = {
         "type": "bubble",
@@ -255,20 +254,20 @@ def handle_line_message(event):
                     "spacing": "xs",
                     "contents": [
                         {"type": "text", "text": "📚 情報ライブラリーの司書知見", "weight": "bold", "size": "sm", "color": "#1f3c3d"},
-                        {"type": "text", "text": guide, "size": "md", "color": "#222222", "wrap": True, "lineSpacing": "md", "margin": "xs"}
+                        # ⭕️ LINE仕様に存在しない lineSpacing プロパティを完全に排除！
+                        {"type": "text", "text": guide, "size": "md", "color": "#222222", "wrap": True, "margin": "xs"}
                     ]
                 }
             ]
         }
     }
     
-    # ⭕️ 自作の GachiFlexMessage クラスを使い、削ぎ落としを完全ガード！
     msg_detail = GachiFlexMessage(
         alt_text="撮影地詳細ナビゲーションカード", 
         contents_dict=detail_json
     )
 
-    # --- 🚀 3通を完璧なコンボで同時送信 ---
+    # --- 🚀 3通を同時送信 ---
     try:
         line_bot_api.reply_message(reply_token, [msg_text, msg_carousel, msg_detail])
         print("✨ LINEへのトリプルメッセージ送信に100%成功しました！", flush=True)
