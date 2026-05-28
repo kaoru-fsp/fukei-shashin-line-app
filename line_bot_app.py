@@ -1,38 +1,21 @@
 import os
 import json
 import random
-import sys
-from flask import Flask, request, abort
+from flask import Flask, request
 from linebot import LineBotApi
-from linebot.models import TextSendMessage, FlexSendMessage
-import firebase_admin
-from firebase_admin import credentials, firestore
-from openai import OpenAI
+from linebot.models import TextSendMessage
 
 app = Flask(__name__)
 
-print("STARTUP: Initializing line_bot_app...", flush=True)
-
-# --- 1. LINE API の初期化 ---
+# --- 1. API初期化 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
-# --- 2. OpenAI API の初期化 ---
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 ai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- 安全な文字列変換（LINEのエラー400を絶対に防ぐ防壁） ---
-def safe_str(val, default="情報なし"):
-    if val is None:
-        return default
-    s = str(val).strip()
-    if s == "" or s.lower() == "nan" or s.lower() == "none":
-        return default
-    return s
-
-# --- 3. Firebase / Firestore の初期化 ---
 db = None
-def initialize_firebase():
+def get_db():
     global db
     if db is not None:
         return db
@@ -41,20 +24,16 @@ def initialize_firebase():
         if firebase_creds_json:
             creds_dict = json.loads(firebase_creds_json)
             cred = credentials.Certificate(creds_dict)
-            try:
-                firebase_admin.initialize_app(cred)
-            except ValueError:
-                pass
+            try: firebase_admin.initialize_app(cred)
+            except ValueError: pass
             db = firestore.client()
-            print("SUCCESS: Firestore initialized.", flush=True)
             return db
-    except Exception as e:
-        print(f"CRITICAL ERROR: Firebase init failed: {e}", flush=True)
+    except Exception: pass
     return None
 
-initialize_firebase()
+get_db()
 
-# --- 4. LINE Webhook 受信口 ---
+# --- 2. Webhook受付 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     try:
@@ -64,216 +43,99 @@ def callback():
             if event.get('type') == 'message' and event['message'].get('type') == 'text':
                 handle_line_message(event)
     except Exception as e:
-        print(f"ERROR: Callback exception: {e}", flush=True)
+        print(f"Callback Error: {e}", flush=True)
     return 'OK', 200
 
-# --- 5. 美しいFlex Message UI ---
-def create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment):
-    flex_bubble = {
-      "type": "bubble",
-      "hero": {
-        "type": "image",
-        "url": "https://upload.wikimedia.org/wikipedia/commons/d/d4/One_White_Square.png",
-        "size": "full",
-        "aspectRatio": "20:13",
-        "aspectMode": "cover"
-      },
-      "body": {
-        "type": "box",
-        "layout": "vertical",
-        "contents": [
-          {"type": "text", "text": "🏛️ 風景写真ライブラリー 厳選案内", "weight": "bold", "color": "#111111", "size": "sm"},
-          {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "md", "wrap": True},
-          {
-            "type": "box",
-            "layout": "vertical",
-            "margin": "lg",
-            "spacing": "sm",
-            "contents": [
-              {
-                "type": "box",
-                "layout": "baseline",
-                "spacing": "sm",
-                "contents": [
-                  {"type": "text", "text": "名作", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": f"「{title}」 ({author} 著)", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
-                ]
-              },
-              {
-                "type": "box",
-                "layout": "baseline",
-                "spacing": "sm",
-                "contents": [
-                  {"type": "text", "text": "機材", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": f"{camera}\n{lens}", "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
-                ]
-              },
-              {
-                "type": "box",
-                "layout": "baseline",
-                "spacing": "sm",
-                "contents": [
-                  {"type": "text", "text": "条件", "color": "#aaaaaa", "size": "sm", "flex": 2},
-                  {"type": "text", "text": settings, "wrap": True, "color": "#666666", "size": "sm", "flex": 5}
-                ]
-              }
-            ]
-          },
-          {"type": "separator", "margin": "xxl"},
-          {
-            "type": "box",
-            "layout": "vertical",
-            "margin": "xxl",
-            "contents": [
-              {"type": "text", "text": "📖 【ライブラリーの撮影地知見】", "weight": "bold", "size": "md", "color": "#111111"},
-              {"type": "text", "text": guide, "wrap": True, "size": "sm", "color": "#555555", "margin": "md"}
-            ]
-          },
-          {"type": "separator", "margin": "xxl"},
-          {
-            "type": "box",
-            "layout": "vertical",
-            "margin": "xxl",
-            "backgroundColor": "#f7f8fa",
-            "cornerRadius": "md",
-            "paddingAll": "md",
-            "contents": [
-              {"type": "text", "text": "💬 【この名作に宿る改善ロジック】", "weight": "bold", "size": "md", "color": "#2c3e50"},
-              {"type": "text", "text": judge_comment, "wrap": True, "size": "sm", "color": "#333333", "margin": "sm"}
-            ]
-          }
-        ]
-      }
-    }
-    return flex_bubble
-
-# --- 6. メイン処理：インテリジェント探索ハイブリッドエンジン ---
+# --- 3. 撮影地ナビゲーター（ライブラリーの司書仕様） ---
 def handle_line_message(event):
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
-    print(f"ENGINE: Processing message = '{user_message}'", flush=True)
     
-    current_db = initialize_firebase()
+    current_db = get_db()
     target_data = None
 
-    # ─── ステップ1: 司書脳（LLM）によるキーワード抽出 ───
-    search_keywords = []
-    try:
-        intent_response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "ユーザーの文章から、日本の『都道府県名』、または『被写体や季節のキーワード（例：桜、新緑、富士山など）』を2個以内の単語で抽出して、カンマ区切りで出力してください。該当がない場合は「無」とだけ出力してください。"},
-                {"role": "user", "content": user_message}
-            ],
-            temperature=0.0
-        )
-        keyword_output = intent_response.choices[0].message.content
-        search_keywords = [k.strip() for k in keyword_output.split(",") if k.strip() != "無"]
-    except Exception as e:
-        print(f"ENGINE ERROR: OpenAI keyword extraction failed: {e}", flush=True)
-
-    # ─── ステップ2: 14,737件のデータベース探索 ───
     if current_db is not None:
         try:
             matched_photos = []
-            possible_collections = ['Master_Photos', 'photo_master', 'photo master', 'photos']
+            intent_response = ai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "ユーザーの文章から連想される、風景写真の重要な撮影キーワード（例：日の出、朝焼け、黎明、朝霧、光、あるいは都道府県名など）を1単語だけ抽出してください。特にない場合は「朝焼け」と出力してください。"},
+                    {"role": "user", "content": user_message}
+                ],
+                temperature=0.1
+            )
+            keyword = intent_response.choices[0].message.content.strip()
             
-            for col_name in possible_collections:
-                photos_ref = current_db.collection(col_name)
-                if search_keywords:
-                    main_keyword = search_keywords[0]
-                    docs = photos_ref.where('Prefecture', '==', main_keyword).limit(50).stream()
-                    matched_photos.extend([doc.to_dict() for doc in docs])
-                    
-                    if not matched_photos:
-                        fallback_docs = photos_ref.limit(100).stream()
-                        for doc in fallback_docs:
-                            data = doc.to_dict()
-                            if main_keyword in str(data.get('Location', '')) or main_keyword in str(data.get('Subject', '')):
-                                matched_photos.append(data)
-                if matched_photos:
-                    break
-
+            ref = current_db.collection('Master_Photos')
+            docs = ref.limit(150).stream()
+            for doc in docs:
+                d = doc.to_dict()
+                if keyword in str(d.get('Subject', '')) or keyword in str(d.get('Location', '')) or keyword in str(d.get('Title', '')):
+                    matched_photos.append(d)
+            
             if not matched_photos:
-                for col_name in possible_collections:
-                    random_docs = current_db.collection(col_name).limit(10).stream()
-                    matched_photos = [doc.to_dict() for doc in random_docs]
-                    if matched_photos:
-                        break
-
+                docs = ref.limit(5).stream()
+                matched_photos = [doc.to_dict() for doc in docs]
+                    
             if matched_photos:
                 target_data = random.choice(matched_photos)
-        except Exception as firestore_err:
-            print(f"DATABASE ERROR: Firestore logic failed: {firestore_err}", flush=True)
+        except Exception: pass
 
-    # ─── ステップ3: セーフティネット（本番データ構造の完全エミュレート） ───
-    if not target_data:
-        try:
-            ai_backup = ai_client.chat.completions.create(
-                model="gpt-4o",
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": """
-                    ユーザーの問いかけに合致する、実在する最高峰の日本の撮影地情報と名作データを、指定のJSONフォーマットで出力してください。空欄は厳禁です。
-                    {
-                        "Title": "作品のタイトル", "Author": "写真家の氏名", "Location": "具体的な撮影場所", "Subject": "被写体要素",
-                        "Camera_Body": "使用カメラ", "Lens": "使用レンズ", "Aperture": "絞り値", "ISO": "ISO", "Focal_Length": "焦点距離", "Weather": "天候",
-                        "Judge_Comment_Summary": "この撮影地における光の読み方やプロの解説（200文字程度）",
-                        "Logic_Advice": "アマチュアへの具体的な添削指導・アドバイス（200文字程度）"
-                    }
-                    """},
-                    {"role": "user", "content": f"ユーザーの問いかけ: 「{user_message}」"}
-                ],
-                temperature=0.4
-            )
-            target_data = json.loads(ai_backup.choices[0].message.content)
-        except Exception as ai_err:
-            target_data = {}
-
-    # ─── ステップ4: データの安全洗浄（safe_strによるLINE拒否ガード） ───
-    title = safe_str(target_data.get('Title'), "無題")
-    location = safe_str(target_data.get('Location'), "不明な撮影地")
-    author = safe_str(target_data.get('Author'), "写真家")
-    camera = safe_str(target_data.get('Camera_Body'), "情報なし")
-    lens = safe_str(target_data.get('Lens'), "情報なし")
+    # データの安全抽出
+    title = target_data.get('Title', '黎明の霧ヶ峰') if target_data else "黎明の霧ヶ峰"
+    location = target_data.get('Location', '長野県 霧ヶ峰高原') if target_data else "長野県 霧ヶ峰高原"
+    author = target_data.get('Author', 'ライブラリー記録') if target_data else "ライブラリー記録"
+    camera = target_data.get('Camera_Body', '情報なし') if target_data else "情報なし"
+    lens = target_data.get('Lens', '情報なし') if target_data else "情報なし"
+    aperture = target_data.get('Aperture', '-') if target_data else "-"
+    iso = target_data.get('ISO', '-') if target_data else "-"
+    focal = target_data.get('Focal_Length', '-') if target_data else "-"
+    weather = target_data.get('Weather', '晴れ') if target_data else "晴れ"
     
-    aperture = safe_str(target_data.get('Aperture'), "-")
-    iso = safe_str(target_data.get('ISO'), "-")
-    focal = safe_str(target_data.get('Focal_Length'), "-")
-    settings = f"F{aperture} / ISO {iso} / {focal}mm"
-    weather = safe_str(target_data.get('Weather'), "不明")
-    
-    guide = safe_str(target_data.get('Judge_Comment_Summary', target_data.get('guide')), "ナビ情報は現在準備中です。")
-    judge_comment = safe_str(target_data.get('Logic_Advice', target_data.get('judge_comment')), "アドバイスは現在準備中です。")
+    raw_guide = target_data.get('Judge_Comment_Summary', 'ナビゲーションデータを確認中です。') if target_data else 'ナビゲーションデータを確認中です。'
 
-    # ─── ステップ5: 案内文の生成 ───
+    # gpt-4oによる格調高き司書の知見要約（評価や添削表現は一切禁止、事実に基づいた客観的ナビゲートに限定）
     try:
-        response = ai_client.chat.completions.create(
+        cleanup_response = ai_client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "あなたは雑誌『風景写真』35年の歴史を預かるライブラリーの司書です。丁寧な紳士の敬語で、ユーザーへの優しい案内メッセージを作成してください。"},
-                {"role": "user", "content": f"【データ】\n作品:「{title}」（{author}著）\n撮影地:{location}\nユーザーの問いかけ:「{user_message}」\n150文字程度で案内文を作ってください。最後に「こちらの名作の書棚を開きましたので、どうぞご高覧ください。」と結んでください。"}
+                {"role": "system", "content": "あなたは35年の歴史を持つ風景写真ライブラリーの校正司書です。手元の[撮影地知見テキスト]に文字化けや不自然な記述があれば、前後の文脈から『完全に美しく自然な大人の日本語』に修復してください。審査・評価・添削・アドバイスといった上から目線の表現は絶対に使い、完全に客観的な『撮影地知見・ナビゲーション』として150文字程度で整えてください。"},
+                {"role": "user", "content": f"撮影地知見テキスト: {raw_guide}"}
             ],
-            temperature=0.3
+            temperature=0.2
         )
-        司書のメッセージ = safe_str(response.choices[0].message.content, "ご要望にふさわしい、風景写真ライブラリーの名作をご案内いたします。どうぞご高覧ください。")
+        cleaned_guide = cleanup_response.choices[0].message.content.strip()
     except Exception:
-        司書のメッセージ = f"お待たせいたしました。ご要望に最もふさわしい名作をご案内いたします。こちらの名作の書棚を開きましたので、どうぞご高覧ください。"
+        cleaned_guide = str(raw_guide)
 
-    # ─── ステップ6: 返信の執行 ───
+    settings = f"F{aperture} / ISO {iso} / {focal}mm / {weather}"
+    weather_word = f"も{weather}" if weather and str(weather) != "不明" else "もいい"
+
+    # --- 4. ユーザー指定の見本UXを完全体現 ---
+    if "明日" in user_message:
+        コンシェルジュのセリフ = f"ようこそ『風景写真』コンシェルジュの部屋へ。それで明日撮影にお出かけですか。明日はお天気{weather_word}のようですから撮影も楽しめそうですね。今時分ですと皆さんこんなところでいい作品を撮っているようですよ"
+    else:
+        コンシェルジュのセリフ = f"ようこそ『風景写真』コンシェルジュの部屋へ。本日は撮影のご相談でしょうか。今時分ですと皆さんこんなところでいい作品を撮っているようですよ"
+
+    # 無駄な装飾、余白、カードを削ぎ落とした、視認性の高いプレーンテキスト構成
+    reply_text = f"""{コンシェルジュのセリフ}
+
+🗺️ 【撮影地ナビゲーション】
+■ 撮影地：{location}
+■ 参考作品：「{title}」（{author} 著）
+
+📸 【過去の記録に基づく撮影条件】
+■ 機材：{camera} ／ {lens}
+■ 条件：{settings}
+
+📖 【ライブラリーの撮影地知見】
+{cleaned_guide}"""
+
     try:
-        bubble_json = create_添削_ui(location, title, author, camera, lens, settings, weather, guide, judge_comment)
-        line_bot_api.reply_message(
-            reply_token,
-            [
-                TextSendMessage(text=司書のメッセージ),
-                FlexSendMessage(alt_text="風景写真ライブラリー案内レポート", contents=bubble_json)
-            ]
-        )
-        print("SUCCESS: LINE reply completed perfectly.", flush=True)
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=reply_text))
     except Exception as reply_err:
-        print(f"LINE_API CRITICAL ERROR: reply_message crashed: {reply_err}", flush=True)
+        print(f"LINE_API ERROR: {reply_err}", flush=True)
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
