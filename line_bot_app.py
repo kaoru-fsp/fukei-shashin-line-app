@@ -46,23 +46,7 @@ class GachiFlexMessage:
     def as_json_dict(self):
         return {"type": "flex", "altText": self.alt_text, "contents": self.contents}
 
-# 📸 確定高画質風景写真プール
-IMAGE_POOL = {
-    "sakura": "https://images.unsplash.com/photo-1522383225653-ed111181a951?w=600",
-    "sunrise": "https://images.unsplash.com/photo-1506744038136-46273834b3fb?w=600",
-    "mountain": "https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=600",
-    "water": "https://images.unsplash.com/photo-1439405326854-014607f694d7?w=600",
-    "default": "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600"
-}
-
-def get_beautiful_url(keyword, title, location):
-    text = str(keyword) + str(title) + str(location)
-    if any(k in text for k in ["桜", "春", "花"]): return IMAGE_POOL["sakura"]
-    if any(k in text for k in ["朝焼け", "日の出", "黎明", "光", "夕日", "宵", "夕景"]): return IMAGE_POOL["sunrise"]
-    if any(k in text for k in ["山", "霧", "森", "木", "高原", "霧ヶ峰"]): return IMAGE_POOL["mountain"]
-    if any(k in text for k in ["海", "川", "滝", "湖", "水"]): return IMAGE_POOL["water"]
-    return IMAGE_POOL["default"]
-
+# 📍 緯度経度による半径250km圏内判定
 TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
 
 def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
@@ -81,13 +65,55 @@ def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
 
 # --- 2. 状態遷移用：Flexコンポーネント生成ビルダー ---
 
+def build_premium_placeholder(photo_id, pic_name, sub_text="タップして作品・露出詳細を表示"):
+    """外部のストックフォトを永久追放し、原典ファイル名を高品位に魅せる額縁風の意匠ブロック"""
+    return {
+        "type": "box",
+        "layout": "vertical",
+        "backgroundColor": "#1f3c3d",
+        "height": "160px",
+        "cornerRadius": "md",
+        "action": {
+            "type": "postback",
+            "data": f"action=artwork_info&id={photo_id}"
+        },
+        "contents": [
+            {"type": "spacer", "size": "md"},
+            {
+                "type": "text",
+                "text": "📷 『風景写真』大元ライブラリー原典",
+                "color": "#ffffff",
+                "align": "center",
+                "weight": "bold",
+                "size": "sm"
+            },
+            {
+                "type": "text",
+                "text": f"FILE: {pic_name}",
+                "color": "#a0baba",
+                "align": "center",
+                "size": "xs",
+                "margin": "xs",
+                "weight": "bold"
+            },
+            {
+                "type": "text",
+                "text": f"（{sub_text}）",
+                "color": "#779999",
+                "align": "center",
+                "size": "xs",
+                "margin": "md"
+            },
+            {"type": "spacer", "size": "md"}
+        ]
+    }
+
 def build_initial_card(photo_id, data):
+    """初動カード：撮影地名を最大に配置し、原典ファイル名枠を完全結合"""
     location = data.get('Location', '日本国内の撮影地')
     title = data.get('Title', '無題')
     author = data.get('Author', 'ライブラリー記録')
-    
-    check_text = str(data.get('Subject', '')) + str(location) + str(title)
-    main_img = get_beautiful_url(check_text, title, location)
+    pic_name = data.get('PicFileName', '未記録').strip()
     
     return {
         "type": "bubble",
@@ -97,27 +123,42 @@ def build_initial_card(photo_id, data):
             "layout": "vertical",
             "paddingAll": "xl",
             "contents": [
+                # 🖼️ 汚い画像を排除し、タップ可能な高品位アーカイブ枠を主役に配置！
+                build_premium_placeholder(photo_id, pic_name),
                 {
-                    "type": "image",
-                    "url": main_img,
-                    "size": "full",
-                    "aspectRatio": "16:10",
-                    "aspectMode": "cover",
-                    # ❌ エラーの原因だった cornerRadius を完全に消去！！！
-                    "action": {"type": "postback", "data": f"action=artwork_info&id={photo_id}"}
+                    "type": "text",
+                    "text": location,
+                    "weight": "bold",
+                    "size": "xl",
+                    "margin": "lg",
+                    "wrap": True,
+                    "color": "#111111"
                 },
-                {"type": "text", "text": location, "weight": "bold", "size": "xl", "margin": "lg", "wrap": True, "color": "#111111"},
-                {"type": "text", "text": f"参考作品：『{title}』 （{author} 著）", "size": "sm", "color": "#555555", "wrap": True, "margin": "xs"},
+                {
+                    "type": "text",
+                    "text": f"参考作品：『{title}』 （{author} 著）",
+                    "size": "sm",
+                    "color": "#555555",
+                    "wrap": True,
+                    "margin": "xs"
+                },
                 {
                     "type": "button",
-                    "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id={photo_id}"},
-                    "style": "primary", "color": "#1f3c3d", "margin": "md"
+                    "action": {
+                        "type": "postback",
+                        "label": "🔍 ここを詳しく",
+                        "data": f"action=location_detail&id={photo_id}"
+                    },
+                    "style": "primary",
+                    "color": "#1f3c3d",
+                    "margin": "md"
                 }
             ]
         }
     }
 
 def build_artwork_info_card(photo_id, data):
+    """写真枠タップ時：露出・機材詳細スペック"""
     title = data.get('Title', '無題')
     author = data.get('Author', 'ライブラリー記録')
     camera = data.get('Camera_Body', '情報なし')
@@ -134,7 +175,9 @@ def build_artwork_info_card(photo_id, data):
             "contents": [{"type": "text", "text": "🏆 入賞作品・機材詳細スペック", "color": "#ffffff", "weight": "bold"}]
         },
         "body": {
-            "type": "box", "layout": "vertical", "spacing": "md",
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
             "contents": [
                 {"type": "text", "text": f"作品名：『{title}』", "weight": "bold", "size": "md"},
                 {"type": "text", "text": f"撮影者：{author} 著", "size": "sm"},
@@ -148,13 +191,11 @@ def build_artwork_info_card(photo_id, data):
     }
 
 def build_location_detail_card(photo_id, data, current_db):
+    """「ここを詳しく」タップ時：攻略画面（トチカン・セーフガイド・傑作選）"""
     location = data.get('Location', '日本国内の撮影地')
     pref = data.get('Prefecture', '')
     guide = data.get('Judge_Comment_Summary', '現地ライブラリーデータに基づき撮影計画を構築してください。')
-    title = data.get('Title', '無題')
-    
-    check_text = str(data.get('Subject', '')) + str(location) + str(title)
-    main_img = get_beautiful_url(check_text, title, location)
+    pic_name = data.get('PicFileName', '未記録').strip()
     
     masterpieces = []
     try:
@@ -182,12 +223,16 @@ def build_location_detail_card(photo_id, data, current_db):
             "type": "box", "layout": "vertical", "backgroundColor": "#1f3c3d", "paddingAll": "lg",
             "contents": [{"type": "text", "text": f"🗺️ 撮影地攻略：{location}", "color": "#ffffff", "weight": "bold", "size": "md"}]
         },
-        "hero": {
-            "type": "image", "url": main_img, "size": "full", "aspectRatio": "16:10", "aspectMode": "cover"
-        },
         "body": {
-            "type": "box", "layout": "vertical", "spacing": "md",
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
+            "paddingAll": "xl",
             "contents": [
+                # 詳細画面にも統一されたデザイン意匠をドッキング
+                build_premium_placeholder(photo_id, pic_name, sub_text="原典ファイル記録完了"),
+                {"type": "separator", "margin": "md"},
+                
                 {"type": "text", "text": "🔷 【トチカン】地域密着撮影知見", "weight": "bold", "size": "sm", "color": "#1f3c3d"},
                 {"type": "text", "text": guide, "size": "md", "wrap": True, "color": "#222222"},
                 {"type": "separator", "margin": "md"},
@@ -224,31 +269,43 @@ def build_location_detail_card(photo_id, data, current_db):
     }
 
 def build_carousel_suggestions(suggestions, title_text="💡 コンシェルジュの追加提案スポット"):
+    """周辺候補地・夕景候補地を提示する統一デザインカルーセル"""
     bubbles = []
     for idx, (d_id, item) in enumerate(suggestions[:3]):
         loc = item.get('Location', 'おすすめ撮影地')
         t = item.get('Title', '作品名')
         a = item.get('Author', '著者')
-        
-        check_text = str(item.get('Subject', '')) + str(loc) + str(t)
-        c_img = get_beautiful_url(check_text, t, loc)
+        p_name = item.get('PicFileName', '未記録').strip()
         
         bubbles.append({
             "type": "bubble",
             "size": "mega",
-            "hero": {
-                "type": "image", "url": c_img, "size": "full", "aspectRatio": "16:10", "aspectMode": "cover"
-            },
             "body": {
                 "type": "box", "layout": "vertical", "paddingAll": "lg",
                 "contents": [
-                    {"type": "text", "text": title_text, "size": "xs", "color": "#e74c3c", "weight": "bold"},
+                    build_premium_placeholder(d_id, p_name, sub_text="詳細情報を同期中"),
+                    {"type": "text", "text": title_text, "size": "xs", "color": "#e74c3c", "weight": "bold", "margin": "md"},
                     {"type": "text", "text": loc, "weight": "bold", "size": "md", "margin": "xs", "wrap": True},
                     {"type": "text", "text": f"『{t}』（{a}）", "size": "xs", "color": "#666666", "wrap": True},
                     {"type": "button", "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id=move_{idx}_{d_id}"}, "style": "primary", "color": "#1f3c3d", "margin": "sm", "size": "sm"}
                 ]
             }
         })
+
+    footer_actions = [
+        {"type": "button", "action": {"type": "postback", "label": "◀ 撮影地詳細へ戻る", "data": f"action=location_detail&id={photo_id}"}, "style": "secondary", "size": "sm", "margin": "sm"}
+    ]
+    if "夕景" not in title_text:
+        footer_actions.append({"type": "button", "action": {"type": "postback", "label": "🌇 今日の絶景夕景スポット", "data": f"action=sunset_2h&id={photo_id}"}, "style": "primary", "color": "#d35400", "size": "sm", "margin": "sm"})
+
+    bubbles.append({
+        "type": "bubble",
+        "size": "sm",
+        "body": {
+            "type": "box", "layout": "vertical", "spacing": "sm", "paddingAll": "md", "gravity": "center",
+            "contents": footer_actions
+        }
+    })
     return {"type": "carousel", "contents": bubbles}
 
 # --- 3. イベントハンドラー ---
@@ -267,11 +324,13 @@ def callback():
     return 'OK', 200
 
 def handle_line_message(event):
+    """【センターピン完全準拠】時期ウィンドウ（前5後10）＆半径250km圏内スナイプエンジン"""
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
 
+    # 1. 🗓️ 時期ウィンドウの自動生成（計16日間）
     base_date = datetime.now() + timedelta(days=1)
     
     target_periods = []
@@ -285,6 +344,7 @@ def handle_line_message(event):
         target_periods.append(f"{m}月{p}")
     target_periods = list(set(target_periods))
 
+    # 2. AIによる地域指定の分析
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -313,10 +373,21 @@ def handle_line_message(event):
         
         for doc in all_docs:
             d = doc.to_dict()
-            d_time_str = f"{d.get('Month', '')}月{d.get('Period', '')}"
+            d_month = str(d.get('Month', '')).strip()
+            d_period = str(d.get('Period', '')).strip()
             
-            if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
-                if is_within_250km(d):
+            # 月の表記揺れ（5 vs 05）を完全吸収して時期ウィンドウにマッピング
+            if d_month.isdigit():
+                d_month_int = int(d_month)
+                time_match = False
+                for tp in target_periods:
+                    tp_m = int(tp.split('月')[0])
+                    tp_p = tp.split('月')[1]
+                    if tp_m == d_month_int and tp_p == d_period:
+                        time_match = True
+                        break
+                
+                if time_match and is_within_250km(d):
                     radius_pool.append((doc.id, d))
                     if len(radius_pool) >= 10: break
 
@@ -324,8 +395,8 @@ def handle_line_message(event):
             pref_docs = ref.where('Prefecture', '==', intent_pref).limit(30).stream()
             for doc in pref_docs:
                 d = doc.to_dict()
-                d_time_str = f"{d.get('Month','') or ''}月{d.get('Period','') or ''}"
-                if any(p in d_time_str or p in str(d.get('Subject',''))+str(d.get('Location','')) for p in target_periods):
+                d_month = str(d.get('Month', '')).strip()
+                if d_month.isdigit() and int(d_month) == base_date.month:
                     main_pool.append((doc.id, d))
         else:
             main_pool = list(radius_pool)
@@ -333,7 +404,7 @@ def handle_line_message(event):
     except Exception as e: print(f"Sniper Engine Error: {e}", flush=True)
 
     if not main_pool:
-        main_pool = list(radius_pool) if radius_pool else [("photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"})]
+        main_pool = list(radius_pool) if radius_pool else [("photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け", "PicFileName": "NT_101.jpg"})]
 
     doc_id, target_data = main_pool[0]
     additional_suggestions = [r for r in radius_pool if r[0] != doc_id]
