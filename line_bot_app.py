@@ -65,7 +65,7 @@ def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
 
 # --- 2. 状態遷移用：Flexコンポーネント生成ビルダー ---
 
-def build_single_bubble(d_id, item, title_text="📌 おすすめ撮影地候補"):
+def build_single_bubble(d_id, item, title_text="📌 旬の厳選おすすめ撮影地"):
     loc = item.get('Location', 'おすすめ撮影地')
     t = item.get('Title', '作品名')
     a = item.get('Author', '著者')
@@ -227,23 +227,25 @@ def callback():
     return 'OK', 200
 
 def handle_line_message(event):
+    """【真のセンターピンスナイプ】Kaoru設計の「半月ウィンドウ(Month×Period)」条件で最初からピンポイント直接ロード"""
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
 
+    # 1. 🗓️ 明日を起点とした前5日・後10日（計16日間）の「半月ウィンドウ」ペアを厳密に算出
     base_date = datetime.now() + timedelta(days=1)
-    target_periods = []
+    
+    parsed_periods = []
     for i in range(-5, 11):
         d = base_date + timedelta(days=i)
         m = d.month
         day = d.day
-        if day <= 10: p = "上旬"
-        elif day <= 20: p = "中旬"
-        else: p = "下旬"
-        target_periods.append(f"{m}月{p}")
-    target_periods = list(set(target_periods))
+        p = "上旬" if day <= 10 else "中旬" if day <= 20 else "下旬"
+        parsed_periods.append((m, p))
+    parsed_periods = list(set(parsed_periods)) # 重複を削って[(5, '下旬'), (6, '上旬')]等に集約
 
+    # 2. AIによる地域指定分析
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -263,47 +265,49 @@ def handle_line_message(event):
     except: pass
 
     ref = current_db.collection('Master_Photos')
+    
+    # 💥 【Kaoru流・超効率的ハーフマンス・スナイプ】
+    # 1万4千件を総当たりせず、かつ無駄な月全ロードもせず、最初から「該当する半月のスロット」だけをインデックスで一撃狙い撃ち！
+    precise_seasonal_pool = []
+    try:
+        for m_val, p_val in parsed_periods:
+            # 1桁・2桁の表記揺れをインデックスで完全防衛しつつピンポイント引き
+            for m_str in [str(m_val), f"{m_val:02d}"]:
+                docs = ref.where('Month', '==', m_str).where('Period', '==', p_val).stream()
+                for doc in docs:
+                    precise_seasonal_pool.append((doc.id, doc.to_dict()))
+    except Exception as e:
+        print(f"Firestore Precise Snipe Error: {e}", flush=True)
+
     main_pool = []
     radius_pool = []
 
-    try:
-        rand_seed = random.randint(0, 14000)
-        all_docs = ref.order_by('__name__').start_at([f"photo_{rand_seed}"]).limit(800).stream()
-        
-        for doc in all_docs:
-            d = doc.to_dict()
-            d_month = str(d.get('Month', '')).strip()
-            d_period = str(d.get('Period', '')).strip()
+    # 3. 🎯 ロードされた「その半月分のジャストな塊」だけを250km圏内＆地域指定で超高速精査
+    for d_id, d in precise_seasonal_pool:
+        # 半径250km圏内チェック
+        if is_within_250km(d):
+            radius_pool.append((d_id, d))
             
-            if d_month.isdigit():
-                d_month_int = int(d_month)
-                time_match = False
-                for tp in target_periods:
-                    tp_m = int(tp.split('月')[0])
-                    tp_p = tp.split('月')[1]
-                    if tp_m == d_month_int and tp_p == d_period:
-                        time_match = True
-                        break
-                if time_match and is_within_250km(d):
-                    radius_pool.append((doc.id, d))
-                    if len(radius_pool) >= 5: break
+        # 地域指定がある場合のマッチング
+        if intent_pref and d.get('Prefecture', '') == intent_pref:
+            main_pool.append((d_id, d))
 
-        if intent_pref:
-            pref_docs = ref.where('Prefecture', '==', intent_pref).limit(15).stream()
-            for doc in pref_docs:
-                d = doc.to_dict()
-                d_month = str(d.get('Month', '')).strip()
-                if d_month.isdigit() and int(d_month) == base_date.month:
-                    main_pool.append((doc.id, d))
-                    if len(main_pool) >= 5: break
-        else:
-            main_pool = list(radius_pool)
+    if not intent_pref:
+        main_pool = list(radius_pool)
 
-    except Exception as e: print(f"Sniper Engine Error: {e}", flush=True)
+    # キーワード適応度で最良の3件をソート・厳選
+    def score_item(item_tuple):
+        _, d = item_tuple
+        txt = str(d.get('Subject','')) + str(d.get('Location','')) + str(d.get('Title',''))
+        return 1 if intent_keyword in txt else 0
+
+    main_pool.sort(key=score_item, reverse=True)
+    radius_pool.sort(key=score_item, reverse=True)
 
     if not main_pool: main_pool = list(radius_pool)
     if not main_pool: main_pool = [("photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"})]
 
+    # カルーセル3選をドッキング
     carousel_bubbles = []
     for d_id, item in main_pool[:3]:
         carousel_bubbles.append(build_single_bubble(d_id, item, title_text="📌 旬の厳選おすすめ撮影地"))
@@ -316,11 +320,11 @@ def handle_line_message(event):
     weather = main_pool[0][1].get('Weather', '').strip()
     weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
 
-    # 🗣️ 【完全クレンジング】忌々しい裏方ワード（半月、ウィンドウ、250キロ）をすべて跡形もなく徹底抹殺！
+    # 裏方ロジックワードを完全排除した、シンプルで洗練された挨拶テキスト
     if intent_pref:
         greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。{intent_pref}での撮影をご検討ですね。ライブラリーの膨大な記録から、今の季節に最も素晴らしい表情を見せてくれるおすすめのポイントを厳選いたしました。"
     else:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。今の季節にまさに『旬』を迎えているおすすめのポイントをご案内いたします。スクロールして気になる場所をお選びください。"
+        greeting = f"ようこそ『風景写真』コンシェルジュ the 部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。今の季節にまさに『旬』を迎えているおすすめのポイントをご案内いたします。スクロールして気になる場所をお選びください。"
 
     msg_text = TextSendMessage(text=greeting)
 
