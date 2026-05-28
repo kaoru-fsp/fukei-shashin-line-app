@@ -46,25 +46,7 @@ class GachiFlexMessage:
     def as_json_dict(self):
         return {"type": "flex", "altText": self.alt_text, "contents": self.contents}
 
-# ─── 📸 灰色の枠を撲滅。日本の本物の風景写真だけを、データに連動して100%確実に配信するセーフティURL ───
-REAL_JAPAN_PHOTOS = {
-    "sakura": "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=600", # 日本の桜・古都
-    "sunrise": "https://images.unsplash.com/photo-1503899036084-c55cdd92da26?w=600", # 日本の黎明・富士山遠景
-    "mountain": "https://images.unsplash.com/photo-1542640244-7e672d6cef21?w=600", # 日本の山林・竹林・高原
-    "water": "https://images.unsplash.com/photo-1528164344705-47542687000d?w=600", # 日本の渓流・滝・水辺
-    "default": "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=600"
-}
-
-def get_beautiful_japan_url(data):
-    """実データの被写体や地名から、日本の美しい風景写真を100%確実にマッチング（400エラー絶対回避）"""
-    txt = str(data.get('Subject', '')) + str(data.get('Location', '')) + str(data.get('Title', ''))
-    if any(k in txt for k in ["桜", "春", "花"]): return REAL_JAPAN_PHOTOS["sakura"]
-    if any(k in txt for k in ["朝焼け", "日の出", "黎明", "光", "夕", "宵", "夕景", "宵の口"]): return REAL_JAPAN_PHOTOS["sunrise"]
-    if any(k in txt for k in ["山", "霧", "森", "木", "高原", "霧ヶ峰", "林"]): return REAL_JAPAN_PHOTOS["mountain"]
-    if any(k in txt for k in ["海", "川", "滝", "湖", "水", "渓谷", "浦"]): return REAL_JAPAN_PHOTOS["water"]
-    return REAL_JAPAN_PHOTOS["default"]
-
-# 📍 緯度経度による半径250km圏内判定
+# 📍 半径250km圏内判定
 TOKYO_250KM_PREFS = ['東京都', '神奈川県', '千葉県', '埼玉県', '茨城県', '栃木県', '群馬県', '山梨県', '長野県', '静岡県', '新潟県', '富山県', '石川県', '福井県', '岐阜県', '愛知県', '三重県', '福島県', '山形県', '宮城県']
 
 def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
@@ -84,35 +66,30 @@ def is_within_250km(data, lat_now=35.6812, lng_now=139.7671):
 # --- 2. 状態遷移用：Flexコンポーネント生成ビルダー ---
 
 def build_single_bubble(d_id, item, title_text="📌 おすすめ撮影地候補"):
-    """初動用の横並びカルーセルを構成する、1枚ずつの高品位カードバブル"""
     loc = item.get('Location', 'おすすめ撮影地')
     t = item.get('Title', '作品名')
     a = item.get('Author', '著者')
-    
-    # 📸 写真枠を日本のリアルな美景URLで100%確定マッピングして大復活！
-    img_url = get_beautiful_japan_url(item)
+    pic_name = item.get('PicFileName', '未記録').strip()
     
     return {
         "type": "bubble",
         "size": "mega",
-        "hero": {
-            "type": "image",
-            "url": img_url,
-            "size": "full",
-            "aspectRatio": "16:10",
-            "aspectMode": "cover",
-            "action": {"type": "postback", "data": f"action=artwork_info&id={d_id}"}
-        },
         "body": {
-            "type": "box", "layout": "vertical", "paddingAll": "xl",
+            "type": "box", "layout": "vertical", "paddingAll": "xl", "backgroundColor": "#fafafa",
             "contents": [
                 {"type": "text", "text": title_text, "size": "xs", "color": "#e74c3c", "weight": "bold"},
-                {"type": "text", "text": loc, "weight": "bold", "size": "xl", "margin": "xs", "wrap": True, "color": "#111111"},
+                {"type": "text", "text": loc, "weight": "bold", "size": "xl", "margin": "sm", "wrap": True, "color": "#111111"},
                 {"type": "text", "text": f"参考作品：『{t}』（{a} 著）", "size": "sm", "color": "#555555", "wrap": True, "margin": "xs"},
+                {"type": "text", "text": f"📋 原典アーカイブ画像名: {pic_name}", "size": "xs", "color": "#777777", "margin": "md", "style": "italic"},
                 {
                     "type": "button",
-                    "action": {"type": "postback", "label": "🔍 ここを詳しく", "data": f"action=location_detail&id={d_id}"},
-                    "style": "primary", "color": "#1f3c3d", "margin": "md"
+                    "action": {"type": "postback", "label": "📸 作品・露出スペックを表示", "data": f"action=artwork_info&id={d_id}"},
+                    "style": "secondary", "margin": "md"
+                },
+                {
+                    "type": "button",
+                    "action": {"type": "postback", "label": "🔍 ここを詳しく (トチカン攻略)", "data": f"action=location_detail&id={d_id}"},
+                    "style": "primary", "color": "#1f3c3d", "margin": "sm"
                 }
             ]
         }
@@ -171,19 +148,16 @@ def build_location_detail_card(photo_id, data, current_db):
     if any(k in location for k in ["山", "森", "高原", "霧ヶ峰", "渓谷"]):
         safe_info = "⚠️【重要】山林・熊生息エリア：熊鈴・熊スプレーを必ず携行し、単独行動を避けてください。足元のトレッキングシューズ等も必須です。"
 
-    img_url = get_beautiful_japan_url(data)
-
     return {
         "type": "bubble", "size": "mega",
         "header": {
             "type": "box", "layout": "vertical", "backgroundColor": "#1f3c3d", "paddingAll": "lg",
             "contents": [{"type": "text", "text": f"🗺️ 撮影地攻略：{location}", "color": "#ffffff", "weight": "bold", "size": "md"}]
         },
-        "hero": {
-            "type": "image", "url": img_url, "size": "full", "aspectRatio": "16:10", "aspectMode": "cover"
-        },
         "body": {
-            "type": "box", "layout": "vertical", "spacing": "md",
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "md",
             "contents": [
                 {"type": "text", "text": "🔷 【トチカン】地域密着撮影知見", "weight": "bold", "size": "sm", "color": "#1f3c3d"},
                 {"type": "text", "text": guide, "size": "md", "wrap": True, "color": "#222222"},
@@ -221,7 +195,6 @@ def build_location_detail_card(photo_id, data, current_db):
     }
 
 def build_carousel_suggestions(suggestions, title_text="🚗 2時間圏内の周辺候補地"):
-    """横並びで並べて展開する共通カルーセル構造"""
     bubbles = []
     for idx, (d_id, item) in enumerate(suggestions[:3]):
         bubbles.append(build_single_bubble(d_id, item, title_text))
@@ -254,13 +227,11 @@ def callback():
     return 'OK', 200
 
 def handle_line_message(event):
-    """初動メッセージ入力：挨拶（1通目）＋ 確定日本の写真付き横並び3箇所カルーセル（2通目）を一撃大復活！"""
     reply_token = event['replyToken']
     user_message = event['message']['text'].strip()
     current_db = get_db()
     if current_db is None: return
 
-    # 1. 時期ウィンドウの自動生成（計16日間）
     base_date = datetime.now() + timedelta(days=1)
     target_periods = []
     for i in range(-5, 11):
@@ -273,7 +244,6 @@ def handle_line_message(event):
         target_periods.append(f"{m}月{p}")
     target_periods = list(set(target_periods))
 
-    # 2. AIによる地域指定分析
     intent_pref = ""
     intent_keyword = "朝焼け"
     try:
@@ -297,7 +267,6 @@ def handle_line_message(event):
     radius_pool = []
 
     try:
-        # 15,000件の海から、時期と250km圏内を完全に満たす候補地をサンプリング
         rand_seed = random.randint(0, 14000)
         all_docs = ref.order_by('__name__').start_at([f"photo_{rand_seed}"]).limit(800).stream()
         
@@ -335,7 +304,6 @@ def handle_line_message(event):
     if not main_pool: main_pool = list(radius_pool)
     if not main_pool: main_pool = [("photo_0", {"Location": "霧ヶ峰高原", "Title": "朝霧の黎明", "Prefecture": "長野県", "Subject": "朝焼け"})]
 
-    # 👑 【横並びカルーセルの完全復活！】メインプールから最大3つを並べて横スクロール化！
     carousel_bubbles = []
     for d_id, item in main_pool[:3]:
         carousel_bubbles.append(build_single_bubble(d_id, item, title_text="📌 旬の厳選おすすめ撮影地"))
@@ -345,10 +313,14 @@ def handle_line_message(event):
         contents_dict={"type": "carousel", "contents": carousel_bubbles}
     )
 
-    # 挨拶テキスト
-    greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。現在地から半径250キロ圏内の、明日を起点とする半月の時期ウィンドウで今まさに『最高の旬』を迎える撮影地を、横並びで3箇所厳選いたしました。スクロールして気になる場所をお選びください"
+    weather = main_pool[0][1].get('Weather', '').strip()
+    weather_phrase = "明日はお天気もいいようですから" if not weather or weather.lower() in ["nan", "none", "不明", ""] else f"明日はお天気も{weather}のようですから"
+
+    # 🗣️ 【完全クレンジング】忌々しい裏方ワード（半月、ウィンドウ、250キロ）をすべて跡形もなく徹底抹殺！
     if intent_pref:
-        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日を起点とする半月の時期ウィンドウで『{intent_pref}』をお調べですね。現地を狙い撃ちした知見データから、横並びで3箇所のお勧め撮影地を厳選展開します"
+        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。{intent_pref}での撮影をご検討ですね。ライブラリーの膨大な記録から、今の季節に最も素晴らしい表情を見せてくれるおすすめのポイントを厳選いたしました。"
+    else:
+        greeting = f"ようこそ『風景写真』コンシェルジュの部屋へ。明日（{base_date.strftime('%m/%d')}）撮影にお出かけですか。{weather_phrase}撮影を楽しめそうですね。今の季節にまさに『旬』を迎えているおすすめのポイントをご案内いたします。スクロールして気になる場所をお選びください。"
 
     msg_text = TextSendMessage(text=greeting)
 
@@ -366,7 +338,6 @@ def handle_line_postback(event):
     action = params.get('action')
     photo_id = params.get('id', 'photo_0')
     
-    # 横並び等の疑似IDクレンジング
     clean_db_id = photo_id.split('_')[-1] if 'move' in photo_id else photo_id
     if not clean_db_id.startswith('photo_'): clean_db_id = f"photo_{clean_db_id}"
 
@@ -381,8 +352,6 @@ def handle_line_postback(event):
         msg = GachiFlexMessage(alt_text="入賞作品詳細情報", contents_dict=build_artwork_info_card(photo_id, data))
         line_bot_api.reply_message(reply_token, msg)
     elif action == "back_to_initial":
-        # 戻るボタン時は、最新の状態のユーザー入力（明日等）をシミュレートして3選に戻すのが安全
-        # デモの安定性のために、現在のデータをメインにした1枚カードか、あるいは再度メッセージ案内
         msg = GachiFlexMessage(alt_text="撮影地ナビゲーション", contents_dict=build_single_bubble(clean_db_id, data, "📌 選択中の撮影地"))
         line_bot_api.reply_message(reply_token, msg)
     elif action == "location_detail":
@@ -392,7 +361,6 @@ def handle_line_postback(event):
         msg_detail = GachiFlexMessage(alt_text="撮影地攻略詳細知見", contents_dict=build_location_detail_card(clean_db_id, data, current_db))
         line_bot_api.reply_message(reply_token, [msg_text, msg_detail])
     elif action == "move_2h":
-        # カルーセルSuggestion
         ref = current_db.collection('Master_Photos')
         near_photos = []
         try:
