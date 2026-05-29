@@ -202,6 +202,7 @@ def select_three_points():
                 'pic': d.get('PicFileName', ''),
                 'pub': d.get('Published', ''),
                 'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+            'maplink': d.get('MapLink', ''),
             }
             pool.append(item)
 
@@ -340,7 +341,7 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                     "action": {
                         "type": "uri",
                         "label": "このルート記録",
-                        "uri": f"https://maps.google.com/maps?q={item['area']}" if item['area'] else "https://maps.google.com/"
+                        "uri": item.get('maplink') or "https://maps.google.com/"
                     }
                 }
             ]
