@@ -162,8 +162,9 @@ def select_three_points():
     """
     明日の旬×東京250km圏内から、3分類(傑作/近場/注目)を選定
     """
- sys.stderr.write(f"[DEBUG] select_three_points: db={db}\n")
+
     if not db:
+        sys.stderr.write(f"[DEBUG] select_three_points: db={db}\n")
         return None, None, None
 
     excl_authors, blocked_areas = load_exclusions()
