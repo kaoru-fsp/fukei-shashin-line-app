@@ -303,7 +303,7 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                         },
                         {
                             "type": "text",
-                            "text": f"{item['place']}",
+                            "text": item['place'] or '―',
                             "size": "xs",
                             "color": "#666666"
                         },
