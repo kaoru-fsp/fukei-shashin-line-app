@@ -411,7 +411,8 @@ def handle_message(event):
         line_bot_api.reply_message(reply_token, [greeting, carousel])
 
     except Exception as e:
-        print(f"[ERROR] Message handling error: {e}")
+        import traceback
+        sys.stderr.write(f"[ERROR] Exception: {traceback.format_exc()}\n")
         msg = TextSendMessage(
             text="申し訳ございません。処理中にエラーが発生しました。"
         )
