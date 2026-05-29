@@ -340,7 +340,7 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                     "action": {
                         "type": "uri",
                         "label": "このルート記録",
-                        "uri": f"https://maps.google.com/maps?q={item['area']}"
+                        "uri": f"https://maps.google.com/maps?q={item['area']}" if item['area'] else "https://maps.google.com/"
                     }
                 }
             ]
