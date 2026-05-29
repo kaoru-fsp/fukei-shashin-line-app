@@ -370,8 +370,6 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     """テキストメッセージ受信時"""
-    from linebot.models import MessageEvent, TextMessage
-
     reply_token = event.reply_token
     user_message = event.message.text.strip()
 
