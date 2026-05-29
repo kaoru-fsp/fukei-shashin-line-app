@@ -2,11 +2,6 @@
 """
 風景写真コンシェルジュ 完全版 v2
 仕様書に完全準拠。3分類選定×乱数×除外2系統×LINE Flex カルーセル×postback
-
-LINE v2 import, Firestore Master_Photos 正本読み込み、
-旬×250km×画像あり×除外をすべてクリアした母集合から
-【傑作ポイント】【近場で楽しむ】【注目のポイント】を各枠ランダム選出し、
-本物写真(閲覧用URL)付きカルーセルで爆射する。
 """
 import os
 import json
@@ -68,7 +63,6 @@ SERVER_BASE = "https://fupc.photo/PicsDB"
 VIEW_DIR = "PicsDB4Search"
 
 def extract_pref(area):
-    """Area → 都道府県名（化け県名救済＆表記ゆれ救済）"""
     if not area:
         return None
     a = str(area).strip()
@@ -84,7 +78,6 @@ def extract_pref(area):
     return None
 
 def junkun(day):
-    """日 → 上旬/中旬/下旬"""
     try:
         d = int(day)
     except:
@@ -96,7 +89,6 @@ def junkun(day):
     return "下旬"
 
 def haversine(lat1, lng1, lat2, lng2):
-    """2点間距離(km)"""
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -105,7 +97,6 @@ def haversine(lat1, lng1, lat2, lng2):
     return 2 * R * math.asin(math.sqrt(h))
 
 def half_month_window(base_date):
-    """基準日 → 前5後10の(月,旬)ペア集合"""
     pairs = set()
     for delta in range(-5, 11):
         d = base_date + timedelta(days=delta)
@@ -113,16 +104,13 @@ def half_month_window(base_date):
     return pairs
 
 def view_image_url(published, pic_filename):
-    """画像URL組み立て（閲覧用・透かし入り）"""
     return "/".join([SERVER_BASE, VIEW_DIR, str(published)[:4], str(published), str(pic_filename)])
 
 def has_valid_image(pic_filename):
-    """画像欠損チェック"""
     fn = str(pic_filename or '').strip()
     return fn and fn not in ('なし.jpg', 'default.jpg', 'なし', 'none', '')
 
 def calc_award_score(award_rank):
-    """賞ランク → スコア"""
     r = str(award_rank or '').strip()
     for k, v in AWARD_SCORE.items():
         if k in r:
@@ -130,7 +118,6 @@ def calc_award_score(award_rank):
     return 10 if r else 0
 
 def load_exclusions():
-    """設定から除外2系統を読む"""
     authors = set()
     blocked = []
     today = date.today().isoformat()
@@ -151,7 +138,6 @@ def load_exclusions():
     return authors, [b for b in blocked if b]
 
 def is_area_blocked(place, area, blocked_list):
-    """Area/Place が立入禁止リストに引っかかるか"""
     if not blocked_list:
         return False
     s = str(place or '') + ' ' + str(area or '')
@@ -159,105 +145,113 @@ def is_area_blocked(place, area, blocked_list):
 
 # ──────────────── 3分類選定エンジン ────────────────
 def select_three_points():
-    """
-    明日の旬×東京250km圏内から、3分類(傑作/近場/注目)を選定
-    """
+    with open('/tmp/debug.log', 'a') as f:
+        f.write("[DEBUG] select_three_points: start\n")
 
     if not db:
-        sys.stderr.write(f"[DEBUG] select_three_points: db={db}\n")
+        with open('/tmp/debug.log', 'a') as f:
+            f.write("[DEBUG] select_three_points: db is None\n")
         return None, None, None
 
-    excl_authors, blocked_areas = load_exclusions()
-    tomorrow = date.today() + timedelta(days=1)
-    junkun_window = half_month_window(tomorrow)
-    tokyo = PREF_LATLNG["東京都"]
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+        tomorrow = date.today() + timedelta(days=1)
+        junkun_window = half_month_window(tomorrow)
+        tokyo = PREF_LATLNG["東京都"]
 
-    pool = []
-    place_years = defaultdict(list)
+        pool = []
+        place_years = defaultdict(list)
 
-    # 母集合構築
-    for doc in db.collection('Master_Photos').stream():
-        d = doc.to_dict()
+        with open('/tmp/debug.log', 'a') as f:
+            f.write("[DEBUG] select_three_points: starting Firestore stream\n")
 
-        # 時間軸フィルタ
-        try:
-            mo = int(d.get('Month'))
-        except:
-            continue
-        if (mo, junkun(d.get('Day'))) not in junkun_window:
-            continue
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict()
 
-        # 空間軸フィルタ
-        pref = extract_pref(d.get('Area'))
-        if not pref:
-            continue
-        lat, lng = PREF_LATLNG[pref]
-        dist = haversine(tokyo[0], tokyo[1], lat, lng)
-        if dist > 250:
-            continue
+            try:
+                mo = int(d.get('Month'))
+            except:
+                continue
+            if (mo, junkun(d.get('Day'))) not in junkun_window:
+                continue
 
-        # 除外フィルタ
-        if d.get('Winner') in excl_authors:
-            continue
-        if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
-            continue
-        if not has_valid_image(d.get('PicFileName')):
-            continue
+            pref = extract_pref(d.get('Area'))
+            if not pref:
+                continue
+            lat, lng = PREF_LATLNG[pref]
+            dist = haversine(tokyo[0], tokyo[1], lat, lng)
+            if dist > 250:
+                continue
 
-        # 母集合に追加
-        item = {
-            'dist': dist,
-            'pref': pref,
-            'area': d.get('Area', ''),
-            'place': d.get('Place', ''),
-            'title': d.get('Title', ''),
-            'winner': d.get('Winner', ''),
-            'award': d.get('AwardRank', ''),
-            'ascore': calc_award_score(d.get('AwardRank')),
-            'pic': d.get('PicFileName', ''),
-            'pub': d.get('Published', ''),
-            'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+            if d.get('Winner') in excl_authors:
+                continue
+            if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+
+            item = {
+                'dist': dist,
+                'pref': pref,
+                'area': d.get('Area', ''),
+                'place': d.get('Place', ''),
+                'title': d.get('Title', ''),
+                'winner': d.get('Winner', ''),
+                'award': d.get('AwardRank', ''),
+                'ascore': calc_award_score(d.get('AwardRank')),
+                'pic': d.get('PicFileName', ''),
+                'pub': d.get('Published', ''),
+                'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+            }
+            pool.append(item)
+
+            try:
+                place_years[d.get('Area', '')].append(int(d.get('Year')))
+            except:
+                pass
+
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[DEBUG] select_three_points: pool size={len(pool)}\n")
+
+        if not pool:
+            with open('/tmp/debug.log', 'a') as f:
+                f.write("[DEBUG] select_three_points: pool is empty\n")
+            return None, None, None
+
+        top_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))[:max(8, len(pool)//10)]
+        masterpiece = random.choice(top_pool)
+
+        near_pool = sorted(pool, key=lambda x: x['dist'])[:max(8, len(pool)//8)]
+        near_cand = [p for p in near_pool if p['pref'] != masterpiece['pref']] or near_pool
+        near = random.choice(near_cand)
+
+        recent_cutoff = date.today().year - 5
+        attention_score = {
+            a: sum(1 for y in ys if y >= recent_cutoff)
+            for a, ys in place_years.items()
         }
-        pool.append(item)
+        hot_pool = sorted(
+            pool,
+            key=lambda x: (-attention_score.get(x['area'], 0), x['dist'])
+        )
+        used_prefs = {masterpiece['pref'], near['pref']}
+        hot_cand = [p for p in hot_pool if p['pref'] not in used_prefs] or hot_pool
+        hot_cand = hot_cand[:max(8, len(hot_pool)//10)]
+        attention = random.choice(hot_cand) if hot_cand else None
 
-        # 注目度集計（近年入賞数）
-        try:
-            place_years[d.get('Area', '')].append(int(d.get('Year')))
-        except:
-            pass
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[DEBUG] select_three_points: done. masterpiece={masterpiece.get('title')}, near={near.get('title')}\n")
 
-    if not pool:
+        return masterpiece, near, attention
+
+    except Exception as e:
+        import traceback
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[ERROR] select_three_points exception: {traceback.format_exc()}\n")
         return None, None, None
-
-    # 枠1：傑作ポイント（賞スコア優先）
-    top_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))[:max(8, len(pool)//10)]
-    masterpiece = random.choice(top_pool)
-
-    # 枠2：近場で楽しむ（距離優先、県をずらす）
-    near_pool = sorted(pool, key=lambda x: x['dist'])[:max(8, len(pool)//8)]
-    near_cand = [p for p in near_pool if p['pref'] != masterpiece['pref']] or near_pool
-    near = random.choice(near_cand)
-
-    # 枠3：注目のポイント（近年入賞数優先、県をずらす）
-    recent_cutoff = date.today().year - 5
-    attention_score = {
-        a: sum(1 for y in ys if y >= recent_cutoff)
-        for a, ys in place_years.items()
-    }
-    hot_pool = sorted(
-        pool,
-        key=lambda x: (-attention_score.get(x['area'], 0), x['dist'])
-    )
-    used_prefs = {masterpiece['pref'], near['pref']}
-    hot_cand = [p for p in hot_pool if p['pref'] not in used_prefs] or hot_pool
-    hot_cand = hot_cand[:max(8, len(hot_pool)//10)]
-    attention = random.choice(hot_cand) if hot_cand else None
-
-    return masterpiece, near, attention
 
 # ──────────────── Flex Message 組み立て ────────────────
 def build_carousel_bubble(item, label_emoji, area_note=""):
-    """1つのバブルを作成（傑作/近場/注目）"""
     bubble = {
         "type": "bubble",
         "hero": {
@@ -372,15 +366,19 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    sys.stderr.write(f"[DEBUG] Message received: {event.message.text}\n")
     with open('/tmp/debug.log', 'a') as f:
         f.write(f"[DEBUG] Message received: {event.message.text}\n")
+
     reply_token = event.reply_token
-    user_message = event.message.text.strip()
 
     try:
-        # 3分類選定を実行
+        with open('/tmp/debug.log', 'a') as f:
+            f.write("[DEBUG] About to call select_three_points\n")
+
         masterpiece, near, attention = select_three_points()
+
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
 
         if not masterpiece or not near:
             msg = TextSendMessage(
@@ -389,12 +387,10 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, msg)
             return
 
-        # 冒頭メッセージ
         greeting = TextSendMessage(
-            text=f"本日のコンシェルジュがお薦めする、今が旬の撮影地3選です。どうぞご高覧ください。"
+            text="本日のコンシェルジュがお薦めする、今が旬の撮影地3選です。どうぞご高覧ください。"
         )
 
-        # カルーセル組み立て
         bubbles = [
             build_carousel_bubble(masterpiece, "🏆", "傑作ポイント"),
             build_carousel_bubble(near, "🚗", "近場で楽しむ"),
@@ -409,40 +405,42 @@ def handle_message(event):
             }
         )
 
-        # 同時に送信
         line_bot_api.reply_message(reply_token, [greeting, carousel])
+
+        with open('/tmp/debug.log', 'a') as f:
+            f.write("[DEBUG] Reply sent successfully\n")
 
     except Exception as e:
         import traceback
-        sys.stderr.write(f"[ERROR] Exception: {traceback.format_exc()}\n")
-        msg = TextSendMessage(
-            text="申し訳ございません。処理中にエラーが発生しました。"
-        )
-        line_bot_api.reply_message(reply_token, msg)
+        err = traceback.format_exc()
+        sys.stderr.write(f"[ERROR] Exception in handle_message: {err}\n")
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[ERROR] Exception in handle_message: {err}\n")
+        try:
+            msg = TextSendMessage(
+                text="申し訳ございません。処理中にエラーが発生しました。"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+        except:
+            pass
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
-    """postback（「詳しく」「記録」ボタン）"""
-    from linebot.models import PostbackEvent
-
     reply_token = event.reply_token
 
     try:
         data = event.postback.data
-        # data = "action=detail&pic=FK_001.jpg" など
         params = dict(item.split('=') for item in data.split('&'))
         action = params.get('action')
         pic_filename = params.get('pic', '')
 
         if action == 'detail':
-            # 「詳しく」 → スペック画面（簡易版）
             msg = TextSendMessage(
                 text=f"📸 スペック画面\n（スペック情報の取得準備中）\n\nファイル: {pic_filename}"
             )
             line_bot_api.reply_message(reply_token, msg)
 
         elif action == 'record':
-            # 「記録」 → Firestore Saved_Routes へ
             if db:
                 route_data = {
                     'timestamp': date.today().isoformat(),
