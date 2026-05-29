@@ -373,6 +373,8 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     sys.stderr.write(f"[DEBUG] Message received: {event.message.text}\n")
+    with open('/tmp/debug.log', 'a') as f:
+        f.write(f"[DEBUG] Message received: {event.message.text}\n")
     reply_token = event.reply_token
     user_message = event.message.text.strip()
 
