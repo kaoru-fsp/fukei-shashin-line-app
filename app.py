@@ -369,7 +369,7 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    """テキストメッセージ受信時"""
+    print("[DEBUG] Message received:", event.message.text)
     reply_token = event.reply_token
     user_message = event.message.text.strip()
 
