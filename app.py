@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import TextSendMessage, FlexSendMessage
+from linebot.models import MessageEvent, TextMessage, PostbackEvent, TextSendMessage, FlexSendMessage
 from linebot.exceptions import InvalidSignatureError
 import firebase_admin
 from firebase_admin import credentials, firestore
