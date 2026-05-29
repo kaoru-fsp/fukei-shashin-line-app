@@ -10,6 +10,7 @@ LINE v2 import, Firestore Master_Photos 正本読み込み、
 """
 import os
 import json
+import sys
 import re
 import math
 import random
@@ -369,7 +370,7 @@ def callback():
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    print("[DEBUG] Message received:", event.message.text)
+    sys.stderr.write(f"[DEBUG] Message received: {event.message.text}\n")
     reply_token = event.reply_token
     user_message = event.message.text.strip()
 
