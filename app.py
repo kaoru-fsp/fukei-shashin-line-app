@@ -15,6 +15,7 @@ from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, PostbackEvent, TextSendMessage, FlexSendMessage
 from linebot.exceptions import InvalidSignatureError
+import unicodedata
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -143,8 +144,68 @@ def is_area_blocked(place, area, blocked_list):
     s = str(place or '') + ' ' + str(area or '')
     return any(b and b in s for b in blocked_list)
 
+
+# ──────────────── メッセージ解析 ────────────────
+def parse_target_date(text):
+    today = date.today()
+    if "明日" in text or "あした" in text:
+        return today + timedelta(days=1)
+    if "明後日" in text or "あさって" in text:
+        return today + timedelta(days=2)
+    m = re.search(r'(\d+)日後', text)
+    if m:
+        return today + timedelta(days=int(m.group(1)))
+    m = re.search(r'(\d{1,2})月(\d{1,2})日', text)
+    if m:
+        mo, dy = int(m.group(1)), int(m.group(2))
+        try:
+            target = date(today.year, mo, dy)
+            if target < today:
+                target = date(today.year + 1, mo, dy)
+            return target
+        except:
+            pass
+    if "今週末" in text or "週末" in text:
+        days_ahead = 5 - today.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        return today + timedelta(days=days_ahead)
+    return today + timedelta(days=1)
+
+def parse_target_area(text):
+    for pref in PREF_LATLNG:
+        short = pref.replace("都","").replace("道","").replace("府","").replace("県","")
+        if pref in text or short in text:
+            return pref, PREF_LATLNG[pref]
+    for city, pref in CITY_PREF.items():
+        if city in text:
+            return pref, PREF_LATLNG[pref]
+    return None, None
+
+def format_date_jp(d):
+    weekdays = ["月","火","水","木","金","土","日"]
+    return f"{d.month}月{d.day}日（{weekdays[d.weekday()]}）"
+
+def build_greeting(target_date, area_name):
+    today = date.today()
+    delta = (target_date - today).days
+    if delta == 1:
+        date_str = f"明日（{format_date_jp(target_date)}）"
+    elif delta == 2:
+        date_str = f"明後日（{format_date_jp(target_date)}）"
+    elif 3 <= delta <= 14:
+        date_str = f"{delta}日後（{format_date_jp(target_date)}）"
+    else:
+        date_str = format_date_jp(target_date)
+    area_str = f"{area_name}に" if area_name else ""
+    return (
+        f"ようこそ風景写真コンシェルジュの部屋へ。"
+        f"{date_str}に{area_str}撮影にお出かけですか。"
+        f"それでしたらこんなところはいかがでしょう。"
+    )
+
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points():
+def select_three_points(base_date=None, base_latlng=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -155,9 +216,9 @@ def select_three_points():
 
     try:
         excl_authors, blocked_areas = load_exclusions()
-        tomorrow = date.today() + timedelta(days=1)
+        tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
-        tokyo = PREF_LATLNG["東京都"]
+        tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
 
         pool = []
         place_years = defaultdict(list)
@@ -376,7 +437,9 @@ def handle_message(event):
         with open('/tmp/debug.log', 'a') as f:
             f.write("[DEBUG] About to call select_three_points\n")
 
-        masterpiece, near, attention = select_three_points()
+        target_date = parse_target_date(user_message)
+        area_name, area_latlng = parse_target_area(user_message)
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
@@ -389,7 +452,7 @@ def handle_message(event):
             return
 
         greeting = TextSendMessage(
-            text="本日のコンシェルジュがお薦めする、今が旬の撮影地3選です。どうぞご高覧ください。"
+            text=build_greeting(target_date, area_name)
         )
 
         bubbles = [
