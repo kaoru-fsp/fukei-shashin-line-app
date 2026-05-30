@@ -358,7 +358,8 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                 "color": "#111111"
             })
 
-    map_uri = f"https://maps.google.com/maps?q={area}" if area else "https://maps.google.com/"
+    from urllib.parse import quote
+    map_uri = f"https://maps.google.com/maps?q={quote(area)}" if area else "https://maps.google.com/"
 
     bubble = {
         "type": "bubble",
