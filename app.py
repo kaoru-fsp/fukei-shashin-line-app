@@ -225,6 +225,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
         _radius = radius if radius else (100 if base_latlng else 250)
+        base_name = next((k for k,v in PREF_LATLNG.items() if v == tokyo), "東京")
 
         pool = []
         place_years = defaultdict(list)
