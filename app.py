@@ -165,11 +165,16 @@ def parse_target_date(text):
             return target
         except:
             pass
+    if "来週末" in text:
+        days_ahead = 5 - today.weekday() + 7
+        return today + timedelta(days=days_ahead)
     if "今週末" in text or "週末" in text:
         days_ahead = 5 - today.weekday()
         if days_ahead <= 0:
             days_ahead += 7
         return today + timedelta(days=days_ahead)
+    if "来週" in text:
+        return today + timedelta(days=7)
     return today + timedelta(days=1)
 
 def parse_target_area(text):
@@ -219,6 +224,7 @@ def select_three_points(base_date=None, base_latlng=None):
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
+        base_name = next((k for k,v in PREF_LATLNG.items() if v == tuple(tokyo)), '東京')
 
         pool = []
         place_years = defaultdict(list)
@@ -253,6 +259,7 @@ def select_three_points(base_date=None, base_latlng=None):
 
             item = {
                 'dist': dist,
+                'base_name': base_name,
                 'pref': pref,
                 'area': d.get('Area', ''),
                 'place': d.get('Place', ''),
