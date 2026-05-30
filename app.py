@@ -203,7 +203,7 @@ def parse_target_area(text):
         if city in text:
             return pref, PREF_LATLNG[pref]
     for city, pref in CITY_TO_PREF.items():
-        if city in text:
+        if city in text or text in city:
             return pref, PREF_LATLNG[pref]
     return None, None
 
