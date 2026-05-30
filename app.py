@@ -148,6 +148,7 @@ def is_area_blocked(place, area, blocked_list):
 # ──────────────── メッセージ解析 ────────────────
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
+WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
     "秋田県":"秋田市","山形県":"山形市","福島県":"福島市","茨城県":"水戸市",
@@ -530,6 +531,13 @@ def handle_message(event):
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
         _radius = 50 if city_specified else None
+
+        if area_name and area_name in WIDE_PREFS and not city_specified:
+            msg = TextSendMessage(
+                text=f"{area_name[:-1]}ですか。それは楽しみですね。どのあたりに行かれますか？市町村名や地域名を教えていただけますか。"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+            return
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
 
         with open('/tmp/debug.log', 'a') as f:
