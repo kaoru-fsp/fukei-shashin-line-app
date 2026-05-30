@@ -146,6 +146,8 @@ def is_area_blocked(place, area, blocked_list):
 
 
 # ──────────────── メッセージ解析 ────────────────
+CITY_TO_PREF = {}
+
 def parse_target_date(text):
     today = date.today()
     if "明日" in text or "あした" in text:
