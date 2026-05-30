@@ -145,6 +145,31 @@ def is_area_blocked(place, area, blocked_list):
     return any(b and b in s for b in blocked_list)
 
 
+
+# ──────────────── Google Geocoding API ────────────────
+GEOCODING_API_KEY = os.environ.get('GOOGLE_GEOCODING_API_KEY')
+GEOCODE_CACHE = {}
+
+def geocode(place_name):
+    if place_name in GEOCODE_CACHE:
+        return GEOCODE_CACHE[place_name]
+    if not GEOCODING_API_KEY:
+        return None
+    try:
+        import urllib.request
+        from urllib.parse import quote
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?address={quote(place_name)}&language=ja&key={GEOCODING_API_KEY}"
+        with urllib.request.urlopen(url, timeout=3) as res:
+            data = json.loads(res.read())
+        if data['status'] == 'OK':
+            loc = data['results'][0]['geometry']['location']
+            result = (loc['lat'], loc['lng'])
+            GEOCODE_CACHE[place_name] = result
+            return result
+    except Exception as e:
+        print(f"[WARN] Geocoding failed for {place_name}: {e}")
+    return None
+
 # ──────────────── メッセージ解析 ────────────────
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
@@ -211,8 +236,15 @@ def parse_target_area(text):
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
-            latlng = CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
+            latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
             return pref, latlng
+    words = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,}', text)
+    for word in words:
+        latlng = geocode(word + ' 日本')
+        if latlng:
+            pref = next((k for k,v in PREF_LATLNG.items() if haversine(latlng[0],latlng[1],v[0],v[1]) < 50), None)
+            if pref:
+                return pref, latlng
     return None, None
 
 def format_date_jp(d):
