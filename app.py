@@ -210,7 +210,7 @@ def build_greeting(target_date, area_name):
     )
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -224,6 +224,7 @@ def select_three_points(base_date=None, base_latlng=None):
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
+        _radius = radius if radius else (100 if base_latlng else 250)
 
         pool = []
         place_years = defaultdict(list)
@@ -246,7 +247,7 @@ def select_three_points(base_date=None, base_latlng=None):
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            if dist > 250:
+            if dist > _radius:
                 continue
 
             if d.get('Winner') in excl_authors:
