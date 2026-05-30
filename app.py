@@ -185,6 +185,9 @@ def parse_target_area(text):
     for city, pref in CITY_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref]
+    for city, pref in CITY_TO_PREF.items():
+        if city in text:
+            return pref, PREF_LATLNG[pref]
     return None, None
 
 def format_date_jp(d):
@@ -417,6 +420,36 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
         }
     }
     return bubble
+
+
+# ──────────────── 市町村→都道府県辞書（起動時構築） ────────────────
+CITY_TO_PREF = {}
+
+def build_city_to_pref():
+    global CITY_TO_PREF
+    if not db:
+        return
+    try:
+        import re as _re
+        for doc in db.collection('Master_Photos').stream():
+            area = doc.to_dict().get('Area', '')
+            pref = extract_pref(area)
+            if not pref or not area:
+                continue
+            city_part = area.replace(pref, '').strip()
+            if city_part:
+                m = _re.match(r'(.+?[市区町村])', city_part)
+                if m:
+                    CITY_TO_PREF[m.group(1)] = pref
+                parts = _re.findall(r'[^\s]{2,}', city_part)
+                for part in parts:
+                    if len(part) >= 2:
+                        CITY_TO_PREF[part] = pref
+        print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件')
+    except Exception as e:
+        print(f'[WARN] CITY_TO_PREF構築失敗: {e}')
+
+build_city_to_pref()
 
 # ──────────────── LINE Webhook ────────────────
 @app.route("/callback", methods=['POST'])
