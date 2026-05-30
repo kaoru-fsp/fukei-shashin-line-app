@@ -188,6 +188,9 @@ def parse_target_area(text):
     for city, pref in CITY_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref]
+    for city, pref in CITY_TO_PREF.items():
+        if city in text:
+            return pref, PREF_LATLNG[pref]
     return None, None
 
 def format_date_jp(d):
@@ -420,6 +423,40 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
         }
     }
     return bubble
+
+# ──────────────── 市町村→都道府県辞書（起動時構築） ────────────────
+CITY_TO_PREF = {}
+
+def build_city_to_pref():
+    global CITY_TO_PREF
+    if not db:
+        return
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            area = doc.to_dict().get('Area', '')
+            pref = extract_pref(area)
+            if not pref or not area:
+                continue
+            # Areaから都道府県を除いた部分を市町村として登録
+            city_part = area.replace(pref, '').strip()
+            if city_part:
+                # 市区町村名を分割して登録
+                import re as _re
+                parts = _re.split(r'[市区町村郡]', city_part)
+                remaining = city_part
+                for part in parts:
+                    if len(part) >= 2:
+                        key = part + (city_part[len(part)] if len(city_part) > len(part) else '')
+                        CITY_TO_PREF[key] = pref
+                # 市区町村単位でも登録
+                m = _re.match(r'(.+?[市区町村])', city_part)
+                if m:
+                    CITY_TO_PREF[m.group(1)] = pref
+        print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件')
+    except Exception as e:
+        print(f'[WARN] CITY_TO_PREF構築失敗: {e}')
+
+build_city_to_pref()
 
 # ──────────────── LINE Webhook ────────────────
 @app.route("/callback", methods=['POST'])
