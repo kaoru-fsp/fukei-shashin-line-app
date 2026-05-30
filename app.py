@@ -146,6 +146,9 @@ def is_area_blocked(place, area, blocked_list):
 
 
 # ──────────────── メッセージ解析 ────────────────
+# 広域で問い返しが必要な県
+WIDE_PREFS = {'北海道', '長野県', '岩手県', '新潟県'}
+
 def parse_target_date(text):
     today = date.today()
     if "明日" in text or "あした" in text:
@@ -247,7 +250,8 @@ def select_three_points(base_date=None, base_latlng=None):
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            if dist > 250 and not base_latlng:
+            radius = 100 if base_latlng else 250
+            if dist > radius:
                 continue
 
             if d.get('Winner') in excl_authors:
@@ -447,6 +451,14 @@ def handle_message(event):
         user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
+
+        # 広域県の問い返し
+        if area_name and area_name in WIDE_PREFS:
+            msg = TextSendMessage(
+                text=f"{area_name[:-1]}ですか。それは楽しみですね。{area_name[:-1]}のどのあたりに行かれますか？市町村名や地域名（例：函館、松本、盛岡など）を教えていただけますか。"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+            return
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
 
         with open('/tmp/debug.log', 'a') as f:
