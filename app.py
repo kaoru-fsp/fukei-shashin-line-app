@@ -228,24 +228,25 @@ def parse_target_area(text):
         else:
             short = pref.replace("都","").replace("府","").replace("県","")
         if pref in text or short in text:
-            return pref, PREF_LATLNG[pref]
+            return pref, PREF_LATLNG[pref], PREF_CITY.get(pref, pref)
     for city, pref in CITY_PREF.items():
         if city in text:
-            return pref, PREF_LATLNG[pref]
+            return pref, PREF_LATLNG[pref], city
     for city, pref in CITY_TO_PREF.items():
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
             latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
-            return pref, latlng
+            matched_name = city_base if city_base in text else city
+            return pref, latlng, matched_name
     words = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,}', text)
     for word in words:
         latlng = geocode(word + ' 日本')
         if latlng:
             pref = next((k for k,v in PREF_LATLNG.items() if haversine(latlng[0],latlng[1],v[0],v[1]) < 50), None)
             if pref:
-                return pref, latlng
-    return None, None
+                return pref, latlng, word
+    return None, None, None
 
 def format_date_jp(d):
     weekdays = ["月","火","水","木","金","土","日"]
@@ -270,7 +271,7 @@ def build_greeting(target_date, area_name):
     )
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -286,8 +287,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
         _radius = radius if radius else (150 if base_latlng else 250)
         if base_latlng:
-            pref_key = next((k for k,v in PREF_LATLNG.items() if v == base_latlng), None)
-            base_name = PREF_CITY.get(pref_key, pref_key) if pref_key else "指定地"
+            base_name = place_name if place_name else (PREF_CITY.get(next((k for k,v in PREF_LATLNG.items() if v == base_latlng), None), "指定地"))
         else:
             base_name = "新宿区"
 
@@ -613,7 +613,7 @@ def handle_message(event):
 
         user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
-        area_name, area_latlng = parse_target_area(user_message)
+        area_name, area_latlng, area_display = parse_target_area(user_message)
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
@@ -627,7 +627,7 @@ def handle_message(event):
             )
             line_bot_api.reply_message(reply_token, msg)
             return
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
@@ -640,7 +640,7 @@ def handle_message(event):
             return
 
         greeting = TextSendMessage(
-            text=build_greeting(target_date, area_name)
+            text=build_greeting(target_date, area_display)
         )
 
         bubbles = [
