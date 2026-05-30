@@ -487,6 +487,7 @@ def handle_message(event):
 
     try:
         with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[DEBUG] target_date={target_date}, area_name={area_name}, area_latlng={area_latlng}, _radius={_radius}\n")
             f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
