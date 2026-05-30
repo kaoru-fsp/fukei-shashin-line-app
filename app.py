@@ -284,7 +284,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
-        _radius = radius if radius else (100 if base_latlng else 250)
+        _radius = radius if radius else (150 if base_latlng else 250)
         if base_latlng:
             pref_key = next((k for k,v in PREF_LATLNG.items() if v == base_latlng), None)
             base_name = PREF_CITY.get(pref_key, pref_key) if pref_key else "指定地"
