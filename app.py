@@ -325,6 +325,39 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
 
 # ──────────────── Flex Message 組み立て ────────────────
 def build_carousel_bubble(item, label_emoji, area_note=""):
+    place = item.get('place', '')
+    area = item.get('area', '')
+    location_contents = []
+    if place:
+        location_contents.append({
+            "type": "text",
+            "text": place,
+            "weight": "bold",
+            "size": "xl",
+            "wrap": True,
+            "color": "#111111"
+        })
+        if area:
+            location_contents.append({
+                "type": "text",
+                "text": area,
+                "size": "sm",
+                "color": "#666666",
+                "margin": "xs"
+            })
+    else:
+        if area:
+            location_contents.append({
+                "type": "text",
+                "text": area,
+                "weight": "bold",
+                "size": "xl",
+                "wrap": True,
+                "color": "#111111"
+            })
+
+    map_uri = f"https://maps.google.com/maps?q={area}" if area else "https://maps.google.com/"
+
     bubble = {
         "type": "bubble",
         "hero": {
@@ -343,87 +376,63 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                     "type": "text",
                     "text": f"{label_emoji} {area_note}",
                     "weight": "bold",
-                    "size": "sm",
+                    "size": "md",
                     "color": "#666666"
                 },
+            ] + location_contents + [
                 {
                     "type": "text",
                     "text": item['title'],
-                    "weight": "bold",
-                    "size": "md",
-                    "margin": "md",
+                    "size": "sm",
+                    "margin": "sm",
                     "wrap": True,
-                    "color": "#111111"
+                    "color": "#444444"
                 },
                 {
                     "type": "text",
                     "text": f"{item['winner']}  ({item['award'] or '記録'})",
-                    "size": "xs",
-                    "color": "#999999",
-                    "margin": "sm"
+                    "size": "sm",
+                    "color": "#666666",
+                    "margin": "xs"
                 },
                 {
-                    "type": "box",
-                    "layout": "vertical",
-                    "margin": "md",
-                    "spacing": "xs",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": f"{item['area']}",
-                            "size": "xs",
-                            "color": "#666666"
-                        },
-                        {
-                            "type": "text",
-                            "text": item['place'] or '―',
-                            "size": "xs",
-                            "color": "#666666"
-                        },
-                        {
-                            "type": "text",
-                            "text": f"{item['base_name']}より {item['dist']:.0f}km",                                     
-                            "size": "xs",
-                            "color": "#999999",
-                            "margin": "sm"
-                        }
-                    ]
+                    "type": "text",
+                    "text": f"{item['base_name']}より {item['dist']:.0f}km",
+                    "size": "sm",
+                    "color": "#999999",
+                    "margin": "sm"
                 }
             ]
         },
         "footer": {
             "type": "box",
-            "layout": "vertical",
+            "layout": "horizontal",
             "spacing": "sm",
             "contents": [
                 {
                     "type": "button",
-                    "style": "link",
+                    "style": "primary",
                     "height": "sm",
                     "action": {
                         "type": "postback",
-                        "label": "詳しく",
+                        "label": "詳細情報",
                         "data": f"action=detail&pic={item['pic']}"
                     }
                 },
                 {
                     "type": "button",
-                    "style": "link",
+                    "style": "secondary",
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "このルート記録",
-                        "uri": item.get('maplink') or "https://maps.google.com/"
+                        "label": "マップ",
+                        "uri": map_uri
                     }
                 }
             ]
         }
     }
     return bubble
-
-
-# ──────────────── 市町村→都道府県辞書（起動時構築） ────────────────
-CITY_TO_PREF = {}
 
 def build_city_to_pref():
     global CITY_TO_PREF
