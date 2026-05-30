@@ -500,6 +500,8 @@ def handle_message(event):
         user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
+        with open('/tmp/debug.log', 'a') as f:
+            f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
         _radius = 50 if city_specified else None
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
