@@ -437,6 +437,7 @@ def handle_message(event):
         with open('/tmp/debug.log', 'a') as f:
             f.write("[DEBUG] About to call select_three_points\n")
 
+        user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
