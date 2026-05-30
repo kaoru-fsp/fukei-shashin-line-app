@@ -247,7 +247,7 @@ def select_three_points(base_date=None, base_latlng=None):
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            if dist > 250:
+            if dist > 250 and not base_latlng:
                 continue
 
             if d.get('Winner') in excl_authors:
