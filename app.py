@@ -217,7 +217,7 @@ def build_greeting(target_date, area_name):
     )
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -231,7 +231,10 @@ def select_three_points(base_date=None, base_latlng=None):
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
-        base_name = next((k for k,v in PREF_LATLNG.items() if v == tuple(tokyo)), '東京')
+        if base_latlng:
+            base_name = next((k for k,v in PREF_LATLNG.items() if v == base_latlng), '指定地')
+        else:
+            base_name = '東京'
 
         pool = []
         place_years = defaultdict(list)
@@ -254,8 +257,8 @@ def select_three_points(base_date=None, base_latlng=None):
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            radius = 100 if base_latlng else 250
-            if dist > radius:
+            _radius = radius if radius else (100 if base_latlng else 250)
+            if dist > _radius:
                 continue
 
             if d.get('Winner') in excl_authors:
@@ -497,7 +500,9 @@ def handle_message(event):
             )
             line_bot_api.reply_message(reply_token, msg)
             return
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
+        city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
+        _radius = 50 if city_specified else None
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
