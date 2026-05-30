@@ -268,6 +268,7 @@ def select_three_points(base_date=None, base_latlng=None):
                 'pic': d.get('PicFileName', ''),
                 'pub': d.get('Published', ''),
                 'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+                'base_name': base_name,
             'maplink': d.get('MapLink', ''),
             }
             pool.append(item)
@@ -445,7 +446,9 @@ def handle_message(event):
         user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
+        city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
+        _radius = 50 if city_specified else None
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
