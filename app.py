@@ -198,7 +198,10 @@ def parse_target_date(text):
 
 def parse_target_area(text):
     for pref in PREF_LATLNG:
-        short = pref.replace("都","").replace("道","").replace("府","").replace("県","")
+        if pref == "北海道":
+            short = "北海道"
+        else:
+            short = pref.replace("都","").replace("府","").replace("県","")
         if pref in text or short in text:
             return pref, PREF_LATLNG[pref]
     for city, pref in CITY_PREF.items():
@@ -530,9 +533,11 @@ def handle_message(event):
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
-        _radius = 50 if city_specified else None
+        # CITY_TO_PREFでヒットした場合（市町村名指定）はWIDE_PREFSスキップ
+        city_from_dict = any(city in user_message or re.sub(r'[市区町村郡]', '', city) in user_message for city in CITY_TO_PREF)
+        _radius = 50 if (city_specified or city_from_dict) else None
 
-        if area_name and area_name in WIDE_PREFS and not city_specified:
+        if area_name and area_name in WIDE_PREFS and not city_specified and not city_from_dict:
             msg = TextSendMessage(
                 text=f"{area_name[:-1]}ですか。それは楽しみですね。どのあたりに行かれますか？市町村名や地域名を教えていただけますか。"
             )
