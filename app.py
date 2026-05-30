@@ -619,7 +619,7 @@ def handle_message(event):
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
         # CITY_TO_PREFでヒットした場合（市町村名指定）はWIDE_PREFSスキップ
         city_from_dict = any(city in user_message or re.sub(r'[市区町村郡]', '', city) in user_message for city in CITY_TO_PREF)
-        _radius = 100 if (city_specified or city_from_dict) else None
+        _radius = 150 if (city_specified or city_from_dict) else None
 
         if area_name and area_name in WIDE_PREFS and not city_specified and not city_from_dict:
             msg = TextSendMessage(
