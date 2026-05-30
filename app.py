@@ -316,6 +316,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points: done. masterpiece={masterpiece.get('title')}, near={near.get('title')}\n")
+            f.write(f"[DEBUG] dist: masterpiece={masterpiece.get('dist')}, base_name={masterpiece.get('base_name')}\n")
 
         return masterpiece, near, attention
 
