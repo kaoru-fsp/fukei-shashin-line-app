@@ -99,7 +99,7 @@ def haversine(lat1, lng1, lat2, lng2):
 
 def half_month_window(base_date):
     pairs = set()
-    for delta in range(-5, 11):
+    for delta in range(-7, 14):
         d = base_date + timedelta(days=delta)
         pairs.add((d.month, junkun(d.day)))
     return pairs
@@ -346,6 +346,58 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points: pool size={len(pool)}\n")
+
+        # 地域指定時にpoolが空の場合、旬ウィンドウを前後1ヶ月に広げてリトライ
+        if not pool and base_latlng:
+            with open('/tmp/debug.log', 'a') as f:
+                f.write("[DEBUG] pool empty, retrying with wider window\n")
+            wider_window = set()
+            for delta in range(-30, 31):
+                d2 = tomorrow + timedelta(days=delta)
+                wider_window.add((d2.month, junkun(d2.day)))
+            for doc in db.collection('Master_Photos').stream():
+                d = doc.to_dict()
+                try:
+                    mo = int(d.get('Month'))
+                except:
+                    continue
+                if (mo, junkun(d.get('Day'))) not in wider_window:
+                    continue
+                pref = extract_pref(d.get('Area'))
+                if not pref:
+                    continue
+                lat, lng = PREF_LATLNG[pref]
+                dist = haversine(tokyo[0], tokyo[1], lat, lng)
+                if dist > _radius:
+                    continue
+                if d.get('Winner') in excl_authors:
+                    continue
+                if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
+                    continue
+                if not has_valid_image(d.get('PicFileName')):
+                    continue
+                item = {
+                    'dist': dist,
+                    'pref': pref,
+                    'area': d.get('Area', ''),
+                    'place': d.get('Place', '') or '',
+                    'title': d.get('Title', ''),
+                    'winner': d.get('Winner', ''),
+                    'award': d.get('AwardRank', ''),
+                    'ascore': calc_award_score(d.get('AwardRank')),
+                    'pic': d.get('PicFileName', ''),
+                    'pub': d.get('Published', ''),
+                    'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+                    'base_name': base_name,
+                    'maplink': d.get('MapLink', ''),
+                }
+                pool.append(item)
+                try:
+                    place_years[d.get('Area', '')].append(int(d.get('Year')))
+                except:
+                    pass
+            with open('/tmp/debug.log', 'a') as f:
+                f.write(f"[DEBUG] wider window pool size={len(pool)}\n")
 
         if not pool:
             with open('/tmp/debug.log', 'a') as f:
