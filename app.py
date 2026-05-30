@@ -146,9 +146,6 @@ def is_area_blocked(place, area, blocked_list):
 
 
 # ──────────────── メッセージ解析 ────────────────
-# 広域で問い返しが必要な県
-WIDE_PREFS = {'北海道', '長野県', '岩手県', '新潟県'}
-
 def parse_target_date(text):
     today = date.today()
     if "明日" in text or "あした" in text:
@@ -171,25 +168,21 @@ def parse_target_date(text):
     if "来週末" in text:
         days_ahead = 5 - today.weekday() + 7
         return today + timedelta(days=days_ahead)
+    if "来週" in text:
+        return today + timedelta(days=7)
     if "今週末" in text or "週末" in text:
         days_ahead = 5 - today.weekday()
         if days_ahead <= 0:
             days_ahead += 7
         return today + timedelta(days=days_ahead)
-    if "来週" in text:
-        return today + timedelta(days=7)
     return today + timedelta(days=1)
 
 def parse_target_area(text):
     for pref in PREF_LATLNG:
-        short = pref.replace("都","").replace("府","").replace("県","")
-        if pref == "北海道": short = "北海道"
+        short = pref.replace("都","").replace("道","").replace("府","").replace("県","")
         if pref in text or short in text:
             return pref, PREF_LATLNG[pref]
     for city, pref in CITY_PREF.items():
-        if city in text:
-            return pref, PREF_LATLNG[pref]
-    for city, pref in CITY_TO_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref]
     return None, None
@@ -217,7 +210,7 @@ def build_greeting(target_date, area_name):
     )
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None):
+def select_three_points(base_date=None, base_latlng=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -231,10 +224,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         junkun_window = half_month_window(tomorrow)
         tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
-        if base_latlng:
-            base_name = next((k for k,v in PREF_LATLNG.items() if v == base_latlng), '指定地')
-        else:
-            base_name = '東京'
 
         pool = []
         place_years = defaultdict(list)
@@ -257,8 +246,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            _radius = radius if radius else (100 if base_latlng else 250)
-            if dist > _radius:
+            if dist > 250:
                 continue
 
             if d.get('Winner') in excl_authors:
@@ -270,7 +258,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None):
 
             item = {
                 'dist': dist,
-                'base_name': base_name,
                 'pref': pref,
                 'area': d.get('Area', ''),
                 'place': d.get('Place', ''),
@@ -389,7 +376,7 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                         },
                         {
                             "type": "text",
-                            "text": f"東京より {item['dist']:.0f}km",
+                            "text": f"{item['base_name']}より {item['dist']:.0f}km",                                     
                             "size": "xs",
                             "color": "#999999",
                             "margin": "sm"
@@ -428,40 +415,6 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
     }
     return bubble
 
-# ──────────────── 市町村→都道府県辞書（起動時構築） ────────────────
-CITY_TO_PREF = {}
-
-def build_city_to_pref():
-    global CITY_TO_PREF
-    if not db:
-        return
-    try:
-        for doc in db.collection('Master_Photos').stream():
-            area = doc.to_dict().get('Area', '')
-            pref = extract_pref(area)
-            if not pref or not area:
-                continue
-            # Areaから都道府県を除いた部分を市町村として登録
-            city_part = area.replace(pref, '').strip()
-            if city_part:
-                # 市区町村名を分割して登録
-                import re as _re
-                parts = _re.split(r'[市区町村郡]', city_part)
-                remaining = city_part
-                for part in parts:
-                    if len(part) >= 2:
-                        key = part + (city_part[len(part)] if len(city_part) > len(part) else '')
-                        CITY_TO_PREF[key] = pref
-                # 市区町村単位でも登録
-                m = _re.match(r'(.+?[市区町村])', city_part)
-                if m:
-                    CITY_TO_PREF[m.group(1)] = pref
-        print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件')
-    except Exception as e:
-        print(f'[WARN] CITY_TO_PREF構築失敗: {e}')
-
-build_city_to_pref()
-
 # ──────────────── LINE Webhook ────────────────
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -487,23 +440,12 @@ def handle_message(event):
 
     try:
         with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] target_date={target_date}, area_name={area_name}, area_latlng={area_latlng}, _radius={_radius}\n")
             f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
-
-        # 広域県の問い返し（市町村まで特定できていない場合のみ）
-        if area_name and area_name in WIDE_PREFS and not any(c in user_message for c in ["市","町","村","区","郡"]):
-            msg = TextSendMessage(
-                text=f"{area_name[:-1]}ですか。それは楽しみですね。{area_name[:-1]}のどのあたりに行かれますか？市町村名や地域名（例：函館、松本、盛岡など）を教えていただけますか。"
-            )
-            line_bot_api.reply_message(reply_token, msg)
-            return
-        city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
-        _radius = 50 if city_specified else None
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius)
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
