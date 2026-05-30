@@ -147,6 +147,7 @@ def is_area_blocked(place, area, blocked_list):
 
 # ──────────────── メッセージ解析 ────────────────
 CITY_TO_PREF = {}
+CITY_TO_LATLNG = {}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
     "秋田県":"秋田市","山形県":"山形市","福島県":"福島市","茨城県":"水戸市",
@@ -206,7 +207,8 @@ def parse_target_area(text):
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
-            return pref, PREF_LATLNG[pref]
+            latlng = CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
+            return pref, latlng
     return None, None
 
 def format_date_jp(d):
@@ -475,10 +477,12 @@ def build_city_to_pref():
                 m = _re.match(r'(.+?[市区町村])', city_part)
                 if m:
                     CITY_TO_PREF[m.group(1)] = pref
+                    CITY_TO_LATLNG[m.group(1)] = PREF_LATLNG[pref]
                 parts = _re.findall(r'[^\s]{2,}', city_part)
                 for part in parts:
                     if len(part) >= 2:
                         CITY_TO_PREF[part] = pref
+                        CITY_TO_LATLNG[part] = PREF_LATLNG[pref]
         print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件')
     except Exception as e:
         print(f'[WARN] CITY_TO_PREF構築失敗: {e}')
