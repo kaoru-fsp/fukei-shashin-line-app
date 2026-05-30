@@ -486,6 +486,13 @@ def handle_message(event):
 
     reply_token = event.reply_token
 
+    # 即座に「お待ちください」を送信
+    user_id = event.source.user_id
+    try:
+        line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
+    except:
+        pass
+
     try:
         with open('/tmp/debug.log', 'a') as f:
             f.write("[DEBUG] About to call select_three_points\n")
