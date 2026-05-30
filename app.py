@@ -182,7 +182,8 @@ def parse_target_date(text):
 
 def parse_target_area(text):
     for pref in PREF_LATLNG:
-        short = pref.replace("都","").replace("道","").replace("府","").replace("県","")
+        short = pref.replace("都","").replace("府","").replace("県","")
+        if pref == "北海道": short = "北海道"
         if pref in text or short in text:
             return pref, PREF_LATLNG[pref]
     for city, pref in CITY_PREF.items():
@@ -489,8 +490,8 @@ def handle_message(event):
         target_date = parse_target_date(user_message)
         area_name, area_latlng = parse_target_area(user_message)
 
-        # 広域県の問い返し
-        if area_name and area_name in WIDE_PREFS:
+        # 広域県の問い返し（市町村まで特定できていない場合のみ）
+        if area_name and area_name in WIDE_PREFS and not any(c in user_message for c in ["市","町","村","区","郡"]):
             msg = TextSendMessage(
                 text=f"{area_name[:-1]}ですか。それは楽しみですね。{area_name[:-1]}のどのあたりに行かれますか？市町村名や地域名（例：函館、松本、盛岡など）を教えていただけますか。"
             )
