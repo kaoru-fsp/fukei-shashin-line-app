@@ -203,7 +203,9 @@ def parse_target_area(text):
         if city in text:
             return pref, PREF_LATLNG[pref]
     for city, pref in CITY_TO_PREF.items():
-        if city in text or text in city:
+        # 「美瑛」→「美瑛町」のような前方一致も拾う
+        city_base = re.sub(r'[市区町村郡]', '', city).strip()
+        if city in text or (len(city_base) >= 2 and city_base in text):
             return pref, PREF_LATLNG[pref]
     return None, None
 
