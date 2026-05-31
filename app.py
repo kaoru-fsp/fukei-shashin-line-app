@@ -653,7 +653,7 @@ def handle_message(event):
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
-        iif area_name == "AMBIGUOUS":
+        if area_name == "AMBIGUOUS":
             prefs = CITY_TO_PREF_MULTI.get(area_display, [])
             AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs}
             msg = TextSendMessage(
