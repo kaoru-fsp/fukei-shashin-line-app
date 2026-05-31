@@ -242,6 +242,7 @@ def parse_target_area(text):
             latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
             matched_name = city_base if city_base in text else city
             return pref, latlng, matched_name
+    words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2]
     for word in words:
         latlng = geocode(word + ' 日本')
         if latlng:
