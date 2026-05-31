@@ -343,6 +343,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
                 'base_name': base_name,
             'maplink': d.get('MapLink', ''),
+            'dnumb': str(d.get('dNumb', '')),
             }
             if keyword and not (keyword in d.get('Subject','') or keyword in d.get('Place','')):
                 continue
