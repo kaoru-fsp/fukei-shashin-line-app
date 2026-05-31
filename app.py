@@ -707,11 +707,11 @@ def handle_message(event):
                         break
             kw_option = pending.get('kw_option')
             kw_num = str(len(prefs)+1)
-            if kw_option and user_message.strip() in [kw_num, '１２３４５'[len(prefs):len(prefs)+1]]:
+            if kw_option and user_message.strip() in [str(len(prefs)+1)]:
                 del AMBIGUOUS_PENDING[user_id]
                 search_keyword = kw_option[0]
-                user_message = user_message  # キーワード検索モード
-            elif resolved_pref:
+                target_date = parse_target_date(user_message)
+                area_name, area_latlng, area_display = None, None, None
                 del AMBIGUOUS_PENDING[user_id]
                 latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
                 target_date = parse_target_date(user_message)
