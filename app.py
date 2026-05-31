@@ -176,6 +176,7 @@ CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
 AMBIGUOUS_PENDING = {}  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
+USER_SEEN = set()  # 初回メッセージ済みuser_id
 WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
@@ -626,6 +627,12 @@ def handle_message(event):
             f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
+        # 初回メッセージ時に位置情報登録を促す
+        if user_id not in USER_SEEN:
+            USER_SEEN.add(user_id)
+            if user_id not in USER_LOCATION:
+                line_bot_api.push_message(user_id, TextSendMessage(text="はじめまして！現在地を登録すると、お近くの撮影地をご提案できます。よろしければ位置情報を送ってください。📍"))
+
         # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
             pending = AMBIGUOUS_PENDING[user_id]
@@ -681,6 +688,8 @@ def handle_message(event):
             area_latlng = (loc["lat"], loc["lng"])
             if not area_display:
                 area_display = "現在地"
+        elif area_latlng is None:
+            line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display)
 
         with open('/tmp/debug.log', 'a') as f:
