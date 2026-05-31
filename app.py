@@ -879,8 +879,7 @@ def handle_postback(event):
                     if loc_data.get('Access_Info'):
                         lines.append(f"\n🚗 アクセス・装備\n{loc_data.get('Access_Info')}")
 
-                if photo_data.get('MapLink'):
-                    lines.append(f"\n🗾 地図: {photo_data.get('MapLink')}")
+                # MapLinkはカルーセルのマップボタンと同じため省略
 
                 text = "\n".join(lines)
                 # LINEのテキストメッセージは5000文字まで
