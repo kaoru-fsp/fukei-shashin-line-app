@@ -827,7 +827,7 @@ def handle_postback(event):
         pic_filename = params.get('pic', '')
 
         if action == 'detail':
-            print(f'[DEBUG] detail action: pic_filename={pic_filename}', flush=True)
+            print(f'[DEBUG] detail action: pic_filename={pic_filename}, dnumb={params.get("dnumb","")}', flush=True)
             # Master_Photosから写真情報を取得
             photo_data = None
             if db:
