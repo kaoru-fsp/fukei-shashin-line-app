@@ -559,6 +559,28 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
     }
     return bubble
 
+
+def normalize_award(award):
+    if not award:
+        return ''
+    a = award.strip()
+    title = 'タイトル賞' if 'タイトル' in a else ''
+    if '最優秀' in a:
+        base = '最優秀作品賞'
+    elif '準優秀' in a or '準優勝' in a:
+        base = '準優秀作品賞'
+    elif '優秀' in a:
+        base = '優秀作品賞'
+    elif '佳作' in a:
+        base = '佳作'
+    elif '秀作' in a:
+        base = '秀作'
+    elif '奨励' in a:
+        base = '奨励賞'
+    else:
+        base = a.split()[0] if a else ''
+    return f"{base}　{title}".strip() if title else base
+
 def build_city_to_pref():
     global CITY_TO_PREF
     if not db:
