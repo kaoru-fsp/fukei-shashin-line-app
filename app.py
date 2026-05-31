@@ -304,6 +304,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         with open('/tmp/debug.log', 'a') as f:
             f.write("[DEBUG] select_three_points: starting Firestore stream\n")
 
+        # 指定都道府県を特定
+        target_pref = None
+        if base_latlng:
+            target_pref = next((k for k,v in PREF_LATLNG.items() if haversine(base_latlng[0], base_latlng[1], v[0], v[1]) < 50), None)
+
         for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict()
 
@@ -319,8 +324,14 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)
-            if dist > _radius:
-                continue
+
+            # 指定都道府県がある場合は同県を優先、足りなければ半径内も追加
+            if target_pref:
+                if pref != target_pref and dist > _radius:
+                    continue
+            else:
+                if dist > _radius:
+                    continue
 
             if d.get('Winner') in excl_authors:
                 continue
