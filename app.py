@@ -579,7 +579,7 @@ def format_published(pub):
         if m2 == 0:
             return f"{year}年{m1}月号"
         else:
-            return f"風景写真{year}年{m1}・{m2}月号"
+            return f"風景写真{year}年{m1}-{m2}月号"
     return pub
 
 def normalize_award(award):
