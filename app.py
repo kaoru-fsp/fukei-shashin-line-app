@@ -174,6 +174,7 @@ def geocode(place_name):
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
+AMBIGUOUS_PENDING = {}  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
@@ -628,16 +629,35 @@ def handle_message(event):
             f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
+# 問い返し待ちの回答処理
+        if user_id in AMBIGUOUS_PENDING:
+            pending = AMBIGUOUS_PENDING[user_id]
+            prefs = pending["prefs"]
+            city = pending["city"]
+            resolved_pref = None
+            if user_message.strip() in ["1", "１"]:
+                resolved_pref = prefs[0]
+            elif user_message.strip() in ["2", "２"]:
+                resolved_pref = prefs[1]
+            else:
+                for p in prefs:
+                    short = p.replace("県","").replace("都","").replace("府","").replace("道","")
+                    if p in user_message or short in user_message:
+                        resolved_pref = p
+                        break
+            if resolved_pref:
+                del AMBIGUOUS_PENDING[user_id]
+                user_message = f"{resolved_pref}{city}"
         target_date = parse_target_date(user_message)
         area_name, area_latlng, area_display = parse_target_area(user_message)
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
-        if area_name == "AMBIGUOUS":
+        iif area_name == "AMBIGUOUS":
             prefs = CITY_TO_PREF_MULTI.get(area_display, [])
-            pref_list = "、".join(p.replace("県","").replace("都","").replace("府","").replace("道","") for p in prefs)
+            AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs}
             msg = TextSendMessage(
-                text=f"{area_display}は複数の地域にあります（{pref_list}）。どちらの{area_display}ですか？都道府県名も合わせて教えてください。"
+                text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + "\n\n番号でお答えください。"
             )
             line_bot_api.reply_message(reply_token, msg)
             return
