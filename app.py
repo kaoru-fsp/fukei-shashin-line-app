@@ -249,8 +249,8 @@ def parse_target_area(text):
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
             return "AMBIGUOUS", None, city
-EXCLUDE_WORDS = {'撮影', '明日', '今日', '明後日', '写真', '行きたい', '探して', '教えて', 'したい', 'ください'}
-    words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2 and w not in EXCLUDE_WORDS]
+    EXCLUDE_WORDS = {'撮影', '明日', '今日', '明後日', '写真', '行きたい', '探して', '教えて', 'したい', 'ください'}
+        words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2 and w not in EXCLUDE_WORDS]
     for word in words:
         latlng = geocode(word + ' 日本')
     return None, None, None
