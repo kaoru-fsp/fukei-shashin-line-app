@@ -705,7 +705,13 @@ def handle_message(event):
                     if p in user_message or short in user_message:
                         resolved_pref = p
                         break
-            if resolved_pref:
+            kw_option = pending.get('kw_option')
+            kw_num = str(len(prefs)+1)
+            if kw_option and user_message.strip() in [kw_num, '１２３４５'[len(prefs):len(prefs)+1]]:
+                del AMBIGUOUS_PENDING[user_id]
+                search_keyword = kw_option[0]
+                user_message = user_message  # キーワード検索モード
+            elif resolved_pref:
                 del AMBIGUOUS_PENDING[user_id]
                 latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
                 target_date = parse_target_date(user_message)
@@ -761,9 +767,15 @@ def handle_message(event):
         # 同名地名の問い返し
         if area_name == "AMBIGUOUS":
             prefs = CITY_TO_PREF_MULTI.get(area_display, [])
-            AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs}
+            # キーワード候補があるか確認
+            keyword_variants = {
+                '朝日': ('朝焼け', '朝日（風景・被写体）'),
+                '桜': ('桜', '桜（花）'),
+            }
+            kw_option = keyword_variants.get(area_display)
+            AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs, "kw_option": kw_option}
             msg = TextSendMessage(
-                text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + "\n\n番号でお答えください。"
+                text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + (f"\n{len(prefs)+1}．{kw_option[1]}" if kw_option else "") + "\n\n番号でお答えください。"
             )
             line_bot_api.reply_message(reply_token, msg)
             return
