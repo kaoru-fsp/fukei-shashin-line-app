@@ -419,33 +419,82 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 f.write("[DEBUG] select_three_points: pool is empty\n")
             return None, None, None
 
+        used_pics = set()
+        results = []
+
+        # 🏆 傑作ポイント（賞歴上位からランダム）
         top_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))[:max(8, len(pool)//10)]
         masterpiece = random.choice(top_pool)
+        results.append(('🏆', '傑作ポイント', masterpiece))
+        used_pics.add(masterpiece['pic'])
 
+        # 🚗 近場で楽しむ（距離近い）
         near_pool = sorted(pool, key=lambda x: x['dist'])[:max(8, len(pool)//8)]
-        near_cand = [p for p in near_pool if p['pref'] != masterpiece['pref']] or near_pool
+        near_cand = [p for p in near_pool if p['pic'] not in used_pics] or near_pool
         near = random.choice(near_cand)
+        results.append(('🚗', '近場で楽しむ', near))
+        used_pics.add(near['pic'])
 
+        # ✨ 注目のポイント（最近よく撮影される場所）
         recent_cutoff = date.today().year - 5
         attention_score = {
             a: sum(1 for y in ys if y >= recent_cutoff)
             for a, ys in place_years.items()
         }
-        hot_pool = sorted(
-            pool,
-            key=lambda x: (-attention_score.get(x['area'], 0), x['dist'])
-        )
-        used_prefs = {masterpiece['pref'], near['pref']}
-        used_pics = {masterpiece['pic'], near['pic']}
-        hot_cand = [p for p in hot_pool if p['pref'] not in used_prefs and p['pic'] not in used_pics] or                    [p for p in hot_pool if p['pic'] not in used_pics] or hot_pool
-        hot_cand = hot_cand[:max(8, len(hot_pool)//10)]
-        attention = random.choice(hot_cand) if hot_cand else None
+        hot_pool = sorted(pool, key=lambda x: (-attention_score.get(x['area'], 0), x['dist']))
+        hot_cand = [p for p in hot_pool if p['pic'] not in used_pics][:max(8, len(hot_pool)//10)]
+        if hot_cand:
+            attention = random.choice(hot_cand)
+            results.append(('✨', '注目のポイント', attention))
+            used_pics.add(attention['pic'])
+
+        # 🎯 ベストマッチ（キーワード＋地域が合致、最大3枚）
+        if keyword:
+            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
+            for p in best_pool[:3]:
+                results.append(('🎯', 'ベストマッチ', p))
+                used_pics.add(p['pic'])
+
+        # 🎲 気まぐれチョイス（全データからランダム、最大2枚）
+        all_docs = list(db.collection('Master_Photos').stream())
+        random.shuffle(all_docs)
+        gamble_count = 0
+        for doc in all_docs:
+            if gamble_count >= 2:
+                break
+            d = doc.to_dict()
+            if d.get('PicFileName') in used_pics:
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):
+                continue
+            item = {
+                'dist': 9999,
+                'pref': extract_pref(d.get('Area', '')),
+                'area': d.get('Area', ''),
+                'place': d.get('Place', '') or '',
+                'title': d.get('Title', ''),
+                'winner': d.get('Winner', ''),
+                'award': d.get('AwardRank', ''),
+                'ascore': calc_award_score(d.get('AwardRank')),
+                'pic': d.get('PicFileName', ''),
+                'pub': d.get('Published', ''),
+                'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+                'base_name': base_name,
+                'maplink': d.get('MapLink', ''),
+                'dnumb': str(d.get('dNumb', '')),
+            }
+            results.append(('🎲', '気まぐれチョイス', item))
+            used_pics.add(item['pic'])
+            gamble_count += 1
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points: done. masterpiece={masterpiece.get('title')}, near={near.get('title')}\n")
             f.write(f"[DEBUG] dist: masterpiece={masterpiece.get('dist')}, base_name={masterpiece.get('base_name')}\n")
 
-        return masterpiece, near, attention
+        return results
 
     except Exception as e:
         import traceback
@@ -799,7 +848,9 @@ def handle_message(event):
         elif area_latlng is None:
             line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
         print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        masterpiece = results[0][2] if results else None
+        near = results[1][2] if len(results) > 1 else None
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
@@ -815,11 +866,7 @@ def handle_message(event):
             text=build_greeting(target_date, area_display)
         )
 
-        bubbles = [
-            build_carousel_bubble(masterpiece, "🏆", "傑作ポイント"),
-            build_carousel_bubble(near, "🚗", "近場で楽しむ"),
-            build_carousel_bubble(attention if attention and attention["pic"] != masterpiece["pic"] else near, "✨", "注目のポイント"),
-        ]
+        bubbles = [build_carousel_bubble(item, emoji, label) for emoji, label, item in results]
 
         carousel = FlexSendMessage(
             alt_text="風景写真コンシェルジュ・今日の3選",
