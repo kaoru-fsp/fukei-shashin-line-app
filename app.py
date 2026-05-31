@@ -270,7 +270,7 @@ def build_greeting(target_date, area_name):
         date_str = f"{delta}日後（{format_date_jp(target_date)}）"
     else:
         date_str = format_date_jp(target_date)
-    area_str = f"{area_name}に" if area_name else ""
+    area_str = f"{area_name}に" if area_name and area_name != "現在地" else ""
     return (
         f"ようこそ風景写真コンシェルジュの部屋へ。"
         f"{date_str}に{area_str}撮影にお出かけですか。"
@@ -633,7 +633,7 @@ def handle_message(event):
         if user_id not in USER_SEEN:
             USER_SEEN.add(user_id)
             if user_id not in USER_LOCATION:
-                line_bot_api.push_message(user_id, TextSendMessage(text="はじめまして！現在地を登録すると、お近くの撮影地をご提案できます。よろしければ位置情報を送ってください。📍"))
+                line_bot_api.push_message(user_id, TextSendMessage(text="はじめまして！現在地を登録すると、お近くの撮影地をご提案できます。\n\n📍位置情報の送り方\n入力窓の左側にある＞をタップ、さらに＋ボタンをタップ。次の画面で位置情報→送信（右上）をタップしてください。"))
 
         # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
