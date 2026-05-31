@@ -328,6 +328,10 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 continue
             if not has_valid_image(d.get('PicFileName')):
                 continue
+            # 風景写真祭作品は検索対象外
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):
+                continue
 
             item = {
                 'dist': dist,
@@ -561,6 +565,22 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
     }
     return bubble
 
+
+
+def format_published(pub):
+    if not pub:
+        return ''
+    import re
+    if re.match(r'^\d{4}N$', pub):
+        return f"{pub[:4]}年風景写真祭入選作品"
+    m = re.match(r'^(\d{4})(\d{2})(\d{2})$', pub)
+    if m:
+        year, m1, m2 = m.group(1), int(m.group(2)), int(m.group(3))
+        if m2 == 0:
+            return f"{year}年{m1}月号"
+        else:
+            return f"風景写真{year}年{m1}・{m2}月号"
+    return pub
 
 def normalize_award(award):
     if not award:
@@ -864,7 +884,7 @@ def handle_postback(event):
                 if photo_data.get('AwardRank'):
                     lines.append(f"🏅 {normalize_award(photo_data.get('AwardRank'))}")
                 if photo_data.get('Published'):
-                    lines.append(f"📖 掲載号: {photo_data.get('Published')}")
+                    lines.append(f"📖 {format_published(photo_data.get('Published', ''))}")
                 if photo_data.get('Selection Comments'):
                     judge = photo_data.get('Judge', '')
                     comment = photo_data.get('Selection Comments', '')
