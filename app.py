@@ -536,16 +536,6 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
             "contents": [
                 {
                     "type": "button",
-                    "style": "primary",
-                    "height": "sm",
-                    "action": {
-                        "type": "postback",
-                        "label": "詳細情報",
-                        "data": f"action=detail&pic={item['pic']}"
-                    }
-                },
-                {
-                    "type": "button",
                     "style": "secondary",
                     "height": "sm",
                     "action": {
