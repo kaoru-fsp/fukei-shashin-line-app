@@ -536,6 +536,16 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
             "contents": [
                 {
                     "type": "button",
+                    "style": "primary",
+                    "height": "sm",
+                    "action": {
+                        "type": "postback",
+                        "label": "詳細情報",
+                        "data": f"action=detail&pic={item['pic']}"
+                    }
+                },
+                {
+                    "type": "button",
                     "style": "secondary",
                     "height": "sm",
                     "action": {
@@ -793,10 +803,66 @@ def handle_postback(event):
         pic_filename = params.get('pic', '')
 
         if action == 'detail':
-            msg = TextSendMessage(
-                text=f"📸 スペック画面\n（スペック情報の取得準備中）\n\nファイル: {pic_filename}"
-            )
-            line_bot_api.reply_message(reply_token, msg)
+            # Master_Photosから写真情報を取得
+            photo_data = None
+            if db:
+                docs = db.collection('Master_Photos').where('PicFileName', '==', pic_filename).limit(1).stream()
+                for doc in docs:
+                    photo_data = doc.to_dict()
+                    break
+
+            if not photo_data:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="詳細情報が見つかりませんでした。"))
+            else:
+                # Location masterから地域情報を取得
+                loc_data = None
+                dnumb = str(photo_data.get('dNumb', ''))
+                if db and dnumb:
+                    loc_docs = db.collection('Location master').where('Related_dNumb', '==', dnumb).limit(1).stream()
+                    for doc in loc_docs:
+                        loc_data = doc.to_dict()
+                        break
+
+                # 作品情報テキスト組み立て
+                lines = []
+                lines.append(f"📸 {photo_data.get('Title', '')}")
+                if photo_data.get('SubTitle'):
+                    lines.append(f"　{photo_data.get('SubTitle')}")
+                lines.append(f"\n📍 {photo_data.get('Area', '')}")
+                if photo_data.get('Place'):
+                    lines.append(f"　{photo_data.get('Place')}")
+                lines.append(f"\n👤 {photo_data.get('Winner', '')}")
+                if photo_data.get('AwardRank'):
+                    lines.append(f"🏅 {photo_data.get('AwardRank')}")
+                if photo_data.get('Published'):
+                    lines.append(f"📖 掲載号: {photo_data.get('Published')}")
+                if photo_data.get('Selection Comments'):
+                    lines.append(f"\n💬 選評\n{photo_data.get('Selection Comments')}")
+
+                if loc_data:
+                    lines.append(f"\n━━━━━━━━━━")
+                    lines.append(f"🗺 撮影地情報")
+                    if loc_data.get('Best_Season'):
+                        lines.append(f"🌸 ベストシーズン: {loc_data.get('Best_Season')}")
+                    if loc_data.get('Best_Time'):
+                        lines.append(f"🕐 ベスト時間: {loc_data.get('Best_Time')}")
+                    if loc_data.get('Lighting'):
+                        lines.append(f"💡 光の条件: {loc_data.get('Lighting')}")
+                    if loc_data.get('Lens_Selection'):
+                        lines.append(f"📷 レンズ: {loc_data.get('Lens_Selection')}")
+                    if loc_data.get('Point_Description'):
+                        lines.append(f"\n📝 ポイント\n{loc_data.get('Point_Description')}")
+                    if loc_data.get('Access_Info'):
+                        lines.append(f"\n🚗 アクセス・装備\n{loc_data.get('Access_Info')}")
+
+                if photo_data.get('MapLink'):
+                    lines.append(f"\n🗾 地図: {photo_data.get('MapLink')}")
+
+                text = "\n".join(lines)
+                # LINEのテキストメッセージは5000文字まで
+                if len(text) > 4900:
+                    text = text[:4900] + "..."
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=text))
 
         elif action == 'record':
             if db:
