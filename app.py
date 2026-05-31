@@ -244,6 +244,12 @@ def parse_target_area(text):
             return pref, latlng, matched_name
     words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2]
     for word in words:
+        if word in CITY_TO_PREF_MULTI:
+            return "AMBIGUOUS", None, word
+        for suffix in ['市', '町', '村', '区']:
+            if word + suffix in CITY_TO_PREF_MULTI:
+                return "AMBIGUOUS", None, word + suffix
+    for word in words:
         latlng = geocode(word + ' 日本')
         if latlng:
             pref = next((k for k,v in PREF_LATLNG.items() if haversine(latlng[0],latlng[1],v[0],v[1]) < 50), None)
