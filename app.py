@@ -647,9 +647,9 @@ def handle_message(event):
                         break
             if resolved_pref:
                 del AMBIGUOUS_PENDING[user_id]
-                user_message = f"{resolved_pref}{city}"
-        target_date = parse_target_date(user_message)
-        area_name, area_latlng, area_display = parse_target_area(user_message)
+                latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
+                target_date = parse_target_date(user_message)
+                area_name, area_latlng, area_display = resolved_pref, latlng, city
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
