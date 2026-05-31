@@ -855,11 +855,13 @@ def handle_postback(event):
                     lines.append(f"　{photo_data.get('Place')}")
                 lines.append(f"\n👤 {photo_data.get('Winner', '')}")
                 if photo_data.get('AwardRank'):
-                    lines.append(f"🏅 {photo_data.get('AwardRank')}")
+                    lines.append(f"🏅 {normalize_award(photo_data.get('AwardRank'))}")
                 if photo_data.get('Published'):
                     lines.append(f"📖 掲載号: {photo_data.get('Published')}")
                 if photo_data.get('Selection Comments'):
-                    lines.append(f"\n💬 選評\n{photo_data.get('Selection Comments')}")
+                    judge = photo_data.get('Judge', '')
+                    comment = photo_data.get('Selection Comments', '')
+                    lines.append(f'\n［選評］\n{comment}\n（{judge}）')
 
                 if loc_data:
                     lines.append(f"\n━━━━━━━━━━")
