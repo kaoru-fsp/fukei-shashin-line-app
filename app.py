@@ -421,7 +421,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             key=lambda x: (-attention_score.get(x['area'], 0), x['dist'])
         )
         used_prefs = {masterpiece['pref'], near['pref']}
-        hot_cand = [p for p in hot_pool if p['pref'] not in used_prefs] or hot_pool
+        used_pics = {masterpiece['pic'], near['pic']}
+        hot_cand = [p for p in hot_pool if p['pref'] not in used_prefs and p['pic'] not in used_pics] or                    [p for p in hot_pool if p['pic'] not in used_pics] or hot_pool
         hot_cand = hot_cand[:max(8, len(hot_pool)//10)]
         attention = random.choice(hot_cand) if hot_cand else None
 
@@ -646,7 +647,7 @@ def handle_message(event):
         bubbles = [
             build_carousel_bubble(masterpiece, "🏆", "傑作ポイント"),
             build_carousel_bubble(near, "🚗", "近場で楽しむ"),
-            build_carousel_bubble(attention or masterpiece, "✨", "注目のポイント"),
+            build_carousel_bubble(attention if attention and attention["pic"] != masterpiece["pic"] else near, "✨", "注目のポイント"),
         ]
 
         carousel = FlexSendMessage(
