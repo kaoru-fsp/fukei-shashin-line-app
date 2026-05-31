@@ -498,6 +498,12 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             f.write(f"[DEBUG] select_three_points: done. masterpiece={masterpiece.get('title')}, near={near.get('title')}\n")
             f.write(f"[DEBUG] dist: masterpiece={masterpiece.get('dist')}, base_name={masterpiece.get('base_name')}\n")
 
+        # 地域指定がある場合はベストマッチ（同県）を前に並べ替え
+        if base_latlng:
+            same_pref = [(e, l, p) for e, l, p in results if l == 'ベストマッチ']
+            others = [(e, l, p) for e, l, p in results if l != 'ベストマッチ']
+            results = same_pref + others
+
         return results
 
     except Exception as e:
