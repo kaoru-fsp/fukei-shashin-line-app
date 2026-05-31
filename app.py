@@ -461,7 +461,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             all_docs = list(db.collection('Master_Photos').stream())
         else:
             all_docs = []
-        if True:
         random.shuffle(all_docs)
         gamble_count = 0
         for doc in all_docs:
