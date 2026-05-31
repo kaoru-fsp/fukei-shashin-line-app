@@ -449,14 +449,19 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             used_pics.add(attention['pic'])
 
         # 🎯 ベストマッチ（キーワード＋地域が合致、最大3枚）
-        if keyword:
-            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
-            for p in best_pool[:3]:
-                results.append(('🎯', 'ベストマッチ', p))
-                used_pics.add(p['pic'])
+        # 🎯 ベストマッチ（poolの残り候補を最大4枚）
+        best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
+        for p in best_pool[:4]:
+            results.append(('🎯', 'ベストマッチ', p))
+            used_pics.add(p['pic'])
 
-        # 🎲 気まぐれチョイス（全データからランダム、最大2枚）
-        all_docs = list(db.collection('Master_Photos').stream())
+        # 🎲 気まぐれチョイス（地域・キーワード未指定の時のみ、最大2枚）
+        show_gamble = not base_latlng and not keyword
+        if show_gamble:
+            all_docs = list(db.collection('Master_Photos').stream())
+        else:
+            all_docs = []
+        if True:
         random.shuffle(all_docs)
         gamble_count = 0
         for doc in all_docs:
