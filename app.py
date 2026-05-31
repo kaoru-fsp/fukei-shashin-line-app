@@ -558,6 +558,8 @@ def build_city_to_pref():
         return
     try:
         import re as _re
+        from collections import defaultdict as _dd
+        pref_map = _dd(set)
         for doc in db.collection('Master_Photos').stream():
             area = doc.to_dict().get('Area', '')
             pref = extract_pref(area)
@@ -567,19 +569,17 @@ def build_city_to_pref():
             if city_part:
                 m = _re.match(r'(.+?[市区町村])', city_part)
                 if m:
-                    CITY_TO_PREF[m.group(1)] = pref
+                    pref_map[m.group(1)].add(pref)
                     CITY_TO_LATLNG[m.group(1)] = PREF_LATLNG[pref]
                 parts = _re.findall(r'[^\s]{2,}', city_part)
                 for part in parts:
                     if len(part) >= 2:
-                        CITY_TO_PREF[part] = pref
+                        pref_map[part].add(pref)
                         CITY_TO_LATLNG[part] = PREF_LATLNG[pref]
-        from collections import defaultdict as _dd
-        pref_map = _dd(set)
-        for city, pref in CITY_TO_PREF.items():
-            pref_map[city].add(pref)
         for city, prefs in pref_map.items():
-            if len(prefs) > 1:
+            if len(prefs) == 1:
+                CITY_TO_PREF[city] = next(iter(prefs))
+            else:
                 CITY_TO_PREF_MULTI[city] = list(prefs)
         print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件, 同名地名: {len(CITY_TO_PREF_MULTI)}件')
     except Exception as e:
