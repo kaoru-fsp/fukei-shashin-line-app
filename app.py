@@ -772,7 +772,7 @@ def handle_message(event):
                 '朝日': ('朝焼け', '朝日（風景・被写体）'),
                 '桜': ('桜', '桜（花）'),
             }
-            kw_option = keyword_variants.get(area_display)
+            kw_option = keyword_variants.get(area_display) or keyword_variants.get(re.sub(r'[市区町村郡]', '', area_display).strip())
             AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs, "kw_option": kw_option}
             msg = TextSendMessage(
                 text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + (f"\n{len(prefs)+1}．{kw_option[1]}" if kw_option else "") + "\n\n番号でお答えください。"
