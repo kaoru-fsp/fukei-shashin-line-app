@@ -541,7 +541,7 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                     "action": {
                         "type": "postback",
                         "label": "詳細情報",
-                        "data": f"action=detail&pic={item['pic']}"
+                        "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
                     }
                 },
                 {
@@ -829,7 +829,11 @@ def handle_postback(event):
             # Master_Photosから写真情報を取得
             photo_data = None
             if db:
-                docs = db.collection('Master_Photos').where('PicFileName', '==', pic_filename).limit(1).stream()
+                dnumb = params.get('dnumb', '')
+                if dnumb:
+                    docs = db.collection('Master_Photos').where('dNumb', '==', int(dnumb)).limit(1).stream()
+                else:
+                    docs = db.collection('Master_Photos').where('PicFileName', '==', pic_filename).limit(1).stream()
                 for doc in docs:
                     photo_data = doc.to_dict()
                     break
