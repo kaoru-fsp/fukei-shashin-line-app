@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, PostbackEvent, TextSendMessage, FlexSendMessage
+from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage
 from linebot.exceptions import InvalidSignatureError
 import unicodedata
 import firebase_admin
@@ -175,6 +175,7 @@ CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
 AMBIGUOUS_PENDING = {}  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
+USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
@@ -600,6 +601,16 @@ def callback():
 
     return 'OK', 200
 
+@handler.add(MessageEvent, message=LocationMessage)
+def handle_location(event):
+    user_id = event.source.user_id
+    lat = event.message.latitude
+    lng = event.message.longitude
+    USER_LOCATION[user_id] = {"lat": lat, "lng": lng}
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=f"現在地を登録しました。この場所を起点に撮影地をご提案します。\n撮影したい日程や地域があればお知らせください。")
+    )
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     with open('/tmp/debug.log', 'a') as f:
