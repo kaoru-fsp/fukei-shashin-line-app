@@ -230,7 +230,7 @@ def parse_target_area(text):
             short = pref.replace("都","").replace("府","").replace("県","")
         if pref in text or short in text:
             import sys; print(f"[DEBUG2] pref_match: pref={pref}, short={short}, text={text}", file=sys.stderr)
-            return pref, PREF_LATLNG[pref], PREF_CITY.get(pref, pref)s
+            return pref, PREF_LATLNG[pref], PREF_CITY.get(pref, pref)
     for city, pref in CITY_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref], city
