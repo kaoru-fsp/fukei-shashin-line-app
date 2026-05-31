@@ -629,7 +629,7 @@ def handle_message(event):
             f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
-# 問い返し待ちの回答処理
+        # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
             pending = AMBIGUOUS_PENDING[user_id]
             prefs = pending["prefs"]
@@ -653,6 +653,9 @@ def handle_message(event):
             else:
                 target_date = parse_target_date(user_message)
                 area_name, area_latlng, area_display = parse_target_area(user_message)
+        else:
+            target_date = parse_target_date(user_message)
+            area_name, area_latlng, area_display = parse_target_area(user_message)
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
