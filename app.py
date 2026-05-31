@@ -732,6 +732,7 @@ def handle_message(event):
                 area_display = "現在地"
         elif area_latlng is None:
             line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
+        print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
 
         with open('/tmp/debug.log', 'a') as f:
