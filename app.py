@@ -237,19 +237,17 @@ def parse_target_area(text):
     for city, pref in CITY_TO_PREF.items():
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
-        if city in text or (len(city_base) >= 3 and city_base in text):
+        if city in text:
             if city in CITY_TO_PREF_MULTI:
                 return "AMBIGUOUS", None, city
             latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
             matched_name = city_base if city_base in text else city
             return pref, latlng, matched_name
+    for city in CITY_TO_PREF_MULTI:
+        city_base = re.sub(r'[市区町村郡]', '', city).strip()
+        if city in text or (len(city_base) >= 2 and city_base in text):
+            return "AMBIGUOUS", None, city
     words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2]
-    for word in words:
-        if word in CITY_TO_PREF_MULTI:
-            return "AMBIGUOUS", None, word
-        for suffix in ['市', '町', '村', '区']:
-            if word + suffix in CITY_TO_PREF_MULTI:
-                return "AMBIGUOUS", None, word + suffix
     for word in words:
         latlng = geocode(word + ' 日本')
         if latlng:
