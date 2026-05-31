@@ -278,7 +278,7 @@ def build_greeting(target_date, area_name):
     )
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -344,6 +344,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'base_name': base_name,
             'maplink': d.get('MapLink', ''),
             }
+            if keyword and not (keyword in d.get('Subject','') or keyword in d.get('Place','')):
+                continue
             pool.append(item)
 
             try:
@@ -660,6 +662,13 @@ def handle_message(event):
         else:
             target_date = parse_target_date(user_message)
             area_name, area_latlng, area_display = parse_target_area(user_message)
+        # キーワード抽出
+        search_keyword = None
+        _SUBJECT_KEYWORDS = ['滝', '桜', '紅葉', '雪', '富士', '棚田', '海', '湖', '川', '渓谷', '朝焼け', '夕焼け', '星', '天の川', '霧', '霜', '氷', '花', 'ひまわり', 'コスモス', 'ススキ', '紫陽花', 'あじさい', '菜の花', 'チューリップ', '桃', '梅', '蓮', 'ハス', '芝桜', '藤', 'ラベンダー', '水仙', '鉄道', '列車', '電車', '灯台', '城', '神社', '寺', '仏像', '白鳥', '鶴', 'タンチョウ', '鳥', '動物']
+        for kw in _SUBJECT_KEYWORDS:
+            if kw in user_message:
+                search_keyword = kw
+                break
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
@@ -690,7 +699,7 @@ def handle_message(event):
                 area_display = "現在地"
         elif area_latlng is None:
             line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
-        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display)
+        masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
 
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
