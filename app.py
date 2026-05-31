@@ -833,7 +833,7 @@ def handle_postback(event):
             if db:
                 dnumb = params.get('dnumb', '')
                 if dnumb:
-                    docs = db.collection('Master_Photos').where('dNumb', '==', int(dnumb)).limit(1).stream()
+                    docs = db.collection('Master_Photos').where('dNumb', '==', dnumb).limit(1).stream()
                 else:
                     docs = db.collection('Master_Photos').where('PicFileName', '==', pic_filename).limit(1).stream()
                 for doc in docs:
