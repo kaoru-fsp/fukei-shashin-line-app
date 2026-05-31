@@ -173,6 +173,7 @@ def geocode(place_name):
 # ──────────────── メッセージ解析 ────────────────
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
+CITY_TO_PREF_MULTI = {}
 WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
@@ -236,10 +237,11 @@ def parse_target_area(text):
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
+            if city in CITY_TO_PREF_MULTI:
+                return "AMBIGUOUS", None, city
             latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
             matched_name = city_base if city_base in text else city
             return pref, latlng, matched_name
-    words = re.findall(r'[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,}', text)
     for word in words:
         latlng = geocode(word + ' 日本')
         if latlng:
@@ -572,7 +574,14 @@ def build_city_to_pref():
                     if len(part) >= 2:
                         CITY_TO_PREF[part] = pref
                         CITY_TO_LATLNG[part] = PREF_LATLNG[pref]
-        print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件')
+        from collections import defaultdict as _dd
+        pref_map = _dd(set)
+        for city, pref in CITY_TO_PREF.items():
+            pref_map[city].add(pref)
+        for city, prefs in pref_map.items():
+            if len(prefs) > 1:
+                CITY_TO_PREF_MULTI[city] = list(prefs)
+        print(f'[INFO] CITY_TO_PREF構築完了: {len(CITY_TO_PREF)}件, 同名地名: {len(CITY_TO_PREF_MULTI)}件')
     except Exception as e:
         print(f'[WARN] CITY_TO_PREF構築失敗: {e}')
 
@@ -617,6 +626,16 @@ def handle_message(event):
         area_name, area_latlng, area_display = parse_target_area(user_message)
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
+        # 同名地名の問い返し
+        if area_name == "AMBIGUOUS":
+            prefs = CITY_TO_PREF_MULTI.get(area_display, [])
+            pref_list = "、".join(p.replace("県","").replace("都","").replace("府","").replace("道","") for p in prefs)
+            msg = TextSendMessage(
+                text=f"{area_display}は複数の地域にあります（{pref_list}）。どちらの{area_display}ですか？都道府県名も合わせて教えてください。"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+            return
+
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
         # CITY_TO_PREFでヒットした場合（市町村名指定）はWIDE_PREFSスキップ
         city_from_dict = any(city in user_message or re.sub(r'[市区町村郡]', '', city) in user_message for city in CITY_TO_PREF)
