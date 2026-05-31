@@ -676,6 +676,11 @@ def handle_message(event):
             )
             line_bot_api.reply_message(reply_token, msg)
             return
+        if area_latlng is None and user_id in USER_LOCATION:
+            loc = USER_LOCATION[user_id]
+            area_latlng = (loc["lat"], loc["lng"])
+            if not area_display:
+                area_display = "現在地"
         masterpiece, near, attention = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display)
 
         with open('/tmp/debug.log', 'a') as f:
