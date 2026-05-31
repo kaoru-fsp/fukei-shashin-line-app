@@ -853,7 +853,7 @@ def handle_message(event):
         near = results[1][2] if len(results) > 1 else None
 
         with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] select_three_points returned: masterpiece={masterpiece is not None}, near={near is not None}, attention={attention is not None}\n")
+            f.write(f"[DEBUG] select_three_points returned: {len(results)}件\n")
 
         if not masterpiece or not near:
             msg = TextSendMessage(
