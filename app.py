@@ -319,7 +319,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
     if not db:
         with open('/tmp/debug.log', 'a') as f:
             f.write("[DEBUG] select_three_points: db is None\n")
-        return None, None, None
+        return []
 
     try:
         excl_authors, blocked_areas = load_exclusions()
@@ -471,7 +471,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         if not pool:
             with open('/tmp/debug.log', 'a') as f:
                 f.write("[DEBUG] select_three_points: pool is empty\n")
-            return None, None, None
+            return []
 
         used_pics = set()
         results = []
@@ -575,7 +575,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         import traceback
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[ERROR] select_three_points exception: {traceback.format_exc()}\n")
-        return None, None, None
+        return []
 
 # ──────────────── Flex Message 組み立て ────────────────
 def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
@@ -898,6 +898,8 @@ def handle_message(event):
             line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
         print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        if not results:
+            results = []
         masterpiece = results[0][2] if results else None
         near = results[1][2] if len(results) > 1 else None
 
