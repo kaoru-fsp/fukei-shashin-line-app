@@ -433,42 +433,34 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         used_pics = set()
         results = []
 
-        # 🏆 傑作ポイント（賞歴上位からランダム）
-        top_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))[:max(8, len(pool)//10)]
-        masterpiece = random.choice(top_pool)
-        results.append(('🏆', '傑作ポイント', masterpiece))
-        used_pics.add(masterpiece['pic'])
+        # 🎯 ベストマッチ（同県優先、最大7枚）
+        if target_pref:
+            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
+            if len(best_pool) < 3:
+                best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
+        else:
+            best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
+        for p in best_pool[:7]:
+            results.append(('🎯', 'ベストマッチ', p))
+            used_pics.add(p['pic'])
 
-        # 🚗 近場で楽しむ（距離近い）
-        near_pool = sorted(pool, key=lambda x: x['dist'])[:max(8, len(pool)//8)]
-        near_cand = [p for p in near_pool if p['pic'] not in used_pics] or near_pool
-        near = random.choice(near_cand)
-        results.append(('🚗', '近場で楽しむ', near))
-        used_pics.add(near['pic'])
-
-        # ✨ 注目のポイント（最近よく撮影される場所）
+        # ✨ 注目・傑作（同県優先、最大2枚）
         recent_cutoff = date.today().year - 5
         attention_score = {
             a: sum(1 for y in ys if y >= recent_cutoff)
             for a, ys in place_years.items()
         }
-        hot_pool = sorted(pool, key=lambda x: (-attention_score.get(x['area'], 0), x['dist']))
-        hot_cand = [p for p in hot_pool if p['pic'] not in used_pics][:max(8, len(hot_pool)//10)]
-        if hot_cand:
-            attention = random.choice(hot_cand)
-            results.append(('✨', '注目のポイント', attention))
-            used_pics.add(attention['pic'])
-
-        # 🎯 ベストマッチ（同県優先、最大4枚）
+        hot_pool = sorted(pool, key=lambda x: (-attention_score.get(x['area'], 0), -x['ascore']))
         if target_pref:
-            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics and p['pref'] == target_pref]
-            if not best_pool:
-                best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
+            hot_cand = [p for p in hot_pool if p['pref'] == target_pref and p['pic'] not in used_pics] or [p for p in hot_pool if p['pic'] not in used_pics]
         else:
-            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
-        for p in best_pool[:4]:
-            results.append(('🎯', 'ベストマッチ', p))
+            hot_cand = [p for p in hot_pool if p['pic'] not in used_pics]
+        for p in hot_cand[:2]:
+            results.append(('✨', '注目・傑作', p))
             used_pics.add(p['pic'])
+
+        masterpiece = results[0][2] if results else None
+        near = results[1][2] if len(results) > 1 else masterpiece
 
         # 🎲 気まぐれチョイス（地域・キーワード未指定の時のみ、最大2枚）
         show_gamble = not base_latlng and not keyword
