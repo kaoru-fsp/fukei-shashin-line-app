@@ -379,6 +379,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             if pub and pub.endswith('N'):
                 continue
 
+            matched_kw = None
+            if keyword:
+                kw_variants = KEYWORD_NORMALIZE.get(keyword, [keyword])
+                for v in kw_variants:
+                    if v in d.get('Subject','') or v in d.get('Place',''):
+                        matched_kw = v
+                        break
+                if not matched_kw:
+                    continue
+
             item = {
                 'dist': dist,
                 'pref': pref,
@@ -396,15 +406,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'dnumb': str(d.get('dNumb', '')),
                 'matched_kw': matched_kw,
             }
-            matched_kw = None
-            if keyword:
-                kw_variants = KEYWORD_NORMALIZE.get(keyword, [keyword])
-                for v in kw_variants:
-                    if v in d.get('Subject','') or v in d.get('Place',''):
-                        matched_kw = v
-                        break
-                if not matched_kw:
-                    continue
             pool.append(item)
 
             try:
@@ -428,22 +429,15 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 try:
                     mo = int(d.get('Month'))
                 except:
-                    continue
                 if (mo, junkun(d.get('Day'))) not in wider_window:
-                    continue
                 pref = extract_pref(d.get('Area'))
                 if not pref:
-                    continue
                 lat, lng = PREF_LATLNG[pref]
                 dist = haversine(tokyo[0], tokyo[1], lat, lng)
                 if dist > _radius:
-                    continue
                 if d.get('Winner') in excl_authors:
-                    continue
                 if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
-                    continue
                 if not has_valid_image(d.get('PicFileName')):
-                    continue
                 item = {
                     'dist': dist,
                     'pref': pref,
