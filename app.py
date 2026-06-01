@@ -258,7 +258,7 @@ def parse_target_date(text):
         if days_ahead <= 0:
             days_ahead += 7
         return today + timedelta(days=days_ahead)
-    return today + timedelta(days=1)
+    return today
 
 def parse_target_area(text):
     for pref in PREF_LATLNG:
