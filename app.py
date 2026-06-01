@@ -920,7 +920,7 @@ def handle_message(event):
             text=build_greeting(target_date, area_display)
         )
 
-        bubbles = [build_carousel_bubble(item, emoji, label) for emoji, label, item in results]
+        bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
 
         carousel = FlexSendMessage(
             alt_text="風景写真コンシェルジュ・今日の3選",
