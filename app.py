@@ -443,9 +443,15 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
         else:
             best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
-        for p in best_pool[:7]:
+        used_areas = set()
+        for p in best_pool:
+            if len(results) >= 7:
+                break
+            if p['area'] in used_areas:
+                continue
             results.append(('🎯', 'ベストマッチ', p))
             used_pics.add(p['pic'])
+            used_areas.add(p['area'])
 
         # ✨ 注目・傑作（同県優先、最大2枚）
         recent_cutoff = date.today().year - 5
