@@ -307,7 +307,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         # 指定都道府県を特定
         target_pref = None
         if base_latlng:
-            target_pref = next((k for k,v in PREF_LATLNG.items() if haversine(base_latlng[0], base_latlng[1], v[0], v[1]) < 50), None)
+            target_pref = min(PREF_LATLNG.keys(), key=lambda k: haversine(base_latlng[0], base_latlng[1], PREF_LATLNG[k][0], PREF_LATLNG[k][1]))
 
         for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict()
