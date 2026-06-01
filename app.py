@@ -459,9 +459,13 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             results.append(('✨', '注目のポイント', attention))
             used_pics.add(attention['pic'])
 
-        # 🎯 ベストマッチ（キーワード＋地域が合致、最大3枚）
-        # 🎯 ベストマッチ（poolの残り候補を最大4枚）
-        best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
+        # 🎯 ベストマッチ（同県優先、最大4枚）
+        if target_pref:
+            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics and p['pref'] == target_pref]
+            if not best_pool:
+                best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
+        else:
+            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pic'] not in used_pics]
         for p in best_pool[:4]:
             results.append(('🎯', 'ベストマッチ', p))
             used_pics.add(p['pic'])
