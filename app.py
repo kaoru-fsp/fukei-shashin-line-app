@@ -294,23 +294,28 @@ def format_date_jp(d):
     weekdays = ["月","火","水","木","金","土","日"]
     return f"{d.month}月{d.day}日（{weekdays[d.weekday()]}）"
 
-def build_greeting(target_date, area_name):
+def build_greeting(target_date, area_name, date_specified=False):
     today = date.today()
     delta = (target_date - today).days
     if delta == 1:
-        date_str = f"明日（{format_date_jp(target_date)}）"
+        date_str = f"明日（{format_date_jp(target_date)}）に"
     elif delta == 2:
-        date_str = f"明後日（{format_date_jp(target_date)}）"
+        date_str = f"明後日（{format_date_jp(target_date)}）に"
     elif 3 <= delta <= 14:
-        date_str = f"{delta}日後（{format_date_jp(target_date)}）"
+        date_str = f"{delta}日後（{format_date_jp(target_date)}）に"
+    elif date_specified:
+        date_str = f"{format_date_jp(target_date)}に"
     else:
-        date_str = format_date_jp(target_date)
+        date_str = ""
     area_str = f"{area_name}に" if area_name and area_name != "現在地" else ""
-    return (
-        f"ようこそ風景写真コンシェルジュの部屋へ。"
-        f"{date_str}に{area_str}撮影にお出かけですか。"
-        f"それでしたらこんなところはいかがでしょう。"
-    )
+    if date_str or area_str:
+        return (
+            f"ようこそ風景写真コンシェルジュの部屋へ。"
+            f"{date_str}{area_str}撮影にお出かけですか。"
+            f"それでしたらこんなところはいかがでしょう。"
+        )
+    else:
+        return "ようこそ風景写真コンシェルジュの部屋へ。こんなところはいかがでしょう。"
 
 # ──────────────── 3分類選定エンジン ────────────────
 def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None):
@@ -924,7 +929,8 @@ def handle_message(event):
             return
 
         greeting = TextSendMessage(
-            text=build_greeting(target_date, area_display)
+            _date_specified = any(w in user_message for w in ['明日','明後日','今日','来週','週末','月','日後'])
+            text=build_greeting(target_date, area_display, date_specified=_date_specified)
         )
 
         bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
