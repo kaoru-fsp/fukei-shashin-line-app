@@ -827,7 +827,7 @@ def handle_message(event):
         }
         # キーワード抽出（正規化辞書を使用）
         search_keyword = None
-        if not (area_name and area_name in PREF_LATLNG):
+        if not (area_name and area_name not in [None, 'AMBIGUOUS']):
             for canonical, variants in KEYWORD_NORMALIZE.items():
                 if any(v in user_message for v in variants):
                     search_keyword = canonical
