@@ -623,7 +623,11 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
             "url": item['url'],
             "size": "full",
             "aspectRatio": "20:13",
-            "aspectMode": "cover"
+            "aspectMode": "cover",
+            "action": {
+                "type": "uri",
+                "uri": item['url']
+            }
         },
         "body": {
             "type": "box",
