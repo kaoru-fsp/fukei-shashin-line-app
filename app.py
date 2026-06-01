@@ -394,10 +394,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'base_name': base_name,
                 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')),
+                'matched_kw': matched_kw,
             }
+            matched_kw = None
             if keyword:
                 kw_variants = KEYWORD_NORMALIZE.get(keyword, [keyword])
-                if not any(v in d.get('Subject','') or v in d.get('Place','') for v in kw_variants):
+                for v in kw_variants:
+                    if v in d.get('Subject','') or v in d.get('Place',''):
+                        matched_kw = v
+                        break
+                if not matched_kw:
                     continue
             pool.append(item)
 
@@ -547,6 +553,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'base_name': base_name,
                 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')),
+                'matched_kw': matched_kw,
             }
             results.append(('🎲', '気まぐれチョイス', item))
             used_pics.add(item['pic'])
@@ -571,7 +578,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return None, None, None
 
 # ──────────────── Flex Message 組み立て ────────────────
-def build_carousel_bubble(item, label_emoji, area_note=""):
+def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     place = item.get('place', '')
     area = item.get('area', '')
     location_contents = []
@@ -650,7 +657,13 @@ def build_carousel_bubble(item, label_emoji, area_note=""):
                     "color": "#999999",
                     "margin": "sm"
                 }
-            ]
+            ] + ([{
+                    "type": "text",
+                    "text": f"🔍 '{matched_kw}'を含む",
+                    "size": "xs",
+                    "color": "#aaaaaa",
+                    "margin": "xs"
+                }] if matched_kw else [])
         },
         "footer": {
             "type": "box",
