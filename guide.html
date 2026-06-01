@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>風景写真コンシェルジュ 使い方ガイド</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+JP:wght@300;400;600&family=Noto+Sans+JP:wght@300;400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #1a1a2e;
+    --mist: #f5f3ee;
+    --stone: #8a8070;
+    --gold: #b8975a;
+    --line: #d8d0c4;
+    --green: #2d6a4f;
+    --green-light: #e8f5ee;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--mist);
+    color: var(--ink);
+    font-family: 'Noto Sans JP', sans-serif;
+    font-weight: 300;
+    line-height: 1.9;
+  }
+
+  header {
+    background: var(--ink);
+    color: white;
+    padding: 50px 40px 44px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #1a1a2e 0%, #2d3561 50%, #1a1a2e 100%);
+  }
+
+  header * { position: relative; z-index: 1; }
+
+  header h1 {
+    font-family: 'Noto Serif JP', serif;
+    font-weight: 300;
+    font-size: 1.5rem;
+    letter-spacing: 0.15em;
+    margin-bottom: 6px;
+  }
+
+  header p { color: rgba(255,255,255,0.5); font-size: 0.78rem; letter-spacing: 0.1em; }
+
+  .gold-line { width: 36px; height: 1px; background: var(--gold); margin: 18px auto; }
+
+  main { max-width: 680px; margin: 0 auto; padding: 50px 32px 90px; }
+
+  .lead {
+    font-size: 0.95rem;
+    color: #444;
+    line-height: 2;
+    margin-bottom: 48px;
+    padding-bottom: 36px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .section { margin-bottom: 48px; }
+
+  .section-title {
+    font-family: 'Noto Serif JP', serif;
+    font-weight: 600;
+    font-size: 1.05rem;
+    letter-spacing: 0.05em;
+    margin-bottom: 20px;
+    padding-left: 14px;
+    border-left: 2px solid var(--gold);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .card {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px 16px;
+  }
+
+  .card-icon {
+    font-size: 1.5rem;
+    margin-bottom: 8px;
+  }
+
+  .card-title {
+    font-size: 0.85rem;
+    font-weight: 400;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+
+  .card-desc {
+    font-size: 0.78rem;
+    color: var(--stone);
+    line-height: 1.7;
+  }
+
+  .chat-demo {
+    background: #1a1a2e;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 12px;
+  }
+
+  .chat-row {
+    display: flex;
+    margin-bottom: 14px;
+    align-items: flex-end;
+    gap: 8px;
+  }
+
+  .chat-row.user { flex-direction: row-reverse; }
+
+  .bubble {
+    max-width: 75%;
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 0.82rem;
+    line-height: 1.6;
+  }
+
+  .bubble.bot {
+    background: #2d3561;
+    color: #e8eaf6;
+    border-bottom-left-radius: 4px;
+  }
+
+  .bubble.user {
+    background: #00b900;
+    color: white;
+    border-bottom-right-radius: 4px;
+  }
+
+  .avatar {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: var(--gold);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.65rem;
+    color: white;
+  }
+
+  .carousel-demo {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 8px;
+    margin-top: 10px;
+  }
+
+  .carousel-card {
+    min-width: 160px;
+    background: white;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+
+  .carousel-img {
+    height: 90px;
+    background: linear-gradient(135deg, #2d3561, #534AB7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,0.4);
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+  }
+
+  .carousel-body { padding: 10px; }
+
+  .carousel-label {
+    font-size: 0.65rem;
+    color: var(--stone);
+    margin-bottom: 2px;
+  }
+
+  .carousel-place {
+    font-size: 0.82rem;
+    font-weight: 400;
+    color: var(--ink);
+    margin-bottom: 2px;
+  }
+
+  .carousel-area {
+    font-size: 0.72rem;
+    color: var(--stone);
+  }
+
+  .carousel-btns {
+    display: flex;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line);
+  }
+
+  .carousel-btn {
+    flex: 1;
+    padding: 6px;
+    font-size: 0.68rem;
+    border-radius: 4px;
+    text-align: center;
+  }
+
+  .carousel-btn.primary { background: #00b900; color: white; }
+  .carousel-btn.secondary { background: #f0ece4; color: var(--stone); }
+
+  .tip-box {
+    background: var(--green-light);
+    border-left: 3px solid var(--green);
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 12px;
+  }
+
+  .tip-box p {
+    font-size: 0.85rem;
+    color: #2d4a3a;
+    margin: 0;
+  }
+
+  .keyword-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .kw-tag {
+    background: white;
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.8rem;
+    color: var(--ink);
+  }
+
+  .steps { margin-top: 16px; }
+
+  .step {
+    display: flex;
+    gap: 14px;
+    margin-bottom: 16px;
+    align-items: flex-start;
+  }
+
+  .step-num {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--ink);
+    color: white;
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .step-text { font-size: 0.88rem; color: #3a3a4a; line-height: 1.8; }
+
+  .caution {
+    background: #fff8f0;
+    border: 1px solid #e8c97a;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-top: 32px;
+  }
+
+  .caution-title {
+    font-size: 0.82rem;
+    font-weight: 400;
+    color: #7a5c1a;
+    margin-bottom: 8px;
+  }
+
+  .caution ul { list-style: none; }
+
+  .caution li {
+    font-size: 0.82rem;
+    color: #5c4a2a;
+    padding: 3px 0 3px 14px;
+    position: relative;
+  }
+
+  .caution li::before { content: '・'; position: absolute; left: 0; }
+
+  footer {
+    text-align: center;
+    padding: 36px;
+    color: var(--stone);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    border-top: 1px solid var(--line);
+  }
+
+  @media (max-width: 600px) {
+    main { padding: 36px 20px 70px; }
+    header { padding: 36px 24px 32px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>風景写真コンシェルジュ</h1>
+  <div class="gold-line"></div>
+  <p>先行公開版　使い方ガイド</p>
+</header>
+
+<main>
+
+  <div class="lead">
+    「明日、なに撮りに行こう？」——そんな思いに、『風景写真』誌の入賞作品が答えてくれるLINEボットです。地名やキーワードを入力するだけで、今の季節にぴったりの撮影スポットと作品をご提案します。
+  </div>
+
+  <!-- 基本的な使い方 -->
+  <div class="section">
+    <div class="section-title">基本的な使い方</div>
+
+    <div class="chat-demo">
+      <div class="chat-row user">
+        <div class="bubble user">神奈川県</div>
+      </div>
+      <div class="chat-row">
+        <div class="avatar">C</div>
+        <div class="bubble bot">少々お待ちください。今旬の撮影地を探しております🔍</div>
+      </div>
+      <div class="chat-row">
+        <div class="avatar">C</div>
+        <div class="bubble bot">ようこそ風景写真コンシェルジュの部屋へ。神奈川県に撮影にお出かけですか。それでしたらこんなところはいかがでしょう。</div>
+      </div>
+      <div class="carousel-demo">
+        <div class="carousel-card">
+          <div class="carousel-img">写真</div>
+          <div class="carousel-body">
+            <div class="carousel-label">🎯 ベストマッチ</div>
+            <div class="carousel-place">荒崎</div>
+            <div class="carousel-area">神奈川県横浜市</div>
+          </div>
+          <div class="carousel-btns">
+            <div class="carousel-btn primary">詳細情報</div>
+            <div class="carousel-btn secondary">マップ</div>
+          </div>
+        </div>
+        <div class="carousel-card">
+          <div class="carousel-img">写真</div>
+          <div class="carousel-body">
+            <div class="carousel-label">🎯 ベストマッチ</div>
+            <div class="carousel-place">寺家ふるさと村</div>
+            <div class="carousel-area">神奈川県横浜市</div>
+          </div>
+          <div class="carousel-btns">
+            <div class="carousel-btn primary">詳細情報</div>
+            <div class="carousel-btn secondary">マップ</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">地名（都道府県・市区町村）やキーワードを入力します</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">今の季節にマッチした撮影スポットが最大9件カルーセルで表示されます</div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-text">「詳細情報」で作品タイトル・作者・掲載号を確認、「マップ」でGoogleマップを表示します</div>
+      </div>
+      <div class="step">
+        <div class="step-num">4</div>
+        <div class="step-text">写真をタップすると大きく表示されます</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 入力例 -->
+  <div class="section">
+    <div class="section-title">入力できる内容</div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-icon">🗾</div>
+        <div class="card-title">都道府県・地域</div>
+        <div class="card-desc">「北海道」「京都府」「長野県」など。都道府県内の作品を優先してご提案します。</div>
+      </div>
+      <div class="card">
+        <div class="card-icon">📍</div>
+        <div class="card-title">市区町村</div>
+        <div class="card-desc">「松本市」「奥多摩」「美瑛」など。より絞り込んだ提案が可能です。</div>
+      </div>
+      <div class="card">
+        <div class="card-icon">🌿</div>
+        <div class="card-title">被写体・キーワード</div>
+        <div class="card-desc">「滝」「紅葉」「アジサイ」など。全国からその被写体を含む作品を検索します。</div>
+      </div>
+      <div class="card">
+        <div class="card-icon">📅</div>
+        <div class="card-title">日付</div>
+        <div class="card-desc">「明日」「来週末」「7月15日」など。指定した日の旬の撮影地をご提案します。</div>
+      </div>
+    </div>
+
+    <div class="tip-box" style="margin-top:14px;">
+      <p>組み合わせもできます。「来週 長野県 滝」「明日 紅葉」のように入力してみてください。</p>
+    </div>
+
+    <p style="font-size:0.85rem; color:var(--stone); margin-top:12px;">対応キーワードの例：</p>
+    <div class="keyword-grid">
+      <span class="kw-tag">滝</span><span class="kw-tag">桜</span><span class="kw-tag">紅葉</span>
+      <span class="kw-tag">雪景色</span><span class="kw-tag">富士山</span><span class="kw-tag">棚田</span>
+      <span class="kw-tag">朝焼け</span><span class="kw-tag">星空</span><span class="kw-tag">天の川</span>
+      <span class="kw-tag">霧・雲海</span><span class="kw-tag">アジサイ</span><span class="kw-tag">ひまわり</span>
+      <span class="kw-tag">コスモス</span><span class="kw-tag">ラベンダー</span><span class="kw-tag">ツツジ</span>
+      <span class="kw-tag">灯台</span><span class="kw-tag">鉄道</span><span class="kw-tag">白鳥</span>ほか
+    </div>
+  </div>
+
+  <!-- 位置情報 -->
+  <div class="section">
+    <div class="section-title">位置情報を使う（任意）</div>
+    <p style="font-size:0.88rem; color:#3a3a4a; margin-bottom:14px;">現在地を送ると、自宅や出先からの距離つきでご提案します。登録しなくてもご利用いただけます。</p>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-text">入力窓左の「＞」をタップし、「＋」ボタンをタップ</div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-text">「位置情報」を選び、送信（右上）をタップ</div>
+      </div>
+    </div>
+
+    <div class="tip-box">
+      <p>位置情報はサーバー再起動時にリセットされます。再登録が必要な場合があります。</p>
+    </div>
+  </div>
+
+  <!-- 注意事項 -->
+  <div class="caution">
+    <div class="caution-title">⚠ 先行公開版についてのご注意</div>
+    <ul>
+      <li>検索結果が意図と異なる場合があります。順次改善中です。</li>
+      <li>地名として認識されないケースがあります（例：「伊豆」単体など）。</li>
+      <li>キーワードに対応していない被写体があります。</li>
+      <li>気になった点・不便に感じた点はぜひフィードバックをお寄せください。</li>
+    </ul>
+  </div>
+
+</main>
+
+<footer>
+  © 2026 株式会社風景写真出版　All Rights Reserved.<br>
+  お問い合わせ：fsp_line@fukei-shashin.co.jp
+</footer>
+
+</body>
+</html>
