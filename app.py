@@ -429,6 +429,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 try:
                     mo = int(d.get('Month'))
                 except:
+                    continue
                 if (mo, junkun(d.get('Day'))) not in wider_window:
                 pref = extract_pref(d.get('Area'))
                 if not pref:
