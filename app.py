@@ -928,8 +928,8 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, msg)
             return
 
+        _date_specified = any(w in user_message for w in ['明日','明後日','今日','来週','週末','月','日後'])
         greeting = TextSendMessage(
-            _date_specified = any(w in user_message for w in ['明日','明後日','今日','来週','週末','月','日後'])
             text=build_greeting(target_date, area_display, date_specified=_date_specified)
         )
 
