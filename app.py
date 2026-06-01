@@ -825,7 +825,9 @@ def handle_message(event):
         if user_id not in USER_SEEN:
             USER_SEEN.add(user_id)
             if user_id not in USER_LOCATION:
-                line_bot_api.push_message(user_id, TextSendMessage(text="はじめまして！現在地を登録すると、お近くの撮影地をご提案できます。\n\n📍位置情報の送り方\n入力窓の左側にある＞をタップ、さらに＋ボタンをタップ。次の画面で位置情報→送信（右上）をタップしてください。"))
+                from linebot.models import TextSendMessage as TSM
+                line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
+                line_bot_api.push_message(user_id, TSM(text="なお、位置情報を登録していただくとより便利にお使いいただけます。\n登録方法はこちら→ https://guide.line.me/ja/chats-calls-notifications/chats/share-location.html"))
 
         # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
@@ -903,7 +905,7 @@ def handle_message(event):
             if not area_display:
                 area_display = "現在地"
         elif area_latlng is None:
-            line_bot_api.push_message(user_id, TextSendMessage(text='現在地が登録されていません。位置情報を送っていただくと、現在地周辺の撮影地をご提案できます。📍'))
+            pass  # 位置情報未登録時は何も言わない
         print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
         if not results:
