@@ -464,9 +464,15 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             hot_cand = [p for p in hot_pool if p['pref'] == target_pref and p['pic'] not in used_pics] or [p for p in hot_pool if p['pic'] not in used_pics]
         else:
             hot_cand = [p for p in hot_pool if p['pic'] not in used_pics]
-        for p in hot_cand[:2]:
+        used_areas_hot = set()
+        for p in hot_cand:
+            if len([r for r in results if r[1] == '注目・傑作']) >= 2:
+                break
+            if p['area'] in used_areas_hot:
+                continue
             results.append(('✨', '注目・傑作', p))
             used_pics.add(p['pic'])
+            used_areas_hot.add(p['area'])
 
         masterpiece = results[0][2] if results else None
         near = results[1][2] if len(results) > 1 else masterpiece
