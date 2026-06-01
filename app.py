@@ -827,10 +827,11 @@ def handle_message(event):
         }
         # キーワード抽出（正規化辞書を使用）
         search_keyword = None
-        for canonical, variants in KEYWORD_NORMALIZE.items():
-            if any(v in user_message for v in variants):
-                search_keyword = canonical
-                break
+        if not (area_name and area_name in PREF_LATLNG):
+            for canonical, variants in KEYWORD_NORMALIZE.items():
+                if any(v in user_message for v in variants):
+                    search_keyword = canonical
+                    break
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
