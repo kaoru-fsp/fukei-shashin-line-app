@@ -950,6 +950,7 @@ def handle_message(event):
             pass  # 位置情報未登録時は何も言わない
         print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        print(f'[DEBUG] results type={type(results)}, value={results if isinstance(results, tuple) else len(results)}', flush=True)
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
             _, found_pref, count = results
             EXPAND_PENDING[user_id] = {
