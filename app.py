@@ -13,7 +13,7 @@ from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage
+from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction
 from linebot.exceptions import InvalidSignatureError
 import unicodedata
 import firebase_admin
@@ -240,7 +240,8 @@ def record_search(user_id, query):
     try:
         db.collection('Users').document(user_id).set(
             {"search_count": firestore.Increment(1),
-             "last_used": firestore.SERVER_TIMESTAMP},
+             "last_used": firestore.SERVER_TIMESTAMP,
+             "last_query": query},
             merge=True,
         )
         db.collection('SearchLogs').add(
@@ -249,6 +250,34 @@ def record_search(user_id, query):
     except Exception:
         import traceback
         print(f"[ERROR] record_search failed: {traceback.format_exc()}", flush=True)
+
+def feedback_quick_reply():
+    """検索結果に対する満足度フィードバックのクイックリプライ(タップ式)。"""
+    return QuickReply(items=[
+        QuickReplyButton(action=PostbackAction(
+            label="👍 ちょうど良い", data="action=feedback&rating=good", display_text="ちょうど良い")),
+        QuickReplyButton(action=PostbackAction(
+            label="🤔 ピンとこない", data="action=feedback&rating=meh", display_text="ピンとこない")),
+        QuickReplyButton(action=PostbackAction(
+            label="📍 場所に違和感", data="action=feedback&rating=place", display_text="場所に違和感")),
+    ])
+
+def delete_user_data(user_id):
+    """ユーザー本人の記録(Users / SearchLogs / Feedback)をすべて削除する。同意撤回・削除依頼用。"""
+    # メモリ上の状態もクリア
+    USER_LOCATION.pop(user_id, None)
+    USER_SEEN.discard(user_id)
+    _HYDRATED.discard(user_id)
+    if not db:
+        return
+    try:
+        db.collection('Users').document(user_id).delete()
+        for coll in ('SearchLogs', 'Feedback'):
+            for d in db.collection(coll).where('user_id', '==', user_id).stream():
+                d.reference.delete()
+    except Exception:
+        import traceback
+        print(f"[ERROR] delete_user_data failed: {traceback.format_exc()}", flush=True)
 
 KEYWORD_NORMALIZE = {
     '滝': ['滝', '瀧', 'たき', 'タキ'],
@@ -886,6 +915,14 @@ def handle_message(event):
     user_id = event.source.user_id
     # Firestoreに保存済みのユーザー情報(位置・初回フラグ)をメモリへ復元
     hydrate_user(user_id)
+    # データ削除コマンド(同意の撤回・記録消去)。検索として記録される前に処理する
+    if event.message.text.strip() in ("データ削除", "データ消去", "記録削除"):
+        delete_user_data(user_id)
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text="あなたの記録(検索された言葉・ご提案への評価・登録された位置情報)をすべて削除しました。\nご協力ありがとうございました。またいつでもご利用いただけます。")
+        )
+        return
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
     except:
@@ -929,7 +966,7 @@ def handle_message(event):
                 return
             greeting = TextSendMessage(text=f"条件を広げて探しました。こんなところはいかがでしょう。")
             bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
-            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles})
+            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
             line_bot_api.reply_message(reply_token, [greeting, carousel])
             return
 
@@ -1031,7 +1068,7 @@ def handle_message(event):
 
         if not masterpiece or not near:
             msg = TextSendMessage(
-                text="申し訳ございません。現在条件に合う撮影地の検索ができておりません。"
+                text="今の時期にぴったりの作品が見つかりませんでした。\n地域名やキーワード（例：滝、桜、紅葉）を変えてもう一度お試しください。位置情報を登録していただくと、お近くの撮影地もご提案できます。"
             )
             line_bot_api.reply_message(reply_token, msg)
             return
@@ -1048,7 +1085,8 @@ def handle_message(event):
             contents={
                 "type": "carousel",
                 "contents": bubbles
-            }
+            },
+            quick_reply=feedback_quick_reply()
         )
 
         line_bot_api.reply_message(reply_token, [greeting, carousel])
@@ -1066,6 +1104,22 @@ def handle_message(event):
         except:
             pass
 
+@handler.default()
+def handle_default(event):
+    """テキスト・位置情報・ポストバック以外(スタンプ・画像・友だち追加など)の
+    フォールバック。SDK 2.4.3 では未対応イベントは _default に回る。
+    返信できるイベント(reply_tokenあり)にだけ、使い方をやさしく案内する。"""
+    reply_token = getattr(event, 'reply_token', None)
+    if not reply_token:
+        return  # Unfollow等、返信トークンが無いイベントは何もしない
+    try:
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text="ありがとうございます。撮影したい『地域名』や『日程』、被写体の『キーワード』をテキストで送っていただくと、その場所にちなんだ作品をご提案します。\n例：「宮城県」「来週末 北海道」「滝」")
+        )
+    except Exception as e:
+        print(f"[ERROR] handle_default error: {e}", flush=True)
+
 @handler.add(PostbackEvent)
 def handle_postback(event):
     reply_token = event.reply_token
@@ -1075,6 +1129,27 @@ def handle_postback(event):
         params = dict(item.split('=') for item in data.split('&'))
         action = params.get('action')
         pic_filename = params.get('pic', '')
+
+        if action == 'feedback':
+            rating = params.get('rating', '')
+            user_id = event.source.user_id
+            last_query = ''
+            if db:
+                try:
+                    snap = db.collection('Users').document(user_id).get()
+                    if snap.exists:
+                        last_query = (snap.to_dict() or {}).get('last_query', '')
+                    db.collection('Feedback').add({
+                        "user_id": user_id,
+                        "rating": rating,
+                        "query": last_query,
+                        "ts": firestore.SERVER_TIMESTAMP,
+                    })
+                except Exception:
+                    import traceback
+                    print(f"[ERROR] feedback save failed: {traceback.format_exc()}", flush=True)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="ありがとうございます。いただいた声は今後のご提案の参考にいたします。"))
+            return
 
         if action == 'detail':
             # Master_Photosから写真情報を取得
