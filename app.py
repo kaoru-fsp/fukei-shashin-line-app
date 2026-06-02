@@ -350,7 +350,9 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             target_pref = min(PREF_LATLNG.keys(), key=lambda k: haversine(base_latlng[0], base_latlng[1], PREF_LATLNG[k][0], PREF_LATLNG[k][1]))
         print(f'[DEBUG] target_pref={target_pref}, base_latlng={base_latlng}', flush=True)
 
-        for doc in db.collection('Master_Photos').stream():
+        target_months = list(set(str(m) for m, k in junkun_window))
+        query = db.collection('Master_Photos').where('Month', 'in', target_months)
+        for doc in query.stream():
             d = doc.to_dict()
 
             try:
@@ -430,7 +432,9 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             for delta in range(-30, 31):
                 d2 = tomorrow + timedelta(days=delta)
                 wider_window.add((d2.month, junkun(d2.day)))
-            for doc in db.collection('Master_Photos').stream():
+            wider_months = list(set(str(m) for m, k in wider_window))
+            wider_query = db.collection('Master_Photos').where('Month', 'in', wider_months)
+            for doc in wider_query.stream():
                 d = doc.to_dict()
                 try:
                     mo = int(d.get('Month'))
