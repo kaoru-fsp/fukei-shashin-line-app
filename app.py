@@ -178,6 +178,59 @@ AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_SEEN = set()  # 初回メッセージ済みuser_id
+
+# ── ユーザー情報(位置・初回フラグ)のFirestore永続化 ──
+# メモリ上の USER_LOCATION / USER_SEEN は再起動で消えるため、
+# Firestoreの Users コレクション(doc id = user_id)に読み書きして永続化する。
+# 書き込みは「メモリ＋Firestore」両方、読み込みは初回だけFirestoreから復元(以後はメモリ)。
+_HYDRATED = set()  # このプロセスで既にFirestoreから読み込み済みのuser_id
+
+def hydrate_user(user_id):
+    """初回アクセス時にFirestoreからユーザー情報を読み、メモリに復元する。"""
+    if user_id in _HYDRATED:
+        return
+    _HYDRATED.add(user_id)
+    if not db:
+        return
+    try:
+        snap = db.collection('Users').document(user_id).get()
+        if snap.exists:
+            data = snap.to_dict() or {}
+            if data.get('seen'):
+                USER_SEEN.add(user_id)
+            if data.get('lat') is not None and data.get('lng') is not None:
+                USER_LOCATION[user_id] = {"lat": data['lat'], "lng": data['lng']}
+    except Exception:
+        import traceback
+        print(f"[ERROR] hydrate_user failed: {traceback.format_exc()}", flush=True)
+
+def save_user_location(user_id, lat, lng):
+    """位置情報をメモリとFirestoreの両方に保存する。"""
+    USER_LOCATION[user_id] = {"lat": lat, "lng": lng}
+    if not db:
+        return
+    try:
+        db.collection('Users').document(user_id).set(
+            {"lat": lat, "lng": lng, "updated": firestore.SERVER_TIMESTAMP},
+            merge=True,
+        )
+    except Exception:
+        import traceback
+        print(f"[ERROR] save_user_location failed: {traceback.format_exc()}", flush=True)
+
+def mark_user_seen(user_id):
+    """初回フラグをメモリとFirestoreの両方に立てる。"""
+    USER_SEEN.add(user_id)
+    if not db:
+        return
+    try:
+        db.collection('Users').document(user_id).set(
+            {"seen": True, "updated": firestore.SERVER_TIMESTAMP},
+            merge=True,
+        )
+    except Exception:
+        import traceback
+        print(f"[ERROR] mark_user_seen failed: {traceback.format_exc()}", flush=True)
 KEYWORD_NORMALIZE = {
     '滝': ['滝', '瀧', 'たき', 'タキ'],
     '桜': ['桜', '櫻', 'さくら', 'サクラ', '桜花'],
@@ -596,8 +649,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
 
     except Exception as e:
         import traceback
+        tb = traceback.format_exc()
+        # Renderのログ(stdout)にも出す。ファイルだけだと画面で気づけないため
+        print(f"[ERROR] select_three_points exception: {tb}", flush=True)
         with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[ERROR] select_three_points exception: {traceback.format_exc()}\n")
+            f.write(f"[ERROR] select_three_points exception: {tb}\n")
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
@@ -816,7 +872,8 @@ def handle_location(event):
     user_id = event.source.user_id
     lat = event.message.latitude
     lng = event.message.longitude
-    USER_LOCATION[user_id] = {"lat": lat, "lng": lng}
+    hydrate_user(user_id)
+    save_user_location(user_id, lat, lng)
     line_bot_api.reply_message(
         event.reply_token,
         TextSendMessage(text=f"現在地を登録しました。この場所を起点に撮影地をご提案します。\n撮影したい日程や地域があればお知らせください。")
@@ -830,6 +887,8 @@ def handle_message(event):
 
     # 即座に「お待ちください」を送信
     user_id = event.source.user_id
+    # Firestoreに保存済みのユーザー情報(位置・初回フラグ)をメモリへ復元
+    hydrate_user(user_id)
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
     except:
@@ -842,7 +901,7 @@ def handle_message(event):
         user_message = event.message.text.strip()
         # 初回メッセージ時に位置情報登録を促す
         if user_id not in USER_SEEN:
-            USER_SEEN.add(user_id)
+            mark_user_seen(user_id)
             if user_id not in USER_LOCATION:
                 from linebot.models import TextSendMessage as TSM
                 line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
