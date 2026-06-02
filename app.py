@@ -231,6 +231,25 @@ def mark_user_seen(user_id):
     except Exception:
         import traceback
         print(f"[ERROR] mark_user_seen failed: {traceback.format_exc()}", flush=True)
+
+def record_search(user_id, query):
+    """利用状況の観察用。検索回数と最終利用日時を更新し、検索内容を記録する。
+    テスト公開中は上限などの制限はかけず、数えて記録するだけ。"""
+    if not db:
+        return
+    try:
+        db.collection('Users').document(user_id).set(
+            {"search_count": firestore.Increment(1),
+             "last_used": firestore.SERVER_TIMESTAMP},
+            merge=True,
+        )
+        db.collection('SearchLogs').add(
+            {"user_id": user_id, "query": query, "ts": firestore.SERVER_TIMESTAMP}
+        )
+    except Exception:
+        import traceback
+        print(f"[ERROR] record_search failed: {traceback.format_exc()}", flush=True)
+
 KEYWORD_NORMALIZE = {
     '滝': ['滝', '瀧', 'たき', 'タキ'],
     '桜': ['桜', '櫻', 'さくら', 'サクラ', '桜花'],
@@ -321,7 +340,6 @@ def parse_target_area(text):
         else:
             short = pref.replace("都","").replace("府","").replace("県","")
         if pref in text or short in text:
-            import sys; print(f"[DEBUG2] pref_match: pref={pref}, short={short}, text={text}", file=sys.stdout, flush=True)
             return pref, PREF_LATLNG[pref], PREF_CITY.get(pref, pref)
     for city, pref in CITY_PREF.items():
         if city in text:
@@ -373,12 +391,8 @@ def build_greeting(target_date, area_name, date_specified=False):
 
 # ──────────────── 3分類選定エンジン ────────────────
 def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False):
-    with open('/tmp/debug.log', 'a') as f:
-        f.write("[DEBUG] select_three_points: start\n")
 
     if not db:
-        with open('/tmp/debug.log', 'a') as f:
-            f.write("[DEBUG] select_three_points: db is None\n")
         return []
 
     try:
@@ -401,14 +415,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         pool = []
         place_years = defaultdict(list)
 
-        with open('/tmp/debug.log', 'a') as f:
-            f.write("[DEBUG] select_three_points: starting Firestore stream\n")
 
         # 指定都道府県を特定
         target_pref = None
         if base_latlng:
             target_pref = min(PREF_LATLNG.keys(), key=lambda k: haversine(base_latlng[0], base_latlng[1], PREF_LATLNG[k][0], PREF_LATLNG[k][1]))
-        print(f'[DEBUG] target_pref={target_pref}, base_latlng={base_latlng}', flush=True)
 
         target_months = list(set(str(m) for m, k in junkun_window))
         query = db.collection('Master_Photos').where('Month', 'in', target_months)
@@ -481,16 +492,12 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             except:
                 pass
 
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] select_three_points: pool size={len(pool)}\n")
 
         # 地域指定時にpoolが空の場合はTOO_FEWを返す
         if not pool and target_pref:
             return 'TOO_FEW', target_pref, 0
         # 地域未指定時にpoolが空の場合、旬ウィンドウを前後1ヶ月に広げてリトライ
         if not pool and base_latlng and not target_pref:
-            with open('/tmp/debug.log', 'a') as f:
-                f.write("[DEBUG] pool empty, retrying with wider window\n")
             wider_window = set()
             for delta in range(-30, 31):
                 d2 = tomorrow + timedelta(days=delta)
@@ -541,8 +548,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     place_years[d.get('Area', '')].append(int(d.get('Year')))
                 except:
                     pass
-            with open('/tmp/debug.log', 'a') as f:
-                f.write(f"[DEBUG] wider window pool size={len(pool)}\n")
 
         if not pool:
             if target_pref:
@@ -553,7 +558,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         results = []
 
         ibaraki_in_pool = [p for p in pool if p['pref'] == '茨城県']
-        print(f'[DEBUG] pool size={len(pool)}, target_pref={target_pref}, 茨城県 in pool={len(ibaraki_in_pool)}', flush=True)
         # 🎯 ベストマッチ（同県優先、最大7枚）
         if target_pref:
             best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
@@ -635,9 +639,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             used_pics.add(item['pic'])
             gamble_count += 1
 
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] select_three_points: done. masterpiece={masterpiece.get('title')}, near={near.get('title')}\n")
-            f.write(f"[DEBUG] dist: masterpiece={masterpiece.get('dist')}, base_name={masterpiece.get('base_name')}\n")
 
         # 地域指定がある場合はベストマッチ（同県）を前に並べ替え
         if base_latlng:
@@ -652,8 +653,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         tb = traceback.format_exc()
         # Renderのログ(stdout)にも出す。ファイルだけだと画面で気づけないため
         print(f"[ERROR] select_three_points exception: {tb}", flush=True)
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[ERROR] select_three_points exception: {tb}\n")
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
@@ -880,8 +879,6 @@ def handle_location(event):
     )
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    with open('/tmp/debug.log', 'a') as f:
-        f.write(f"[DEBUG] Message received: {event.message.text}\n")
 
     reply_token = event.reply_token
 
@@ -895,10 +892,10 @@ def handle_message(event):
         pass
 
     try:
-        with open('/tmp/debug.log', 'a') as f:
-            f.write("[DEBUG] About to call select_three_points\n")
 
         user_message = event.message.text.strip()
+        # 利用状況の観察用に記録(制限はかけない)
+        record_search(user_id, user_message)
         # 初回メッセージ時に位置情報登録を促す
         if user_id not in USER_SEEN:
             mark_user_seen(user_id)
@@ -977,8 +974,6 @@ def handle_message(event):
                 if any(v in user_message for v in variants):
                     search_keyword = canonical
                     break
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] area_name={area_name}, area_latlng={area_latlng}\n")
         # 同名地名の問い返し
         if area_name == "AMBIGUOUS":
             prefs = CITY_TO_PREF_MULTI.get(area_display, [])
@@ -1013,9 +1008,7 @@ def handle_message(event):
                 area_display = "現在地"
         elif area_latlng is None:
             pass  # 位置情報未登録時は何も言わない
-        print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
-        print(f'[DEBUG] results type={type(results)}, value={results if isinstance(results, tuple) else len(results)}', flush=True)
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
             _, found_pref, count = results
             EXPAND_PENDING[user_id] = {
@@ -1035,8 +1028,6 @@ def handle_message(event):
         masterpiece = results[0][2] if results else None
         near = results[1][2] if len(results) > 1 else None
 
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[DEBUG] select_three_points returned: {len(results)}件\n")
 
         if not masterpiece or not near:
             msg = TextSendMessage(
@@ -1062,15 +1053,11 @@ def handle_message(event):
 
         line_bot_api.reply_message(reply_token, [greeting, carousel])
 
-        with open('/tmp/debug.log', 'a') as f:
-            f.write("[DEBUG] Reply sent successfully\n")
 
     except Exception as e:
         import traceback
         err = traceback.format_exc()
         sys.stderr.write(f"[ERROR] Exception in handle_message: {err}\n")
-        with open('/tmp/debug.log', 'a') as f:
-            f.write(f"[ERROR] Exception in handle_message: {err}\n")
         try:
             msg = TextSendMessage(
                 text="申し訳ございません。処理中にエラーが発生しました。"
@@ -1090,7 +1077,6 @@ def handle_postback(event):
         pic_filename = params.get('pic', '')
 
         if action == 'detail':
-            print(f'[DEBUG] detail action: pic_filename={pic_filename}, dnumb={params.get("dnumb","")}', flush=True)
             # Master_Photosから写真情報を取得
             photo_data = None
             if db:
