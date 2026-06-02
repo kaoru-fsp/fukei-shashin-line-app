@@ -329,6 +329,9 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
     try:
+        # radius未指定(None)時は距離制限なしとして扱う(dist > None のTypeError防止)
+        if radius is None:
+            radius = float('inf')
         excl_authors, blocked_areas = load_exclusions()
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         if expand_time:
@@ -371,10 +374,10 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
 
             # 指定都道府県がある場合は同県を優先、足りなければ半径内も追加
             if target_pref:
-                if pref != target_pref and dist > _radius:
+                if pref != target_pref and dist > radius:
                     continue
             else:
-                if dist > _radius:
+                if dist > radius:
                     continue
 
             if d.get('Winner') in excl_authors:
@@ -451,7 +454,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     continue
                 lat, lng = PREF_LATLNG[pref]
                 dist = haversine(tokyo[0], tokyo[1], lat, lng)
-                if dist > _radius:
+                if dist > radius:
                     continue
                 if d.get('Winner') in excl_authors:
                     continue
