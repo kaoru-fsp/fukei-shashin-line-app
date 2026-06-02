@@ -332,6 +332,9 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         # radius未指定(None)時は距離制限なしとして扱う(dist > None のTypeError防止)
         if radius is None:
             radius = float('inf')
+        # 距離計算の基準点と、表示用の基準地名("◯◯より △△km")
+        tokyo = PREF_LATLNG["東京都"]
+        base_name = "東京"
         excl_authors, blocked_areas = load_exclusions()
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         if expand_time:
