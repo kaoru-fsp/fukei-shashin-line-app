@@ -425,8 +425,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         with open('/tmp/debug.log', 'a') as f:
             f.write(f"[DEBUG] select_three_points: pool size={len(pool)}\n")
 
-        # 地域指定時にpoolが空の場合、旬ウィンドウを前後1ヶ月に広げてリトライ
-        if not pool and base_latlng:
+        # 地域指定時にpoolが空の場合はTOO_FEWを返す
+        if not pool and target_pref:
+            return 'TOO_FEW', target_pref, 0
+        # 地域未指定時にpoolが空の場合、旬ウィンドウを前後1ヶ月に広げてリトライ
+        if not pool and base_latlng and not target_pref:
             with open('/tmp/debug.log', 'a') as f:
                 f.write("[DEBUG] pool empty, retrying with wider window\n")
             wider_window = set()
