@@ -279,6 +279,35 @@ def delete_user_data(user_id):
         import traceback
         print(f"[ERROR] delete_user_data failed: {traceback.format_exc()}", flush=True)
 
+def usage_guide_text():
+    """初回案内・「使い方」コマンドで表示する使い方ガイド。"""
+    return (
+        "【使い方】\n"
+        "行きたい「地域」「被写体」「日付」を送ると、『風景写真』の傑作が撮られた撮影地をご提案します。\n"
+        "\n"
+        "▼送り方の例\n"
+        "・地域で探す：栃木県／美瑛／箱根\n"
+        "・被写体で探す：滝／桜／紅葉／星空／海\n"
+        "・日付を添える：週末 京都／明日 滝／3日後\n"
+        "\n"
+        "▼使える日付の言い方\n"
+        "明日・明後日・今週末・来週末・3日後・6月15日 など\n"
+        "（指定しない場合は今の時期に合わせてご提案します)\n"
+        "\n"
+        "▼位置情報を登録すると\n"
+        "地域を指定しなくても、今いる場所の近くからご提案します。\n"
+        "【登録方法】このトーク画面で位置情報を送るだけです。\n"
+        "1. 入力欄の左の「＋」をタップ\n"
+        "2. メニューから「位置情報」を選ぶ\n"
+        "3. 地図で場所を指定(現在地のまま／検索／地図を動かして調整)\n"
+        "4. 右上の「送信」をタップ\n"
+        "詳しい解説→ https://guide.line.me/ja/services/location-information.html\n"
+        "\n"
+        "ご提案の下に出るボタンで感想(ちょうど良い／ピンとこない／場所に違和感)を教えていただけると、今後の精度向上に役立ちます。\n"
+        "\n"
+        "この説明は「使い方」と送るといつでも表示できます。"
+    )
+
 KEYWORD_NORMALIZE = {
     '滝': ['滝', '瀧', 'たき', 'タキ'],
     '桜': ['桜', '櫻', 'さくら', 'サクラ', '桜花'],
@@ -915,6 +944,10 @@ def handle_message(event):
     user_id = event.source.user_id
     # Firestoreに保存済みのユーザー情報(位置・初回フラグ)をメモリへ復元
     hydrate_user(user_id)
+    # 「使い方」「ヘルプ」でいつでも案内を表示
+    if event.message.text.strip() in ("使い方", "つかいかた", "ヘルプ", "help", "Help"):
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=usage_guide_text()))
+        return
     # データ削除コマンド(同意の撤回・記録消去)。検索として記録される前に処理する
     if event.message.text.strip() in ("データ削除", "データ消去", "記録削除"):
         delete_user_data(user_id)
@@ -933,13 +966,12 @@ def handle_message(event):
         user_message = event.message.text.strip()
         # 利用状況の観察用に記録(制限はかけない)
         record_search(user_id, user_message)
-        # 初回メッセージ時に位置情報登録を促す
+        # 初回メッセージ時に歓迎＋使い方を案内
         if user_id not in USER_SEEN:
             mark_user_seen(user_id)
-            if user_id not in USER_LOCATION:
-                from linebot.models import TextSendMessage as TSM
-                line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
-                line_bot_api.push_message(user_id, TSM(text="なお、位置情報を登録していただくとより便利にお使いいただけます。\n登録方法はこちら→ https://guide.line.me/ja/chats-calls-notifications/chats/share-location.html"))
+            from linebot.models import TextSendMessage as TSM
+            line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
+            line_bot_api.push_message(user_id, TSM(text=usage_guide_text()))
 
         # 検索拡張の回答処理
         if user_id in EXPAND_PENDING:
