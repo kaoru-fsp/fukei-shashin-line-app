@@ -174,7 +174,8 @@ def geocode(place_name):
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
-AMBIGUOUS_PENDING = {}  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
+AMBIGUOUS_PENDING = {}
+EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_SEEN = set()  # 初回メッセージ済みuser_id
 KEYWORD_NORMALIZE = {
@@ -318,7 +319,7 @@ def build_greeting(target_date, area_name, date_specified=False):
         return "ようこそ風景写真コンシェルジュの部屋へ。こんなところはいかがでしょう。"
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False):
     with open('/tmp/debug.log', 'a') as f:
         f.write("[DEBUG] select_three_points: start\n")
 
@@ -330,13 +331,13 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
     try:
         excl_authors, blocked_areas = load_exclusions()
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
-        junkun_window = half_month_window(tomorrow)
-        tokyo = base_latlng if base_latlng else PREF_LATLNG["東京都"]
-        _radius = radius if radius else (150 if base_latlng else 250)
-        if base_latlng:
-            base_name = place_name if place_name else (PREF_CITY.get(next((k for k,v in PREF_LATLNG.items() if v == base_latlng), None), "指定地"))
+        if expand_time:
+            junkun_window = set()
+            for delta in range(-30, 31):
+                d2 = tomorrow + timedelta(days=delta)
+                junkun_window.add((d2.month, junkun(d2.day)))
         else:
-            base_name = "新宿区"
+            junkun_window = half_month_window(tomorrow)
 
         pool = []
         place_years = defaultdict(list)
@@ -495,7 +496,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         if target_pref:
             best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
             if len(best_pool) < 3:
-                best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
+                return 'TOO_FEW', target_pref, len(best_pool)
         else:
             best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
         used_areas = set()
@@ -838,6 +839,35 @@ def handle_message(event):
                 line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
                 line_bot_api.push_message(user_id, TSM(text="なお、位置情報を登録していただくとより便利にお使いいただけます。\n登録方法はこちら→ https://guide.line.me/ja/chats-calls-notifications/chats/share-location.html"))
 
+        # 検索拡張の回答処理
+        if user_id in EXPAND_PENDING:
+            pending = EXPAND_PENDING[user_id]
+            choice = user_message.strip()
+            if choice in ['4', '４']:
+                del EXPAND_PENDING[user_id]
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="別の地域やキーワードを入力してください。"))
+                return
+            del EXPAND_PENDING[user_id]
+            expand_time = choice in ['1', '１', '3', '３']
+            expand_area = choice in ['2', '２', '3', '３']
+            new_radius = 300 if expand_area else 150
+            results = select_three_points(
+                base_date=pending['date'],
+                base_latlng=pending['latlng'],
+                radius=new_radius,
+                place_name=pending['display'],
+                keyword=pending['keyword'],
+                expand_time=expand_time,
+            )
+            if not results or isinstance(results, tuple):
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="条件を広げても見つかりませんでした。別の地域やキーワードをお試しください。"))
+                return
+            greeting = TextSendMessage(text=f"条件を広げて探しました。こんなところはいかがでしょう。")
+            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
+            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles})
+            line_bot_api.reply_message(reply_token, [greeting, carousel])
+            return
+
         # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
             pending = AMBIGUOUS_PENDING[user_id]
@@ -917,6 +947,20 @@ def handle_message(event):
             pass  # 位置情報未登録時は何も言わない
         print(f"[DEBUG] search_keyword={search_keyword}", flush=True)
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        if isinstance(results, tuple) and results[0] == 'TOO_FEW':
+            _, found_pref, count = results
+            EXPAND_PENDING[user_id] = {
+                'pref': found_pref,
+                'date': target_date,
+                'latlng': area_latlng,
+                'display': area_display,
+                'keyword': search_keyword,
+            }
+            msg = TextSendMessage(
+                text=f"{found_pref}の今の時期の作品が少ししか見つかりません（{count}件）。\nどうしますか？\n1. 時期を広げて探す\n2. 近隣地域も含めて探す\n3. 両方広げて探す\n4. やめる（別の条件で探す）"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+            return
         if not results:
             results = []
         masterpiece = results[0][2] if results else None
