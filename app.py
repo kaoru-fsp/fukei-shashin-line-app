@@ -483,8 +483,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 f.write(f"[DEBUG] wider window pool size={len(pool)}\n")
 
         if not pool:
-            with open('/tmp/debug.log', 'a') as f:
-                f.write("[DEBUG] select_three_points: pool is empty\n")
+            if target_pref:
+                return 'TOO_FEW', target_pref, 0
             return []
 
         used_pics = set()
