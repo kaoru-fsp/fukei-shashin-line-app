@@ -976,11 +976,8 @@ def build_city_to_pref():
                 if m:
                     pref_map[m.group(1)].add(pref)
                     CITY_TO_LATLNG[m.group(1)] = PREF_LATLNG[pref]
-                parts = _re.findall(r'[^\s]{2,}', city_part)
-                for part in parts:
-                    if len(part) >= 2:
-                        pref_map[part].add(pref)
-                        CITY_TO_LATLNG[part] = PREF_LATLNG[pref]
+                # 注: 以前は市区町村以外のバラ地名(例:「志賀高原」)も登録していたが、
+                # それらは地点名検索(search_by_place)に回すため、ここでは登録しない。
         for city, prefs in pref_map.items():
             if len(prefs) == 1:
                 CITY_TO_PREF[city] = next(iter(prefs))
