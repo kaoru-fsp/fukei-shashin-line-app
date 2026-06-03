@@ -721,6 +721,83 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
+def search_by_place(place_query, base_date=None):
+    """地点名(Place/Area/Title)の自由文検索。
+    今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
+    返り値: {'status': 'in_season'|'off_season'|'not_found', 'results': [(emoji,label,item),...]}"""
+    if not db:
+        return {'status': 'not_found', 'results': []}
+    base = base_date if base_date else date.today() + timedelta(days=1)
+    window = half_month_window(base)
+    tokyo = PREF_LATLNG["東京都"]
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    in_season, all_time = [], []
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict()
+            place = d.get('Place', '') or ''
+            area = d.get('Area', '') or ''
+            title = d.get('Title', '') or ''
+            if place_query not in place and place_query not in area and place_query not in title:
+                continue
+            if d.get('Winner') in excl_authors:
+                continue
+            if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):
+                continue
+            pref = extract_pref(area)
+            if pref and pref in PREF_LATLNG:
+                dist = haversine(tokyo[0], tokyo[1], PREF_LATLNG[pref][0], PREF_LATLNG[pref][1])
+            else:
+                dist = 0
+            try:
+                year = int(d.get('Year'))
+            except Exception:
+                year = 0
+            item = {
+                'dist': dist, 'pref': pref or '', 'area': area, 'place': place,
+                'title': title, 'winner': d.get('Winner', ''),
+                'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
+                'pic': d.get('PicFileName', ''), 'pub': pub,
+                'url': view_image_url(pub, d.get('PicFileName', '')),
+                'base_name': '東京', 'maplink': d.get('MapLink', ''),
+                'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
+            }
+            all_time.append(item)
+            try:
+                if (int(d.get('Month')), junkun(d.get('Day'))) in window:
+                    in_season.append(item)
+            except Exception:
+                pass
+    except Exception:
+        import traceback
+        print(f"[ERROR] search_by_place failed: {traceback.format_exc()}", flush=True)
+        return {'status': 'not_found', 'results': []}
+
+    if in_season:
+        pool, status = in_season, 'in_season'
+    elif all_time:
+        pool, status = all_time, 'off_season'
+    else:
+        return {'status': 'not_found', 'results': []}
+    pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
+    results, used = [], set()
+    for p in pool:
+        if len(results) >= 7:
+            break
+        if p['pic'] in used:
+            continue
+        results.append(('🎯', 'ベストマッチ', p))
+        used.add(p['pic'])
+    return {'status': status, 'results': results}
+
 def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     place = item.get('place', '')
     area = item.get('area', '')
@@ -1067,6 +1144,36 @@ def handle_message(event):
             return
 
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
+        # 地域・キーワードに解決できない具体的な語は「地点名検索」を試みる(無関係な全国結果を出さない)
+        place_query = None
+        if not area_name and not search_keyword and not city_specified:
+            residual = user_message.strip()
+            for w in ['明日','あした','明後日','あさって','今日','本日','今週末','来週末','来週','今週','週末']:
+                residual = residual.replace(w, '')
+            residual = re.sub(r'\d+日後', '', residual)
+            residual = re.sub(r'\d{1,2}月\d{1,2}日', '', residual)
+            residual = re.sub(r'\d{1,2}月', '', residual)
+            residual = residual.strip()
+            if len(residual) >= 2:
+                place_query = residual
+        if place_query:
+            pr = search_by_place(place_query, base_date=target_date)
+            if pr['status'] == 'not_found':
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=f"「{place_query}」に合う撮影地は見つかりませんでした。\n地域名(県名・市町村名)や被写体(滝・桜・紅葉・星空など)でもお試しください。"))
+                return
+            results = pr['results']
+            if pr['status'] == 'in_season':
+                head = f"「{place_query}」の今の時期の撮影地はこちらです。"
+            else:
+                head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+            greeting = TextSendMessage(text=head)
+            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
+            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
+            line_bot_api.reply_message(reply_token, [greeting, carousel])
+            return
+
+
         # CITY_TO_PREFでヒットした場合（市町村名指定）はWIDE_PREFSスキップ
         city_from_dict = any(city in user_message or re.sub(r'[市区町村郡]', '', city) in user_message for city in CITY_TO_PREF)
         _radius = 150 if (city_specified or city_from_dict) else (300 if search_keyword else None)
