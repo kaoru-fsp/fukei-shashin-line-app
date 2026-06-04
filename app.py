@@ -147,6 +147,43 @@ def format_period(month, day):
     jun = junkun(day)  # 上旬/中旬/下旬 or None
     return f"［{m}月{jun}］" if jun else f"［{m}月］"
 
+JUN_LABELS = ['上旬', '中旬', '下旬']
+# 「見頃」という表現が自然な季節被写体（花・季節現象）
+SEASONAL_SUBJECTS = {'桜', '紅葉', '雪', 'ひまわり', 'コスモス', 'ススキ', '紫陽花', '菜の花', '芝桜', '藤', 'ラベンダー'}
+
+def _jun_offset(day):
+    return {'上旬': 0, '中旬': 1, '下旬': 2}.get(junkun(day), 1)  # 日不明は中旬扱い
+
+def bin_index(month, day):
+    return (int(month) - 1) * 3 + _jun_offset(day)
+
+def bin_label(idx):
+    return f"{idx // 3 + 1}月{JUN_LABELS[idx % 3]}"
+
+def compute_peaks(bin_counter, min_count=3, max_peaks=2):
+    """旬(上中下)単位のヒストグラムから見頃を検出。
+    3旬(≈1か月)のローリング窓で点数が min_count 以上集中している中心を、重複を避けて上位 max_peaks 件返す。
+    戻り値: 中心の旬インデックス(0..35)のリスト。基準を満たすものが無ければ空。"""
+    if not bin_counter:
+        return []
+    wins = sorted(((c, sum(bin_counter.get((c + o) % 36, 0) for o in (-1, 0, 1))) for c in range(36)),
+                  key=lambda x: -x[1])
+    peaks, used = [], set()
+    for c, tot in wins:
+        if tot < min_count:
+            break
+        if c in used:
+            continue
+        peaks.append(c)
+        for o in (-1, 0, 1):
+            used.add((c + o) % 36)
+        if len(peaks) >= max_peaks:
+            break
+    return peaks
+
+def peaks_text(peaks):
+    return "・".join(bin_label(c) for c in peaks)
+
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -842,7 +879,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
-def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None):
+def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None):
     """地点名(Place/Area/Title)の自由文検索。
     今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
     返り値: {'status': 'in_season'|'off_season'|'not_found', 'results': [(emoji,label,item),...]}"""
@@ -858,6 +895,8 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     except Exception:
         excl_authors, blocked_areas = set(), []
     in_season, all_time = [], []
+    bin_counter = Counter()  # マッチした公開作品の旬分布(見頃クラスタ算出用)
+    subject_variants = KEYWORD_NORMALIZE.get(subject, [subject]) if subject else None
     try:
         for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict()
@@ -865,6 +904,8 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
             if place_query not in place and place_query not in area and place_query not in title:
+                continue
+            if subject_variants and not any(v in place or v in area or v in title for v in subject_variants):
                 continue
             if d.get('Winner') in excl_authors:
                 continue
@@ -898,7 +939,10 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             }
             all_time.append(item)
             try:
-                if (int(d.get('Month')), junkun(d.get('Day'))) in window:
+                _mo = int(d.get('Month'))
+                if 1 <= _mo <= 12:
+                    bin_counter[bin_index(_mo, d.get('Day'))] += 1
+                if (_mo, junkun(d.get('Day'))) in window:
                     in_season.append(item)
             except Exception:
                 pass
@@ -922,7 +966,8 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             continue
         results.append(('🎯', 'ベストマッチ', p))
         used.add(p['pic'])
-    return {'status': status, 'results': results}
+    peaks = compute_peaks(bin_counter)
+    return {'status': status, 'results': results, 'peaks': peaks}
 
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
@@ -1285,6 +1330,41 @@ def handle_message(event):
             return
 
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
+
+        # 「地域名＋季節被写体」(例: 弘前 桜 / 青森県 紅葉) → その地域・被写体の見頃を答える
+        _subj = None
+        for _canon, _vars in KEYWORD_NORMALIZE.items():
+            if any(v in user_message for v in _vars):
+                _subj = _canon
+                break
+        if _subj in SEASONAL_SUBJECTS:
+            resid = user_message
+            for v in KEYWORD_NORMALIZE.get(_subj, []):
+                resid = resid.replace(v, ' ')
+            resid = re.sub(r'(見頃|みごろ|時期|いつ|頃|ごろ)', ' ', resid)
+            resid = re.sub(r'\d{1,2}月\d{0,2}日?|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', resid)
+            resid = re.sub(r'[?？、,。.・\s　]+', ' ', resid).strip()
+            _parts = [t for t in resid.split() if t not in ('の', 'は', 'を', 'が', 'で', 'と', 'へ', 'も', 'に')]
+            resid = max(_parts, key=len) if _parts else ''
+            resid = re.sub(r'^[のはをがでとへもに]+|[のはをがでとへもに]+$', '', resid).strip()
+            if len(resid) >= 2:
+                _u = USER_LOCATION.get(user_id)
+                _ol = (_u["lat"], _u["lng"]) if _u else None
+                _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
+                pr = search_by_place(resid, base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
+                if pr['status'] != 'not_found':
+                    sresults = pr['results']
+                    speaks = pr.get('peaks', [])
+                    if speaks:
+                        shead = f"「{resid}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
+                    else:
+                        shead = f"「{resid}」の{_subj}の作品をご紹介します。"
+                    sbubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in sresults]
+                    scarousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": sbubbles}, quick_reply=feedback_quick_reply())
+                    line_bot_api.reply_message(reply_token, [TextSendMessage(text=shead), scarousel])
+                    return
+                # 該当作品が無ければ通常フローへフォールスルー
+
         # 地域・キーワードに解決できない具体的な語は「地点名検索」を試みる(無関係な全国結果を出さない)
         place_query = None
         if not area_name and not search_keyword and not city_specified:
@@ -1316,7 +1396,13 @@ def handle_message(event):
             if pr['status'] == 'in_season':
                 head = f"「{place_query}」の今の時期の撮影地はこちらです。"
             else:
-                head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+                cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
+                peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
+                if peaks:
+                    head = (f"「{place_query}」は今の時期（{cur}）の作品が少ないようです。"
+                            f"見頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
+                else:
+                    head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
             greeting = TextSendMessage(text=head)
             bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
             carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
