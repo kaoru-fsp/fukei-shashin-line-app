@@ -455,7 +455,7 @@ def build_greeting(target_date, area_name, date_specified=False):
         return "ようこそ風景写真コンシェルジュの部屋へ。こんなところはいかがでしょう。"
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False, target_city=None):
 
     if not db:
         return []
@@ -506,8 +506,14 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
 
             # 指定都道府県がある場合は同県を優先、足りなければ半径内も追加
             if target_pref:
-                if pref != target_pref and dist > radius:
-                    continue
+                if target_city and base_latlng:
+                    # 市指定時は「指定地点中心」で近隣を判定（東京中心ではない）
+                    base_dist = haversine(base_latlng[0], base_latlng[1], lat, lng)
+                    if pref != target_pref and base_dist > radius:
+                        continue
+                else:
+                    if pref != target_pref and dist > radius:
+                        continue
             else:
                 if dist > radius:
                     continue
@@ -540,6 +546,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'place': d.get('Place', ''),
                 'title': d.get('Title', ''),
                 'winner': d.get('Winner', ''),
+                'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''),
                 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''),
@@ -598,6 +605,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     'place': d.get('Place', '') or '',
                     'title': d.get('Title', ''),
                     'winner': d.get('Winner', ''),
+                    'winner_area': d.get('WinnerArea', ''),
                     'award': d.get('AwardRank', ''),
                     'ascore': calc_award_score(d.get('AwardRank')),
                     'pic': d.get('PicFileName', ''),
@@ -618,6 +626,47 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             if target_pref:
                 return 'TOO_FEW', target_pref, 0
             return []
+
+        # 市町村が明示された場合: 市一致をベストマッチ、それ以外を「◯◯周辺の撮影地」に分けて返す
+        if target_pref and target_city:
+            city_base = re.sub(r'[市区町村郡]', '', target_city).strip()
+            CITY_NEARBY_RADIUS_KM = 75  # 市指定時の「周辺」範囲（指定地点中心）
+            # 指定地点(base_latlng)から作品所在県の重心までの距離
+            def _city_dist(p):
+                pll = PREF_LATLNG.get(p['pref'])
+                if not pll or not base_latlng:
+                    return 99999
+                return haversine(base_latlng[0], base_latlng[1], pll[0], pll[1])
+            sorted_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
+            city_pool = [p for p in sorted_pool if city_base and city_base in p['area']]
+            nearby_pool = sorted(
+                [p for p in sorted_pool
+                 if not (city_base and city_base in p['area']) and _city_dist(p) <= CITY_NEARBY_RADIUS_KM],
+                key=lambda x: (_city_dist(x), -x['ascore'])
+            )
+            used_pics = set()
+            cresults = []
+            # ベストマッチ(市一致): 同一作品のみ除去し、同じ市の作品は複数見せる(撮影地重複を許容)
+            for p in city_pool:
+                if len(cresults) >= 7:
+                    break
+                if p['pic'] in used_pics:
+                    continue
+                cresults.append(('🎯', 'ベストマッチ', p))
+                used_pics.add(p['pic'])
+            city_count = len(cresults)
+            # 周辺候補: 撮影地の重複を避けて補完
+            nearby_label = f"{city_base}周辺の撮影地"
+            used_areas = set()
+            for p in nearby_pool:
+                if len(cresults) >= 7:
+                    break
+                if p['pic'] in used_pics or p['area'] in used_areas:
+                    continue
+                cresults.append(('📍', nearby_label, p))
+                used_pics.add(p['pic'])
+                used_areas.add(p['area'])
+            return ('CITY', city_base, city_count, cresults)
 
         used_pics = set()
         results = []
@@ -690,6 +739,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'place': d.get('Place', '') or '',
                 'title': d.get('Title', ''),
                 'winner': d.get('Winner', ''),
+                'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''),
                 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''),
@@ -763,7 +813,7 @@ def search_by_place(place_query, base_date=None):
                 year = 0
             item = {
                 'dist': dist, 'pref': pref or '', 'area': area, 'place': place,
-                'title': title, 'winner': d.get('Winner', ''),
+                'title': title, 'winner': d.get('Winner', ''), 'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''), 'pub': pub,
                 'url': view_image_url(pub, d.get('PicFileName', '')),
@@ -797,6 +847,17 @@ def search_by_place(place_query, base_date=None):
         results.append(('🎯', 'ベストマッチ', p))
         used.add(p['pic'])
     return {'status': status, 'results': results}
+
+def expand_pref_name(s):
+    """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
+    s = str(s or '').strip()
+    if not s:
+        return ''
+    for full in PREF_LATLNG:
+        short = re.sub(r'[都府県]$', '', full)
+        if s == full or s == short:
+            return full
+    return s
 
 def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     place = item.get('place', '')
@@ -869,7 +930,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
                 },
                 {
                     "type": "text",
-                    "text": f"{item['winner']}  ({item['award'] or '記録'})",
+                    "text": (f"{item['winner']}（{expand_pref_name(item.get('winner_area',''))}）" if item.get('winner_area') else f"{item['winner']}"),
                     "size": "sm",
                     "color": "#666666",
                     "margin": "xs"
@@ -1188,7 +1249,24 @@ def handle_message(event):
                 area_display = "現在地"
         elif area_latlng is None:
             pass  # 位置情報未登録時は何も言わない
-        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword)
+        target_city = area_display if (city_specified or city_from_dict) else None
+        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city)
+        if isinstance(results, tuple) and results[0] == 'CITY':
+            _, city_base, city_count, results = results
+            if not results:
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=f"{target_date.month}月{target_date.day}日の前後で{city_base}とその周辺を調べましたが、該当する作品が見つかりませんでした。\n時期や地域を変えてお試しください。"))
+                return
+            if city_count == 0:
+                head = f"{target_date.month}月{target_date.day}日の前後で{city_base}を調べましたが該当はありませんでした。{city_base}周辺の候補をご紹介します。"
+            elif city_count <= 3:
+                head = f"{target_date.month}月{target_date.day}日の前後で{city_base}で調べたところ該当は{city_count}件でした。周辺の候補も合わせて表示します。"
+            else:
+                head = f"{city_base}の今の時期の撮影地はこちらです。"
+            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
+            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
+            line_bot_api.reply_message(reply_token, [TextSendMessage(text=head), carousel])
+            return
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
             _, found_pref, count = results
             EXPAND_PENDING[user_id] = {
