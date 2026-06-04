@@ -1175,10 +1175,10 @@ def build_info_bubble(text):
             "spacing": "md",
             "paddingAll": "20px",
             "contents": [
-                {"type": "text", "text": "📷 風景写真コンシェルジュ", "size": "xs", "weight": "bold", "color": "#1DB446"},
+                {"type": "text", "text": "📷 風景写真コンシェルジュ", "size": "md", "weight": "bold", "color": "#1DB446"},
                 {"type": "separator", "margin": "md"},
-                {"type": "text", "text": text, "wrap": True, "size": "md", "color": "#333333", "margin": "lg"},
-                {"type": "text", "text": "→ 右にスワイプ", "size": "xs", "color": "#AAAAAA", "margin": "lg", "align": "end"},
+                {"type": "text", "text": text, "wrap": True, "size": "xl", "weight": "bold", "color": "#222222", "margin": "lg"},
+                {"type": "text", "text": "→ 右にスワイプ", "size": "sm", "color": "#AAAAAA", "margin": "lg", "align": "end"},
             ],
         },
     }
@@ -1368,29 +1368,35 @@ def handle_message(event):
             pending = AMBIGUOUS_PENDING[user_id]
             prefs = pending["prefs"]
             city = pending["city"]
+            kw_option = pending.get('kw_option')
+            kw_num = str(len(prefs) + 1)
+            choice = user_message.strip()
             resolved_pref = None
-            if user_message.strip() in ["1", "１"]:
+            if choice in ("1", "１") and prefs:
                 resolved_pref = prefs[0]
-            elif user_message.strip() in ["2", "２"]:
+            elif choice in ("2", "２") and len(prefs) >= 2:
                 resolved_pref = prefs[1]
             else:
                 for p in prefs:
-                    short = p.replace("県","").replace("都","").replace("府","").replace("道","")
+                    short = p.replace("県", "").replace("都", "").replace("府", "").replace("道", "")
                     if p in user_message or short in user_message:
                         resolved_pref = p
                         break
-            kw_option = pending.get('kw_option')
-            kw_num = str(len(prefs)+1)
-            if kw_option and user_message.strip() in [str(len(prefs)+1)]:
+            if kw_option and choice == kw_num:
+                # 被写体候補を選択
                 del AMBIGUOUS_PENDING[user_id]
                 search_keyword = kw_option[0]
                 target_date = parse_target_date(user_message)
                 area_name, area_latlng, area_display = None, None, None
+            elif resolved_pref:
+                # 地域を確定（番号や県名で選択）
                 del AMBIGUOUS_PENDING[user_id]
                 latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
                 target_date = parse_target_date(user_message)
                 area_name, area_latlng, area_display = resolved_pref, latlng, city
             else:
+                # 番号でも県名でもない → 新規クエリとして処理
+                del AMBIGUOUS_PENDING[user_id]
                 target_date = parse_target_date(user_message)
                 area_name, area_latlng, area_display = parse_target_area(user_message)
         else:
@@ -1404,26 +1410,8 @@ def handle_message(event):
                 if any(v in user_message for v in variants):
                     search_keyword = canonical
                     break
-        # 同名地名の問い返し
-        if area_name == "AMBIGUOUS":
-            prefs = CITY_TO_PREF_MULTI.get(area_display, [])
-            # キーワード候補があるか確認
-            keyword_variants = {
-                '朝日': ('朝焼け', '朝日（風景・被写体）'),
-                '桜': ('桜', '桜（花）'),
-            }
-            kw_option = keyword_variants.get(area_display) or keyword_variants.get(re.sub(r'[市区町村郡]', '', area_display).strip())
-            AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs, "kw_option": kw_option}
-            msg = TextSendMessage(
-                text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + (f"\n{len(prefs)+1}．{kw_option[1]}" if kw_option else "") + "\n\n番号でお答えください。"
-            )
-            line_bot_api.reply_message(reply_token, msg)
-            return
-
-        city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
-
-        # 「地域名＋被写体」(例: 弘前 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
-        # 季節被写体(桜・紅葉等)のときは見頃も添える。
+        # 「地域名＋被写体」(例: 吉野山 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
+        # 同名地名の問い返しより前に処理（被写体があれば地名はその語で直接検索でき、問い返し不要）。
         _subj = None
         for _canon, _vars in KEYWORD_NORMALIZE.items():
             if any(v in user_message for v in _vars):
@@ -1460,6 +1448,24 @@ def handle_message(event):
                     reply_with_carousel(reply_token, shead, sresults)
                     return
                 # 該当作品が無ければ通常フローへフォールスルー
+
+        # 同名地名の問い返し
+        if area_name == "AMBIGUOUS":
+            prefs = CITY_TO_PREF_MULTI.get(area_display, [])
+            # キーワード候補があるか確認
+            keyword_variants = {
+                '朝日': ('朝焼け', '朝日（風景・被写体）'),
+                '桜': ('桜', '桜（花）'),
+            }
+            kw_option = keyword_variants.get(area_display) or keyword_variants.get(re.sub(r'[市区町村郡]', '', area_display).strip())
+            AMBIGUOUS_PENDING[user_id] = {"city": area_display, "prefs": prefs, "kw_option": kw_option}
+            msg = TextSendMessage(
+                text=f"{area_display}は複数の地域にあります。\n" + "\n".join(f"{i+1}．{p}{area_display}" for i, p in enumerate(prefs)) + (f"\n{len(prefs)+1}．{kw_option[1]}" if kw_option else "") + "\n\n番号でお答えください。"
+            )
+            line_bot_api.reply_message(reply_token, msg)
+            return
+
+        city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
 
         # 地域・キーワードに解決できない具体的な語は「地点名検索」を試みる(無関係な全国結果を出さない)
         place_query = None
