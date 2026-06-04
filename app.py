@@ -78,6 +78,55 @@ def extract_pref(area):
             return pref
     return None
 
+# ──────────────── 市区町村の座標表（オフライン辞書引き）────────────────
+# 全国の市区町村→緯度経度。実行時のジオコーディング(API)を避け、距離計算を即時化する。
+CITY_LATLNG = {}
+CITY_NAMES_BY_PREF = {}
+try:
+    _cpath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'city_latlng.json')
+    with open(_cpath, encoding='utf-8') as _f:
+        CITY_LATLNG = {k: tuple(v) for k, v in json.load(_f).items()}
+    for _key in CITY_LATLNG:
+        for _p in PREF_LATLNG:
+            if _key.startswith(_p):
+                CITY_NAMES_BY_PREF.setdefault(_p, []).append(_key[len(_p):])
+                break
+    for _p in CITY_NAMES_BY_PREF:
+        CITY_NAMES_BY_PREF[_p].sort(key=len, reverse=True)  # 長い名前優先(さいたま市桜区>さいたま市)
+    print(f"[INFO] city_latlng loaded: {len(CITY_LATLNG)} municipalities", flush=True)
+except Exception as _e:
+    print(f"[WARN] city_latlng.json load failed: {_e}", flush=True)
+
+SHINJUKU = (35.70044, 139.71827)      # デフォルト起点: 東京都新宿区
+DEFAULT_ORIGIN_NAME = "東京都新宿区"
+
+def work_latlng(area, pref=None):
+    """作品のArea文字列から市区町村の座標を返す。見つからなければNone（呼び出し側で県重心にフォールバック）。"""
+    a = str(area or '').strip()
+    if not a:
+        return None
+    if pref is None:
+        pref = extract_pref(a)
+    if not pref:
+        return None
+    rest = (a[len(pref):] if a.startswith(pref) else a).strip()
+    for city in CITY_NAMES_BY_PREF.get(pref, ()):
+        if city and rest.startswith(city):
+            return CITY_LATLNG.get(pref + city)
+    # 救済: 市区町村種別が抜けている表記（例: 草津→草津町／みなかみ→みなかみ町）
+    head = re.split(r'[\s　0-9０-９]', rest)[0] if rest else ''
+    if head:
+        for suf in ('市', '町', '村', '区'):
+            hit = CITY_LATLNG.get(pref + head + suf)
+            if hit:
+                return hit
+    return None
+
+def format_loc_city(address):
+    """LINEの位置情報addressから『県+市区町村』を抽出。失敗時は空文字。"""
+    m = re.search(r'([^\s　0-9〒]+?[都道府県])\s*([^\s　0-9]+?[市区町村])', str(address or ''))
+    return (m.group(1) + m.group(2)) if m else ''
+
 def junkun(day):
     try:
         d = int(day)
@@ -199,21 +248,21 @@ def hydrate_user(user_id):
             if data.get('seen'):
                 USER_SEEN.add(user_id)
             if data.get('lat') is not None and data.get('lng') is not None:
-                USER_LOCATION[user_id] = {"lat": data['lat'], "lng": data['lng']}
+                USER_LOCATION[user_id] = {"lat": data['lat'], "lng": data['lng'], "city": data.get('city', '')}
     except Exception:
         import traceback
         print(f"[ERROR] hydrate_user failed: {traceback.format_exc()}", flush=True)
 
-def save_user_location(user_id, lat, lng):
+def save_user_location(user_id, lat, lng, city=None):
     """位置情報をメモリとFirestoreの両方に保存する。"""
-    USER_LOCATION[user_id] = {"lat": lat, "lng": lng}
+    USER_LOCATION[user_id] = {"lat": lat, "lng": lng, "city": city or ''}
     if not db:
         return
     try:
-        db.collection('Users').document(user_id).set(
-            {"lat": lat, "lng": lng, "updated": firestore.SERVER_TIMESTAMP},
-            merge=True,
-        )
+        payload = {"lat": lat, "lng": lng, "updated": firestore.SERVER_TIMESTAMP}
+        if city:
+            payload["city"] = city
+        db.collection('Users').document(user_id).set(payload, merge=True)
     except Exception:
         import traceback
         print(f"[ERROR] save_user_location failed: {traceback.format_exc()}", flush=True)
@@ -455,7 +504,7 @@ def build_greeting(target_date, area_name, date_specified=False):
         return "ようこそ風景写真コンシェルジュの部屋へ。こんなところはいかがでしょう。"
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False, target_city=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False, target_city=None, origin_latlng=None, origin_name=None):
 
     if not db:
         return []
@@ -466,7 +515,9 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             radius = float('inf')
         # 距離計算の基準点と、表示用の基準地名("◯◯より △△km")
         tokyo = PREF_LATLNG["東京都"]
-        base_name = "東京"
+        # 距離の起点(現在地 or 新宿区)と、表示用の起点名("◯◯より △△km")。検索中心(base_latlng)とは別概念。
+        origin = origin_latlng if origin_latlng else SHINJUKU
+        base_name = origin_name or DEFAULT_ORIGIN_NAME
         excl_authors, blocked_areas = load_exclusions()
         tomorrow = base_date if base_date else date.today() + timedelta(days=1)
         if expand_time:
@@ -502,13 +553,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             if not pref:
                 continue
             lat, lng = PREF_LATLNG[pref]
-            dist = haversine(tokyo[0], tokyo[1], lat, lng)
+            dist = haversine(tokyo[0], tokyo[1], lat, lng)  # 既存の絞り込み用(従来通り)
+            wll = work_latlng(d.get('Area'), pref)
+            wlat, wlng = wll if wll else (lat, lng)          # 表示用座標: 市区町村, なければ県重心
+            disp_dist = haversine(origin[0], origin[1], wlat, wlng)  # 起点→撮影地の実距離
 
             # 指定都道府県がある場合は同県を優先、足りなければ半径内も追加
             if target_pref:
                 if target_city and base_latlng:
-                    # 市指定時は「指定地点中心」で近隣を判定（東京中心ではない）
-                    base_dist = haversine(base_latlng[0], base_latlng[1], lat, lng)
+                    # 市指定時は「指定地点中心」で近隣を判定（撮影地の市座標で精密に）
+                    base_dist = haversine(base_latlng[0], base_latlng[1], wlat, wlng)
                     if pref != target_pref and base_dist > radius:
                         continue
                 else:
@@ -540,7 +594,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     continue
 
             item = {
-                'dist': dist,
+                'dist': disp_dist,
+                'wlatlng': (wlat, wlng),
                 'pref': pref,
                 'area': d.get('Area', ''),
                 'place': d.get('Place', ''),
@@ -599,7 +654,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 if pub and pub.endswith('N'):
                     continue
                 item = {
-                    'dist': dist,
+                    'dist': disp_dist,
+                    'wlatlng': (wlat, wlng),
                     'pref': pref,
                     'area': d.get('Area', ''),
                     'place': d.get('Place', '') or '',
@@ -631,12 +687,14 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         if target_pref and target_city:
             city_base = re.sub(r'[市区町村郡]', '', target_city).strip()
             CITY_NEARBY_RADIUS_KM = 75  # 市指定時の「周辺」範囲（指定地点中心）
-            # 指定地点(base_latlng)から作品所在県の重心までの距離
+            # 指定地点(base_latlng=検索中心)から撮影地の市座標までの距離（なければ県重心）
             def _city_dist(p):
-                pll = PREF_LATLNG.get(p['pref'])
-                if not pll or not base_latlng:
+                if not base_latlng:
                     return 99999
-                return haversine(base_latlng[0], base_latlng[1], pll[0], pll[1])
+                ll = p.get('wlatlng') or PREF_LATLNG.get(p['pref'])
+                if not ll:
+                    return 99999
+                return haversine(base_latlng[0], base_latlng[1], ll[0], ll[1])
             sorted_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
             city_pool = [p for p in sorted_pool if city_base and city_base in p['area']]
             nearby_pool = sorted(
@@ -733,7 +791,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             if pub and pub.endswith('N'):
                 continue
             item = {
-                'dist': 9999,
+                'dist': haversine(origin[0], origin[1],
+                                  *( work_latlng(d.get('Area', '')) or PREF_LATLNG.get(extract_pref(d.get('Area', '')) or '', SHINJUKU) )),
                 'pref': extract_pref(d.get('Area', '')),
                 'area': d.get('Area', ''),
                 'place': d.get('Place', '') or '',
@@ -771,7 +830,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
-def search_by_place(place_query, base_date=None):
+def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None):
     """地点名(Place/Area/Title)の自由文検索。
     今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
     返り値: {'status': 'in_season'|'off_season'|'not_found', 'results': [(emoji,label,item),...]}"""
@@ -780,6 +839,8 @@ def search_by_place(place_query, base_date=None):
     base = base_date if base_date else date.today() + timedelta(days=1)
     window = half_month_window(base)
     tokyo = PREF_LATLNG["東京都"]
+    origin = origin_latlng if origin_latlng else SHINJUKU
+    base_name = origin_name or DEFAULT_ORIGIN_NAME
     try:
         excl_authors, blocked_areas = load_exclusions()
     except Exception:
@@ -803,8 +864,11 @@ def search_by_place(place_query, base_date=None):
             if pub and pub.endswith('N'):
                 continue
             pref = extract_pref(area)
-            if pref and pref in PREF_LATLNG:
-                dist = haversine(tokyo[0], tokyo[1], PREF_LATLNG[pref][0], PREF_LATLNG[pref][1])
+            wll = work_latlng(area, pref)
+            if wll:
+                dist = haversine(origin[0], origin[1], wll[0], wll[1])
+            elif pref and pref in PREF_LATLNG:
+                dist = haversine(origin[0], origin[1], PREF_LATLNG[pref][0], PREF_LATLNG[pref][1])
             else:
                 dist = 0
             try:
@@ -817,7 +881,7 @@ def search_by_place(place_query, base_date=None):
                 'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''), 'pub': pub,
                 'url': view_image_url(pub, d.get('PicFileName', '')),
-                'base_name': '東京', 'maplink': d.get('MapLink', ''),
+                'base_name': base_name, 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
             }
             all_time.append(item)
@@ -1071,11 +1135,13 @@ def handle_location(event):
     user_id = event.source.user_id
     lat = event.message.latitude
     lng = event.message.longitude
+    city = format_loc_city(getattr(event.message, 'address', '') or '')
     hydrate_user(user_id)
-    save_user_location(user_id, lat, lng)
+    save_user_location(user_id, lat, lng, city)
+    where = f"現在地（{city}）" if city else "現在地"
     line_bot_api.reply_message(
         event.reply_token,
-        TextSendMessage(text=f"現在地を登録しました。この場所を起点に撮影地をご提案します。\n撮影したい日程や地域があればお知らせください。")
+        TextSendMessage(text=f"{where}を登録しました。この場所を起点に撮影地をご提案します。\n撮影したい日程や地域があればお知らせください。")
     )
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
@@ -1127,6 +1193,9 @@ def handle_message(event):
             expand_time = choice in ['1', '１', '3', '３']
             expand_area = choice in ['2', '２', '3', '３']
             new_radius = 300 if expand_area else 150
+            _eu = USER_LOCATION.get(user_id)
+            _eo = (_eu["lat"], _eu["lng"]) if _eu else None
+            _en = (_eu.get("city") or "現在地") if _eu else DEFAULT_ORIGIN_NAME
             results = select_three_points(
                 base_date=pending['date'],
                 base_latlng=pending['latlng'],
@@ -1134,6 +1203,8 @@ def handle_message(event):
                 place_name=pending['display'],
                 keyword=pending['keyword'],
                 expand_time=expand_time,
+                origin_latlng=_eo,
+                origin_name=_en,
             )
             if not results or isinstance(results, tuple):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="条件を広げても見つかりませんでした。別の地域やキーワードをお試しください。"))
@@ -1214,8 +1285,17 @@ def handle_message(event):
             residual = residual.strip()
             if len(residual) >= 2:
                 place_query = residual
+        # 距離の起点: 現在地(あれば市区町村名つき) / なければ新宿区。検索中心とは独立。
+        _uloc = USER_LOCATION.get(user_id)
+        if _uloc:
+            origin_latlng = (_uloc["lat"], _uloc["lng"])
+            origin_name = _uloc.get("city") or "現在地"
+        else:
+            origin_latlng = None
+            origin_name = DEFAULT_ORIGIN_NAME
+
         if place_query:
-            pr = search_by_place(place_query, base_date=target_date)
+            pr = search_by_place(place_query, base_date=target_date, origin_latlng=origin_latlng, origin_name=origin_name)
             if pr['status'] == 'not_found':
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text=f"「{place_query}」に合う撮影地は見つかりませんでした。\n地域名(県名・市町村名)や被写体(滝・桜・紅葉・星空など)でもお試しください。"))
@@ -1250,7 +1330,7 @@ def handle_message(event):
         elif area_latlng is None:
             pass  # 位置情報未登録時は何も言わない
         target_city = area_display if (city_specified or city_from_dict) else None
-        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city)
+        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city, origin_latlng=origin_latlng, origin_name=origin_name)
         if isinstance(results, tuple) and results[0] == 'CITY':
             _, city_base, city_count, results = results
             if not results:
