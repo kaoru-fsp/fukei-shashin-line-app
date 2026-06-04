@@ -1164,6 +1164,38 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     return bubble
 
 
+def build_info_bubble(text):
+    """カルーセル先頭に置く説明バブル。テキストがカードと一緒に必ず表示されるようにする。"""
+    return {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "justifyContent": "center",
+            "spacing": "md",
+            "paddingAll": "20px",
+            "contents": [
+                {"type": "text", "text": "📷 風景写真コンシェルジュ", "size": "xs", "weight": "bold", "color": "#1DB446"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": text, "wrap": True, "size": "md", "color": "#333333", "margin": "lg"},
+                {"type": "text", "text": "→ 右にスワイプ", "size": "xs", "color": "#AAAAAA", "margin": "lg", "align": "end"},
+            ],
+        },
+    }
+
+
+def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案"):
+    """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。"""
+    bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw')) for e, l, it in results]
+    if head_text:
+        bubbles = [build_info_bubble(head_text)] + bubbles
+    carousel = FlexSendMessage(
+        alt_text=alt_text,
+        contents={"type": "carousel", "contents": bubbles},
+        quick_reply=feedback_quick_reply(),
+    )
+    line_bot_api.reply_message(reply_token, carousel)
+
 
 def format_published(pub):
     if not pub:
@@ -1328,10 +1360,7 @@ def handle_message(event):
             if not results or isinstance(results, tuple):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="条件を広げても見つかりませんでした。別の地域やキーワードをお試しください。"))
                 return
-            greeting = TextSendMessage(text=f"条件を広げて探しました。こんなところはいかがでしょう。")
-            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
-            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
-            line_bot_api.reply_message(reply_token, [greeting, carousel])
+            reply_with_carousel(reply_token, "条件を広げて探しました。こんなところはいかがでしょう。", results)
             return
 
         # 問い返し待ちの回答処理
@@ -1424,11 +1453,11 @@ def handle_message(event):
                     place_disp = "・".join(place_terms)
                     if _subj in SEASONAL_SUBJECTS and speaks:
                         shead = f"「{place_disp}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
+                    elif pr['status'] == 'off_season':
+                        shead = f"「{place_disp}」の{_subj}は今の時期の作品が見当たらず、これまでの作品をご紹介します。"
                     else:
-                        shead = f"「{place_disp}」の{_subj}の作品をご紹介します。"
-                    sbubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in sresults]
-                    scarousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": sbubbles}, quick_reply=feedback_quick_reply())
-                    line_bot_api.reply_message(reply_token, [TextSendMessage(text=shead), scarousel])
+                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
+                    reply_with_carousel(reply_token, shead, sresults)
                     return
                 # 該当作品が無ければ通常フローへフォールスルー
 
@@ -1470,10 +1499,7 @@ def handle_message(event):
                             f"見頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
                     head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
-            greeting = TextSendMessage(text=head)
-            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
-            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
-            line_bot_api.reply_message(reply_token, [greeting, carousel])
+            reply_with_carousel(reply_token, head, results)
             return
 
 
@@ -1508,9 +1534,7 @@ def handle_message(event):
                 head = f"{target_date.month}月{target_date.day}日の前後で{city_base}で調べたところ該当は{city_count}件でした。周辺の候補も合わせて表示します。"
             else:
                 head = f"{city_base}の今の時期の撮影地はこちらです。"
-            bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
-            carousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": bubbles}, quick_reply=feedback_quick_reply())
-            line_bot_api.reply_message(reply_token, [TextSendMessage(text=head), carousel])
+            reply_with_carousel(reply_token, head, results)
             return
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
             _, found_pref, count = results
@@ -1540,22 +1564,12 @@ def handle_message(event):
             return
 
         _date_specified = any(w in user_message for w in ['明日','明後日','今日','来週','週末','月','日後'])
-        greeting = TextSendMessage(
-            text=build_greeting(target_date, area_display, date_specified=_date_specified)
-        )
-
-        bubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in results]
-
-        carousel = FlexSendMessage(
+        reply_with_carousel(
+            reply_token,
+            build_greeting(target_date, area_display, date_specified=_date_specified),
+            results,
             alt_text="風景写真コンシェルジュ・今日の3選",
-            contents={
-                "type": "carousel",
-                "contents": bubbles
-            },
-            quick_reply=feedback_quick_reply()
         )
-
-        line_bot_api.reply_message(reply_token, [greeting, carousel])
 
 
     except Exception as e:
