@@ -138,6 +138,15 @@ def junkun(day):
         return "中旬"
     return "下旬"
 
+def format_period(month, day):
+    """撮影時期を ［◯月x旬］ 形式で返す。日があれば上/中/下旬に変換、月のみなら旬を省略。"""
+    try:
+        m = int(month)
+    except:
+        return ''
+    jun = junkun(day)  # 上旬/中旬/下旬 or None
+    return f"［{m}月{jun}］" if jun else f"［{m}月］"
+
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -600,6 +609,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'area': d.get('Area', ''),
                 'place': d.get('Place', ''),
                 'title': d.get('Title', ''),
+                'period': format_period(d.get('Month'), d.get('Day')),
                 'winner': d.get('Winner', ''),
                 'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''),
@@ -660,6 +670,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     'area': d.get('Area', ''),
                     'place': d.get('Place', '') or '',
                     'title': d.get('Title', ''),
+                    'period': format_period(d.get('Month'), d.get('Day')),
                     'winner': d.get('Winner', ''),
                     'winner_area': d.get('WinnerArea', ''),
                     'award': d.get('AwardRank', ''),
@@ -797,6 +808,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 'area': d.get('Area', ''),
                 'place': d.get('Place', '') or '',
                 'title': d.get('Title', ''),
+                'period': format_period(d.get('Month'), d.get('Day')),
                 'winner': d.get('Winner', ''),
                 'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''),
@@ -877,7 +889,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                 year = 0
             item = {
                 'dist': dist, 'pref': pref or '', 'area': area, 'place': place,
-                'title': title, 'winner': d.get('Winner', ''), 'winner_area': d.get('WinnerArea', ''),
+                'title': title, 'period': format_period(d.get('Month'), d.get('Day')), 'winner': d.get('Winner', ''), 'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''), 'pub': pub,
                 'url': view_image_url(pub, d.get('PicFileName', '')),
@@ -986,7 +998,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
             ] + location_contents + [
                 {
                     "type": "text",
-                    "text": item['title'],
+                    "text": (f"{item['title']} {item['period']}" if item.get('period') else item['title']),
                     "size": "sm",
                     "margin": "sm",
                     "wrap": True,
