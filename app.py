@@ -246,6 +246,24 @@ def filter_broken_images(results, max_workers=8):
     except Exception:
         return results  # 判定処理自体が失敗したら従来どおり全件表示
 
+def subject_matches(variants, title='', place='', area='', subject_field=''):
+    """被写体語が作品に該当するか判定。
+    Subject/タイトル一致は確実。地名・エリアでは複合地名(瀧谷・滝沢・滝川など)の
+    誤ヒットを避けるため、被写体語の直後がCJK文字でない(=地名の途中でない)場合のみ採用。"""
+    title = str(title or ''); place = str(place or ''); area = str(area or ''); subject_field = str(subject_field or '')
+    for v in variants:
+        if v and (v in subject_field or v in title):
+            return True
+    for fld in (place, area):
+        for v in variants:
+            if not v:
+                continue
+            for m in re.finditer(re.escape(v), fld):
+                nxt = fld[m.end():m.end() + 1]
+                if not nxt or not re.match(r'[ぁ-んァ-ヶ一-龥ー]', nxt):
+                    return True
+    return False
+
 def calc_award_score(award_rank):
     r = str(award_rank or '').strip()
     for k, v in AWARD_SCORE.items():
@@ -672,12 +690,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             matched_kw = None
             if keyword:
                 kw_variants = KEYWORD_NORMALIZE.get(keyword, [keyword])
-                for v in kw_variants:
-                    if v in d.get('Subject','') or v in d.get('Place',''):
-                        matched_kw = v
-                        break
-                if not matched_kw:
+                if not subject_matches(kw_variants, title=d.get('Title', ''), place=d.get('Place', ''),
+                                       area=d.get('Area', ''), subject_field=d.get('Subject', '')):
                     continue
+                _blob = d.get('Subject', '') + d.get('Title', '') + d.get('Place', '') + d.get('Area', '')
+                matched_kw = next((v for v in kw_variants if v in _blob), keyword)
 
             item = {
                 'dist': disp_dist,
@@ -947,7 +964,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             title = d.get('Title', '') or ''
             if not any(t in place or t in area or t in title for t in place_terms):
                 continue
-            if subject_variants and not any(v in place or v in area or v in title for v in subject_variants):
+            if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', '')):
                 continue
             if d.get('Winner') in excl_authors:
                 continue
