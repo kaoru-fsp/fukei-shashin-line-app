@@ -206,6 +206,46 @@ def has_valid_image(pic_filename):
     fn = str(pic_filename or '').strip()
     return fn and fn not in ('なし.jpg', 'default.jpg', 'なし', 'none', '')
 
+# ── 壊れた画像(サーバに実体が無い/エラーページ)の除外 ──
+VERIFY_IMAGES = True          # 問題があれば False で無効化
+_IMG_OK_CACHE = {}            # url -> bool (このプロセス内キャッシュ)
+
+def image_available(url, timeout=2.5):
+    """画像URLが実在し画像として返るかを保守的に判定。判定不能なら True(表示維持)。"""
+    if not url:
+        return False
+    if url in _IMG_OK_CACHE:
+        return _IMG_OK_CACHE[url]
+    ok = True
+    try:
+        import urllib.request, urllib.error
+        req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ct = (r.headers.get('Content-Type') or '').lower()
+            # Content-Typeが分かる場合のみ判定。画像でなければ壊れ扱い。不明なら表示維持。
+            if ct and not ct.startswith('image'):
+                ok = False
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):   # 明確に存在しない場合のみ除外
+            ok = False
+    except Exception:
+        ok = True                  # ネットワーク不調等は表示を維持
+    _IMG_OK_CACHE[url] = ok
+    return ok
+
+def filter_broken_images(results, max_workers=8):
+    """(emoji,label,item) のリストから、画像が壊れている候補を除外して返す。"""
+    if not VERIFY_IMAGES or not results:
+        return results
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        urls = [it.get('url') for _, _, it in results]
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(urls))) as ex:
+            oks = list(ex.map(image_available, urls))
+        return [r for r, ok in zip(results, oks) if ok]
+    except Exception:
+        return results  # 判定処理自体が失敗したら従来どおり全件表示
+
 def calc_award_score(award_rank):
     r = str(award_rank or '').strip()
     for k, v in AWARD_SCORE.items():
@@ -772,7 +812,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 cresults.append(('📍', nearby_label, p))
                 used_pics.add(p['pic'])
                 used_areas.add(p['area'])
-            return ('CITY', city_base, city_count, cresults)
+            return ('CITY', city_base, city_count, filter_broken_images(cresults))
 
         used_pics = set()
         results = []
@@ -869,7 +909,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             others = [(e, l, p) for e, l, p in results if l != 'ベストマッチ']
             results = same_pref + others
 
-        return results
+        return filter_broken_images(results)
 
     except Exception as e:
         import traceback
@@ -897,13 +937,15 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     in_season, all_time = [], []
     bin_counter = Counter()  # マッチした公開作品の旬分布(見頃クラスタ算出用)
     subject_variants = KEYWORD_NORMALIZE.get(subject, [subject]) if subject else None
+    place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
+    place_terms = [t for t in place_terms if t]
     try:
         for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict()
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
-            if place_query not in place and place_query not in area and place_query not in title:
+            if not any(t in place or t in area or t in title for t in place_terms):
                 continue
             if subject_variants and not any(v in place or v in area or v in title for v in subject_variants):
                 continue
@@ -966,6 +1008,9 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             continue
         results.append(('🎯', 'ベストマッチ', p))
         used.add(p['pic'])
+    results = filter_broken_images(results)
+    if not results:
+        return {'status': 'not_found', 'results': []}
     peaks = compute_peaks(bin_counter)
     return {'status': status, 'results': results, 'peaks': peaks}
 
@@ -1331,34 +1376,39 @@ def handle_message(event):
 
         city_specified = any(c in user_message for c in ["市","町","村","区","郡"])
 
-        # 「地域名＋季節被写体」(例: 弘前 桜 / 青森県 紅葉) → その地域・被写体の見頃を答える
+        # 「地域名＋被写体」(例: 弘前 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
+        # 季節被写体(桜・紅葉等)のときは見頃も添える。
         _subj = None
         for _canon, _vars in KEYWORD_NORMALIZE.items():
             if any(v in user_message for v in _vars):
                 _subj = _canon
                 break
-        if _subj in SEASONAL_SUBJECTS:
-            resid = user_message
+        if _subj:
+            txt = user_message
             for v in KEYWORD_NORMALIZE.get(_subj, []):
-                resid = resid.replace(v, ' ')
-            resid = re.sub(r'(見頃|みごろ|時期|いつ|頃|ごろ)', ' ', resid)
-            resid = re.sub(r'\d{1,2}月\d{0,2}日?|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', resid)
-            resid = re.sub(r'[?？、,。.・\s　]+', ' ', resid).strip()
-            _parts = [t for t in resid.split() if t not in ('の', 'は', 'を', 'が', 'で', 'と', 'へ', 'も', 'に')]
-            resid = max(_parts, key=len) if _parts else ''
-            resid = re.sub(r'^[のはをがでとへもに]+|[のはをがでとへもに]+$', '', resid).strip()
-            if len(resid) >= 2:
+                txt = txt.replace(v, ' ')
+            txt = re.sub(r'(見頃|みごろ|時期|いつ|頃|ごろ)', ' ', txt)
+            txt = re.sub(r'\d{1,2}月\d{0,2}日?|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', txt)
+            txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', txt)
+            place_terms = []
+            for tok in txt.split():
+                tok = re.sub(r'^[のはをがでとへもに]+|[のはをがでとへもに]+$', '', tok).strip()
+                if len(tok) >= 2:
+                    place_terms.append(tok)
+            place_terms = list(dict.fromkeys(place_terms))  # 重複除去・順序維持
+            if place_terms:
                 _u = USER_LOCATION.get(user_id)
                 _ol = (_u["lat"], _u["lng"]) if _u else None
                 _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
-                pr = search_by_place(resid, base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
+                pr = search_by_place(place_terms, base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
                 if pr['status'] != 'not_found':
                     sresults = pr['results']
                     speaks = pr.get('peaks', [])
-                    if speaks:
-                        shead = f"「{resid}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
+                    place_disp = "・".join(place_terms)
+                    if _subj in SEASONAL_SUBJECTS and speaks:
+                        shead = f"「{place_disp}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
                     else:
-                        shead = f"「{resid}」の{_subj}の作品をご紹介します。"
+                        shead = f"「{place_disp}」の{_subj}の作品をご紹介します。"
                     sbubbles = [build_carousel_bubble(item, emoji, label, matched_kw=item.get('matched_kw')) for emoji, label, item in sresults]
                     scarousel = FlexSendMessage(alt_text="撮影地のご提案", contents={"type": "carousel", "contents": sbubbles}, quick_reply=feedback_quick_reply())
                     line_bot_api.reply_message(reply_token, [TextSendMessage(text=shead), scarousel])
