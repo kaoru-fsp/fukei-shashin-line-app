@@ -1158,21 +1158,22 @@ def extract_subject(text):
 
 
 def resolve_place(txt):
-    """地名文字列を座標に解決する。自由文(例「東京板橋」「名古屋栄」)に強い geocode を優先し、
-    ダメなときだけ都道府県/市区町村の辞書にフォールバックする。戻り値: (latlng or None, name or None)。"""
+    """地名文字列を座標に解決。自由文に強い geocode を優先し、ダメなら都道府県/市区町村辞書。
+    戻り値: (latlng or None, name or None, confident)。confident は geocode で確定できた場合 True
+    (辞書フォールバックは「東京板橋→東京都」のような部分一致があり得るため低信頼=False)。"""
     txt = (txt or '').strip()
     if len(txt) < 2:
-        return None, None
+        return None, None, False
     try:
         g = geocode(txt)
     except Exception:
         g = None
     if g:
-        return g, txt
+        return g, txt, True
     an, al, ad = parse_target_area(txt)
     if al and an not in (None, "AMBIGUOUS"):
-        return al, (ad or txt)
-    return None, None
+        return al, (ad or txt), False
+    return None, None, False
 
 
 def expand_pref_name(s):
@@ -1620,19 +1621,23 @@ def handle_message(event):
                 if _u:
                     center, center_nm = _ccenter, _cname
             elif len(start_txt) >= 2:
-                center, center_nm = resolve_place(start_txt)
+                center, center_nm, _ = resolve_place(start_txt)
             if start_is_current:
                 route_intent = (dest_txt != '' or radius is not None or '現在地' in pre)
             else:
                 route_intent = (dest_txt != '' or radius is not None)  # 地名起点は目的地か半径が必須
             if center is not None and route_intent:
                 dest_ll = dest_nm = None
+                dest_note = ""
                 if len(dest_txt) >= 2:
-                    dest_ll, dest_nm = resolve_place(dest_txt)
-                    if dest_ll is None:
-                        line_bot_api.reply_message(reply_token, TextSendMessage(
-                            text=f"目的地「{dest_txt}」の場所が特定できませんでした。市区町村名や地名でお試しください（例：現在地R板橋区）。"))
-                        return
+                    _dll, _dnm, _dconf = resolve_place(dest_txt)
+                    if _dll is not None and _dconf:
+                        dest_ll, dest_nm = _dll, _dnm
+                    else:  # 目的地を確定できない → 自宅/新宿で代替し、その旨を伝える
+                        _hu = USER_HOME.get(user_id)
+                        dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
+                        dest_nm = (_hu.get("name") if _hu else None) or "新宿区"
+                        dest_note = f"「{dest_txt}」は確認できませんでしたので、{dest_nm}を目的地としてお探しします。\n"
                 if dest_ll is None:  # 目的地指定なし → 登録した自宅 or 東京
                     _hu = USER_HOME.get(user_id)
                     dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
@@ -1646,10 +1651,10 @@ def handle_message(event):
                                      subject=_cs, center_latlng=center, radius_km=radius, home_latlng=dest_ll)
                 if rr['status'] == 'not_found' or not rr['results']:
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=f"{center_nm}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}の作品が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
+                        text=dest_note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}の作品が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
                     return
                 subj_txt = (_cs + "の") if _cs else ""
-                reply_with_carousel(reply_token, f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
+                reply_with_carousel(reply_token, dest_note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
                 return
             elif start_is_current and not _u and (dest_txt != '' or '現在地' in pre):
                 line_bot_api.reply_message(reply_token, TextSendMessage(
@@ -1667,7 +1672,7 @@ def handle_message(event):
             place_txt = re.sub(r'現在地', ' ', place_txt).strip()
             center = center_name = None
             if len(place_txt) >= 2:
-                center, center_name = resolve_place(place_txt)
+                center, center_name, _ = resolve_place(place_txt)
             if center is None and not place_txt and _cs and radius <= 999:
                 center, center_name = _ccenter, _cname  # 地名なし＋被写体 → 現在地中心(年号誤認回避のため999km以下)
             if center is not None:  # 地名が解決できたときだけコマンドとして処理
