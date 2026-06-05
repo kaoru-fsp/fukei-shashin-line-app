@@ -168,14 +168,18 @@ def compute_peaks(bin_counter, min_count=3, max_peaks=2):
         return []
     wins = sorted(((c, sum(bin_counter.get((c + o) % 36, 0) for o in (-1, 0, 1))) for c in range(36)),
                   key=lambda x: -x[1])
-    peaks, used = [], set()
+    peaks, used, first_tot = [], set(), None
     for c, tot in wins:
         if tot < min_count:
             break
+        if first_tot is not None and tot < first_tot * 0.34:
+            break  # 一番手に比べて弱いピークは見頃と見なさない(冬桜など少数の別季節を除外)
         if c in used:
             continue
+        if first_tot is None:
+            first_tot = tot
         peaks.append(c)
-        for o in (-1, 0, 1):
+        for o in range(-4, 5):   # 採用したピークの前後約1.3か月を除外(隣接旬の重複・尾引きを防ぐ)
             used.add((c + o) % 36)
         if len(peaks) >= max_peaks:
             break
@@ -329,6 +333,7 @@ CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
 AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
+SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_SEEN = set()  # 初回メッセージ済みuser_id
 
@@ -962,7 +967,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
-            if not any(t in place or t in area or t in title for t in place_terms):
+            if place_terms and not any(t in place or t in area or t in title for t in place_terms):
                 continue
             if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', '')):
                 continue
@@ -1332,6 +1337,43 @@ def handle_message(event):
             line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
             line_bot_api.push_message(user_id, [TSM(text=t) for t in usage_guide_messages()])
 
+        # 地域＋被写体が0件だったときの選択（1.条件を広げる 2.全国 3.戻る）
+        if user_id in SUBJECT_PENDING:
+            sp = SUBJECT_PENDING[user_id]
+            ch = user_message.strip()
+            if ch in ("1", "１"):
+                del SUBJECT_PENDING[user_id]
+                res = select_three_points(
+                    base_date=sp['date'], base_latlng=sp['place_latlng'], radius=300,
+                    keyword=sp['subject'], expand_time=True,
+                    origin_latlng=sp['origin_latlng'], origin_name=sp['origin_name'],
+                )
+                if (not res) or isinstance(res, tuple):
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"「{sp['place_disp']}」の周辺・前後の時期を広げても{sp['subject']}の作品が見つかりませんでした。全国で探す場合はもう一度「{sp['place_disp']} {sp['subject']}」と送って2をお選びください。"))
+                    return
+                reply_with_carousel(reply_token, f"「{sp['place_disp']}」の周辺で{sp['subject']}の作品を、時期と距離を広げて探しました。", res)
+                return
+            elif ch in ("2", "２"):
+                del SUBJECT_PENDING[user_id]
+                prn = search_by_place([], base_date=sp['date'], origin_latlng=sp['origin_latlng'], origin_name=sp['origin_name'], subject=sp['subject'])
+                if prn['status'] == 'not_found':
+                    line_bot_api.reply_message(reply_token, TextSendMessage(text=f"全国でも{sp['subject']}の作品が見つかりませんでした。"))
+                    return
+                speaks = prn.get('peaks', [])
+                if sp['subject'] in SEASONAL_SUBJECTS and speaks:
+                    head = f"全国の{sp['subject']}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
+                else:
+                    head = f"全国の{sp['subject']}の作品をご紹介します。"
+                reply_with_carousel(reply_token, head, prn['results'])
+                return
+            elif ch in ("3", "３", "戻る", "もどる"):
+                del SUBJECT_PENDING[user_id]
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="承知しました。地域名や被写体（例：弘前 桜）をお知らせください。"))
+                return
+            else:
+                del SUBJECT_PENDING[user_id]  # 番号以外は新規クエリとして続行
+
         # 検索拡張の回答処理
         if user_id in EXPAND_PENDING:
             pending = EXPAND_PENDING[user_id]
@@ -1430,24 +1472,44 @@ def handle_message(event):
                 if len(tok) >= 2:
                     place_terms.append(tok)
             place_terms = list(dict.fromkeys(place_terms))  # 重複除去・順序維持
+            _u = USER_LOCATION.get(user_id)
+            _ol = (_u["lat"], _u["lng"]) if _u else None
+            _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
+            place_disp = "・".join(place_terms)
+            # ① 地域＋被写体
             if place_terms:
-                _u = USER_LOCATION.get(user_id)
-                _ol = (_u["lat"], _u["lng"]) if _u else None
-                _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
                 pr = search_by_place(place_terms, base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
                 if pr['status'] != 'not_found':
-                    sresults = pr['results']
                     speaks = pr.get('peaks', [])
-                    place_disp = "・".join(place_terms)
                     if _subj in SEASONAL_SUBJECTS and speaks:
                         shead = f"「{place_disp}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
                     elif pr['status'] == 'off_season':
                         shead = f"「{place_disp}」の{_subj}は今の時期の作品が見当たらず、これまでの作品をご紹介します。"
                     else:
                         shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
-                    reply_with_carousel(reply_token, shead, sresults)
+                    reply_with_carousel(reply_token, shead, pr['results'])
                     return
-                # 該当作品が無ければ通常フローへフォールスルー
+                # 0件 → 「見つかりませんでした」と伝えたうえで選択肢を提示
+                SUBJECT_PENDING[user_id] = {
+                    'subject': _subj, 'place_disp': place_disp,
+                    'place_latlng': area_latlng or geocode(place_terms[0]),
+                    'date': target_date, 'origin_latlng': _ol, 'origin_name': _on,
+                }
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=(f"「{place_disp}」では{_subj}の作品が見つかりませんでした。\nどうしますか？\n"
+                          f"1. 条件を広げて探す（期間と距離）\n2. 全国で探す\n3. 戻る")))
+                return
+            # 地名なしの被写体のみ → 全国を直接
+            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
+            if prn['status'] != 'not_found':
+                speaks = prn.get('peaks', [])
+                if _subj in SEASONAL_SUBJECTS and speaks:
+                    shead = f"{_subj}の見頃は{peaks_text(speaks)}ごろ。全国の{_subj}の作品をご紹介します。"
+                else:
+                    shead = f"全国の{_subj}の作品をご紹介します。"
+                reply_with_carousel(reply_token, shead, prn['results'])
+                return
+            # 被写体でも全く該当が無ければ通常フローへフォールスルー
 
         # 同名地名の問い返し
         if area_name == "AMBIGUOUS":
