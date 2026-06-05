@@ -1587,6 +1587,50 @@ def handle_message(event):
             reply_with_carousel(reply_token, f"{_cname}から{home_nm}方向（帰路）・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
             return
 
+        # 「[被写体]<地名><半径>」(例: 美瑛150 / 弘前 桜 100 / 美瑛 ひまわり 150)
+        #  → その地名を中心に半径内の「今の時期に撮れる」撮影地を近い順に。地名が解決できる場合のみ発動。
+        m_pl = re.match(r'^\s*(.+?)\s*(\d{2,4})\s*(?:km|キロ\S*)?\s*$', user_message)
+        if m_pl:
+            body, radius = m_pl.group(1), max(10, min(int(m_pl.group(2)), 2000))
+            _cs = None
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                if any(v in body for v in variants):
+                    _cs = canon
+                    for v in variants:
+                        body = body.replace(v, ' ')
+                    break
+            place_txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', body)
+            place_txt = re.sub(r'現在地', ' ', place_txt).strip()
+            center = center_name = None
+            if len(place_txt) >= 2:
+                _an, _all, _ad = parse_target_area(place_txt)
+                if _all and _an not in (None, "AMBIGUOUS"):
+                    center, center_name = _all, (_ad or place_txt)
+                else:
+                    g = geocode(place_txt)
+                    if g:
+                        center, center_name = g, place_txt
+            if center is None and not place_txt and _cs and radius <= 999:
+                center, center_name = _ccenter, _cname  # 地名なし＋被写体 → 現在地中心(年号誤認回避のため999km以下)
+            if center is not None:  # 地名が解決できたときだけコマンドとして処理
+                rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
+                                     subject=_cs, center_latlng=center, radius_km=radius)
+                if rr['status'] == 'not_found' or not rr['results']:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"{center_name}から半径{radius}km圏内に{(_cs or '撮影地')}が見つかりませんでした。半径を広げてお試しください。"))
+                    return
+                subj_txt = (_cs + "の") if _cs else ""
+                speaks = rr.get('peaks', [])
+                if rr['status'] == 'in_season':
+                    head = f"{center_name}から半径{radius}km圏内で、今の時期に撮れる{subj_txt}撮影地を近い順にご紹介します。"
+                elif _cs in SEASONAL_SUBJECTS and speaks:
+                    head = f"{center_name}から半径{radius}km圏内は、今の時期の{subj_txt}作品が少なめです（{_cs}の見頃は{peaks_text(speaks)}ごろ）。これまでの作品を近い順にご紹介します。"
+                else:
+                    head = f"{center_name}から半径{radius}km圏内は、今の時期の作品が少なめでした。これまでの{subj_txt}作品を近い順にご紹介します。"
+                reply_with_carousel(reply_token, head, rr['results'])
+                return
+            # 地名が解決できなければ通常処理へフォールスルー
+
         # 問い返し待ちの回答処理
         if user_id in AMBIGUOUS_PENDING:
             pending = AMBIGUOUS_PENDING[user_id]
