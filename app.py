@@ -1134,6 +1134,29 @@ def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
     return out
 
 
+def extract_subject(text):
+    """テキストから被写体を取り出す。「S<被写体>」明示指定を優先(Sの直後〜末尾を被写体、Sの前を残り)。
+    辞書に無い被写体もそのまま採用。S指定が無ければ辞書で自動判定。
+    戻り値: (subject_or_None, remaining_text)。"""
+    t = text or ''
+    m = re.search(r'[SsＳｓ]', t)
+    if m:
+        after = t[m.end():].strip()
+        before = t[:m.start()]
+        if after:
+            cs = after
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                if after == canon or after in variants:
+                    cs = canon
+                    break
+            return cs, before
+    for canon, variants in KEYWORD_NORMALIZE.items():
+        for v in variants:
+            if v in t:
+                return canon, t.replace(v, ' ', 1)
+    return None, t
+
+
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
     s = str(s or '').strip()
@@ -1512,11 +1535,7 @@ def handle_message(event):
         m_now = re.match(r'^\s*(.+?)\s*現在地\s*(\d+)\s*(?:km|キロ\S*)?\s*$', user_message)
         if m_now:
             subj_txt, radius = m_now.group(1), max(5, min(int(m_now.group(2)), 2000))
-            _cs = None
-            for canon, variants in KEYWORD_NORMALIZE.items():
-                if any(v in subj_txt for v in variants):
-                    _cs = canon
-                    break
+            _cs, _ = extract_subject(subj_txt)
             if _cs:
                 rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
                                      subject=_cs, center_latlng=_ccenter, radius_km=radius)
@@ -1562,44 +1581,39 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地R150』のように送ると、現在地から{hname}方向（帰路）で半径150km圏内の撮影地を寄り道の少ない順にご案内します。"))
             return
 
-        # 帰路コマンド: 「[被写体]現在地R[半径][目的地]」
-        #   例: 現在地R150 / 現在地R名古屋栄 / 現在地r100名古屋栄 / アジサイR岡山
-        #   現在地から「目的地(無指定なら登録した自宅、無ければ東京)」へ向かう途中を、寄り道の少ない順に。
-        #   半径を省くと現在地→目的地の距離を半径にする。前置きは「現在地」+被写体のみ許容。
+        # 帰路/ルートコマンド: 「[起点]S[被写体]R[半径][目的地]」
+        #   例: 現在地R名古屋栄 / R150 / アジサイR岡山 / 茅野S渓流R名古屋栄 / 美瑛S桜R札幌150
+        #   起点(無指定なら現在地)から「目的地(無指定なら登録した自宅、無ければ東京)」へ向かう途中を寄り道の少ない順に。
+        #   半径を省くと起点→目的地の距離を半径にする。起点は「現在地」または地名。
         m_route = re.match(r'^\s*(.*?)[RＲｒr](.*)$', user_message)
         if m_route:
             pre, after = m_route.group(1), m_route.group(2)
-            # 前置きから被写体を取得。「S<被写体>」で明示指定も可(辞書に無い被写体もOK)。無ければ自動判定。
-            pre2 = re.sub(r'現在地', '', pre).strip()
-            ms = re.match(r'^[SsＳｓ]\s*(.+?)\s*$', pre2)
-            if ms:
-                subj_raw = ms.group(1).strip()
-                _cs = subj_raw
-                for canon, variants in KEYWORD_NORMALIZE.items():
-                    if subj_raw == canon or subj_raw in variants:
-                        _cs = canon
-                        break
-                pre_rest = ''
-            else:
-                _cs, pre_rest = None, pre2
-                for canon, variants in KEYWORD_NORMALIZE.items():
-                    if any(v in pre2 for v in variants):
-                        _cs = canon
-                        for v in variants:
-                            pre_rest = pre_rest.replace(v, '')
-                        break
-                pre_rest = re.sub(r'[\s　]+', '', pre_rest)
+            _cs, _rem = extract_subject(pre)
+            start_txt = re.sub(r'現在地|[\s　]+', '', _rem)
             num_m = re.search(r'(\d{1,4})', after)
             radius = int(num_m.group(1)) if num_m else None
             dest_txt = (after[:num_m.start()] + after[num_m.end():]) if num_m else after
             dest_txt = re.sub(r'(?:km|キロ\S*)', '', dest_txt)
             dest_txt = re.sub(r'[、,。.・/／｜|\s　]+', '', dest_txt).strip()
-            # コマンドと判定する条件: 前置きが「現在地/被写体」だけ、かつ 半径か目的地か"現在地"がある
-            if pre_rest == '' and (radius is not None or dest_txt != '' or '現在地' in pre):
-                if not _u:
-                    line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送ってから『現在地R名古屋栄』のようにお試しください。"))
-                    return
+            # 起点(center)を決める: 空なら現在地、地名なら解決
+            center = center_nm = None
+            start_is_current = (start_txt == '')
+            if start_is_current:
+                if _u:
+                    center, center_nm = _ccenter, _cname
+            elif len(start_txt) >= 2:
+                _an, _al, _ad = parse_target_area(start_txt)
+                if _al and _an not in (None, "AMBIGUOUS"):
+                    center, center_nm = _al, (_ad or start_txt)
+                else:
+                    g = geocode(start_txt)
+                    if g:
+                        center, center_nm = g, start_txt
+            if start_is_current:
+                route_intent = (dest_txt != '' or radius is not None or '現在地' in pre)
+            else:
+                route_intent = (dest_txt != '' or radius is not None)  # 地名起点は目的地か半径が必須
+            if center is not None and route_intent:
                 dest_ll = dest_nm = None
                 if len(dest_txt) >= 2:
                     _an, _al, _ad = parse_target_area(dest_txt)
@@ -1617,19 +1631,23 @@ def handle_message(event):
                     _hu = USER_HOME.get(user_id)
                     dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
                     dest_nm = (_hu.get("name") if _hu else None) or "東京（自宅未登録）"
-                if radius is None:   # 半径未指定 → 現在地→目的地の距離(やや余裕)を半径に
-                    d = haversine(_ccenter[0], _ccenter[1], dest_ll[0], dest_ll[1])
+                if radius is None:   # 半径未指定 → 起点→目的地の距離(やや余裕)を半径に
+                    d = haversine(center[0], center[1], dest_ll[0], dest_ll[1])
                     radius = int(max(30, min(d * 1.15, 2000)))
                 else:
                     radius = max(5, min(radius, 2000))
                 rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
-                                     subject=_cs, center_latlng=_ccenter, radius_km=radius, home_latlng=dest_ll)
+                                     subject=_cs, center_latlng=center, radius_km=radius, home_latlng=dest_ll)
                 if rr['status'] == 'not_found' or not rr['results']:
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=f"{_cname}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
+                        text=f"{center_nm}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}の作品が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
                     return
                 subj_txt = (_cs + "の") if _cs else ""
-                reply_with_carousel(reply_token, f"{_cname}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
+                reply_with_carousel(reply_token, f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
+                return
+            elif start_is_current and not _u and (dest_txt != '' or '現在地' in pre):
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送るか、起点の地名を付けて『茅野R名古屋栄』のようにお試しください。"))
                 return
             # コマンドでなければ通常処理へフォールスルー
 
@@ -1638,13 +1656,7 @@ def handle_message(event):
         m_pl = re.match(r'^\s*(.+?)\s*(\d{2,4})\s*(?:km|キロ\S*)?\s*$', user_message)
         if m_pl:
             body, radius = m_pl.group(1), max(10, min(int(m_pl.group(2)), 2000))
-            _cs = None
-            for canon, variants in KEYWORD_NORMALIZE.items():
-                if any(v in body for v in variants):
-                    _cs = canon
-                    for v in variants:
-                        body = body.replace(v, ' ')
-                    break
+            _cs, body = extract_subject(body)
             place_txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', body)
             place_txt = re.sub(r'現在地', ' ', place_txt).strip()
             center = center_name = None
