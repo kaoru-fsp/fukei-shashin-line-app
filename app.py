@@ -1157,6 +1157,24 @@ def extract_subject(text):
     return None, t
 
 
+def resolve_place(txt):
+    """地名文字列を座標に解決する。自由文(例「東京板橋」「名古屋栄」)に強い geocode を優先し、
+    ダメなときだけ都道府県/市区町村の辞書にフォールバックする。戻り値: (latlng or None, name or None)。"""
+    txt = (txt or '').strip()
+    if len(txt) < 2:
+        return None, None
+    try:
+        g = geocode(txt)
+    except Exception:
+        g = None
+    if g:
+        return g, txt
+    an, al, ad = parse_target_area(txt)
+    if al and an not in (None, "AMBIGUOUS"):
+        return al, (ad or txt)
+    return None, None
+
+
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
     s = str(s or '').strip()
@@ -1602,13 +1620,7 @@ def handle_message(event):
                 if _u:
                     center, center_nm = _ccenter, _cname
             elif len(start_txt) >= 2:
-                _an, _al, _ad = parse_target_area(start_txt)
-                if _al and _an not in (None, "AMBIGUOUS"):
-                    center, center_nm = _al, (_ad or start_txt)
-                else:
-                    g = geocode(start_txt)
-                    if g:
-                        center, center_nm = g, start_txt
+                center, center_nm = resolve_place(start_txt)
             if start_is_current:
                 route_intent = (dest_txt != '' or radius is not None or '現在地' in pre)
             else:
@@ -1616,16 +1628,10 @@ def handle_message(event):
             if center is not None and route_intent:
                 dest_ll = dest_nm = None
                 if len(dest_txt) >= 2:
-                    _an, _al, _ad = parse_target_area(dest_txt)
-                    if _al and _an not in (None, "AMBIGUOUS"):
-                        dest_ll, dest_nm = _al, (_ad or dest_txt)
-                    else:
-                        g = geocode(dest_txt)
-                        if g:
-                            dest_ll, dest_nm = g, dest_txt
+                    dest_ll, dest_nm = resolve_place(dest_txt)
                     if dest_ll is None:
                         line_bot_api.reply_message(reply_token, TextSendMessage(
-                            text=f"目的地「{dest_txt}」の場所が特定できませんでした。市区町村名や地名でお試しください（例：現在地R名古屋市）。"))
+                            text=f"目的地「{dest_txt}」の場所が特定できませんでした。市区町村名や地名でお試しください（例：現在地R板橋区）。"))
                         return
                 if dest_ll is None:  # 目的地指定なし → 登録した自宅 or 東京
                     _hu = USER_HOME.get(user_id)
@@ -1661,13 +1667,7 @@ def handle_message(event):
             place_txt = re.sub(r'現在地', ' ', place_txt).strip()
             center = center_name = None
             if len(place_txt) >= 2:
-                _an, _all, _ad = parse_target_area(place_txt)
-                if _all and _an not in (None, "AMBIGUOUS"):
-                    center, center_name = _all, (_ad or place_txt)
-                else:
-                    g = geocode(place_txt)
-                    if g:
-                        center, center_name = g, place_txt
+                center, center_name = resolve_place(place_txt)
             if center is None and not place_txt and _cs and radius <= 999:
                 center, center_name = _ccenter, _cname  # 地名なし＋被写体 → 現在地中心(年号誤認回避のため999km以下)
             if center is not None:  # 地名が解決できたときだけコマンドとして処理
