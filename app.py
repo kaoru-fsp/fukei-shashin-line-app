@@ -169,6 +169,10 @@ def format_period(month, day):
 JUN_LABELS = ['上旬', '中旬', '下旬']
 # 「見頃」という表現が自然な季節被写体（花・季節現象）
 SEASONAL_SUBJECTS = {'桜', '紅葉', '雪', 'ひまわり', 'コスモス', 'ススキ', '紫陽花', '菜の花', '芝桜', '藤', 'ラベンダー'}
+# 撮影意図を表すだけで、被写体でも地名でもない語（検索ワードから除く。長い語を先に並べる）
+FILLER_WORDS = ['撮影地', '撮影', '写真', 'スポット', '撮れる', '撮りたい', '撮る', '行きたい', '行ける',
+                '探して', '探す', '教えて', 'おすすめ', 'オススメ', '名所', '風景', '景色', 'ください',
+                'どこ', '場所']
 
 def _jun_offset(day):
     return {'上旬': 0, '中旬': 1, '下旬': 2}.get(junkun(day), 1)  # 日不明は中旬扱い
@@ -1930,6 +1934,8 @@ def handle_message(event):
                 txt = txt.replace(v, ' ')
             txt = re.sub(r'(見頃|みごろ|時期|いつ|頃|ごろ)', ' ', txt)
             txt = re.sub(r'\d{1,2}月\d{0,2}日?|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', txt)
+            for _fw in FILLER_WORDS:
+                txt = txt.replace(_fw, ' ')
             txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', txt)
             place_terms = []
             for tok in txt.split():
@@ -2014,7 +2020,9 @@ def handle_message(event):
             residual = re.sub(r'\d+日後', '', residual)
             residual = re.sub(r'\d{1,2}月\d{1,2}日', '', residual)
             residual = re.sub(r'\d{1,2}月', '', residual)
-            residual = residual.strip()
+            for w in FILLER_WORDS:
+                residual = residual.replace(w, '')
+            residual = re.sub(r'[、,。.・/／｜|\s　]+', '', residual).strip()
             if len(residual) >= 2:
                 place_query = residual
         # 距離の起点: 現在地(あれば市区町村名つき) / なければ新宿区。検索中心とは独立。
