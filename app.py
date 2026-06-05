@@ -1245,7 +1245,7 @@ def ask_ward(reply_token, user_id, ward_name, cands, mode, center, center_nm,
         for i, (full, _) in enumerate(cands)])
     body = "\n".join(f"{i+1}．{full}" for i, (full, _) in enumerate(cands))
     line_bot_api.reply_message(reply_token, TextSendMessage(
-        text=(f"「{ward_name}」は各地にあります。下のボタンか番号でお選びください。\n{body}\n\n"
+        text=(f"「{ward_name}」は各地にあります。番号でお選びください（例：2）。\n{body}\n\n"
               f"これ以外は『大阪市{ward_name}』のように市名を付けて送ってください。"),
         quick_reply=qr))
 
@@ -1656,7 +1656,7 @@ def handle_message(event):
                 finish_ward_choice(reply_token, user_id, full, ll)
                 return
             line_bot_api.reply_message(reply_token, TextSendMessage(
-                text="番号（例：1）か、下のボタンでお選びください。やめる場合は『戻る』。"))
+                text="番号（例：2）でお選びください。やめる場合は『戻る』。"))
             return
 
         # 検索拡張の回答処理
