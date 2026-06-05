@@ -1562,30 +1562,76 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地R150』のように送ると、現在地から{hname}方向（帰路）で半径150km圏内の撮影地を寄り道の少ない順にご案内します。"))
             return
 
-        # 「[被写体]R<半径>」(例: 現在地R150 / アジサイR150) → 現在地から自宅方向(帰路)で半径内を検索
-        m_route = re.match(r'^\s*(.*?)[RＲｒr]\s*(\d+)\s*(?:km|キロ\S*)?\s*$', user_message)
-        if m_route and ('R' in user_message.upper().replace('Ｒ', 'R')):
-            pre, radius = m_route.group(1), max(5, min(int(m_route.group(2)), 2000))
-            if not _u:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="現在地が分からないため帰路方向を計算できません。先にLINEの位置情報を送ってから『現在地R150』とお試しください。"))
+        # 帰路コマンド: 「[被写体]現在地R[半径][目的地]」
+        #   例: 現在地R150 / 現在地R名古屋栄 / 現在地r100名古屋栄 / アジサイR岡山
+        #   現在地から「目的地(無指定なら登録した自宅、無ければ東京)」へ向かう途中を、寄り道の少ない順に。
+        #   半径を省くと現在地→目的地の距離を半径にする。前置きは「現在地」+被写体のみ許容。
+        m_route = re.match(r'^\s*(.*?)[RＲｒr](.*)$', user_message)
+        if m_route:
+            pre, after = m_route.group(1), m_route.group(2)
+            # 前置きから被写体を取得。「S<被写体>」で明示指定も可(辞書に無い被写体もOK)。無ければ自動判定。
+            pre2 = re.sub(r'現在地', '', pre).strip()
+            ms = re.match(r'^[SsＳｓ]\s*(.+?)\s*$', pre2)
+            if ms:
+                subj_raw = ms.group(1).strip()
+                _cs = subj_raw
+                for canon, variants in KEYWORD_NORMALIZE.items():
+                    if subj_raw == canon or subj_raw in variants:
+                        _cs = canon
+                        break
+                pre_rest = ''
+            else:
+                _cs, pre_rest = None, pre2
+                for canon, variants in KEYWORD_NORMALIZE.items():
+                    if any(v in pre2 for v in variants):
+                        _cs = canon
+                        for v in variants:
+                            pre_rest = pre_rest.replace(v, '')
+                        break
+                pre_rest = re.sub(r'[\s　]+', '', pre_rest)
+            num_m = re.search(r'(\d{1,4})', after)
+            radius = int(num_m.group(1)) if num_m else None
+            dest_txt = (after[:num_m.start()] + after[num_m.end():]) if num_m else after
+            dest_txt = re.sub(r'(?:km|キロ\S*)', '', dest_txt)
+            dest_txt = re.sub(r'[、,。.・/／｜|\s　]+', '', dest_txt).strip()
+            # コマンドと判定する条件: 前置きが「現在地/被写体」だけ、かつ 半径か目的地か"現在地"がある
+            if pre_rest == '' and (radius is not None or dest_txt != '' or '現在地' in pre):
+                if not _u:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送ってから『現在地R名古屋栄』のようにお試しください。"))
+                    return
+                dest_ll = dest_nm = None
+                if len(dest_txt) >= 2:
+                    _an, _al, _ad = parse_target_area(dest_txt)
+                    if _al and _an not in (None, "AMBIGUOUS"):
+                        dest_ll, dest_nm = _al, (_ad or dest_txt)
+                    else:
+                        g = geocode(dest_txt)
+                        if g:
+                            dest_ll, dest_nm = g, dest_txt
+                    if dest_ll is None:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text=f"目的地「{dest_txt}」の場所が特定できませんでした。市区町村名や地名でお試しください（例：現在地R名古屋市）。"))
+                        return
+                if dest_ll is None:  # 目的地指定なし → 登録した自宅 or 東京
+                    _hu = USER_HOME.get(user_id)
+                    dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
+                    dest_nm = (_hu.get("name") if _hu else None) or "東京（自宅未登録）"
+                if radius is None:   # 半径未指定 → 現在地→目的地の距離(やや余裕)を半径に
+                    d = haversine(_ccenter[0], _ccenter[1], dest_ll[0], dest_ll[1])
+                    radius = int(max(30, min(d * 1.15, 2000)))
+                else:
+                    radius = max(5, min(radius, 2000))
+                rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
+                                     subject=_cs, center_latlng=_ccenter, radius_km=radius, home_latlng=dest_ll)
+                if rr['status'] == 'not_found' or not rr['results']:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"{_cname}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
+                    return
+                subj_txt = (_cs + "の") if _cs else ""
+                reply_with_carousel(reply_token, f"{_cname}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
                 return
-            _cs = None
-            for canon, variants in KEYWORD_NORMALIZE.items():
-                if any(v in pre for v in variants):
-                    _cs = canon
-                    break
-            _hu = USER_HOME.get(user_id)
-            home_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
-            home_nm = (_hu.get("name") if _hu else None) or "東京（自宅未登録）"
-            rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
-                                 subject=_cs, center_latlng=_ccenter, radius_km=radius, home_latlng=home_ll)
-            if rr['status'] == 'not_found' or not rr['results']:
-                line_bot_api.reply_message(reply_token, TextSendMessage(
-                    text=f"{_cname}から{home_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}が見つかりませんでした。半径を広げてお試しください。"))
-                return
-            subj_txt = (_cs + "の") if _cs else ""
-            reply_with_carousel(reply_token, f"{_cname}から{home_nm}方向（帰路）・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
-            return
+            # コマンドでなければ通常処理へフォールスルー
 
         # 「[被写体]<地名><半径>」(例: 美瑛150 / 弘前 桜 100 / 美瑛 ひまわり 150)
         #  → その地名を中心に半径内の「今の時期に撮れる」撮影地を近い順に。地名が解決できる場合のみ発動。
