@@ -335,6 +335,7 @@ AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
+USER_HOME = {}  # user_id -> {"lat":.., "lng":.., "name": "..."}  自宅(帰路の基準点)
 USER_SEEN = set()  # 初回メッセージ済みuser_id
 
 # ── ユーザー情報(位置・初回フラグ)のFirestore永続化 ──
@@ -358,9 +359,25 @@ def hydrate_user(user_id):
                 USER_SEEN.add(user_id)
             if data.get('lat') is not None and data.get('lng') is not None:
                 USER_LOCATION[user_id] = {"lat": data['lat'], "lng": data['lng'], "city": data.get('city', '')}
+            if data.get('home_lat') is not None and data.get('home_lng') is not None:
+                USER_HOME[user_id] = {"lat": data['home_lat'], "lng": data['home_lng'], "name": data.get('home_name', '')}
     except Exception:
         import traceback
         print(f"[ERROR] hydrate_user failed: {traceback.format_exc()}", flush=True)
+
+def save_user_home(user_id, lat, lng, name=None):
+    """自宅(帰路の基準点)をメモリとFirestoreの両方に保存する。"""
+    USER_HOME[user_id] = {"lat": lat, "lng": lng, "name": name or ''}
+    if not db:
+        return
+    try:
+        payload = {"home_lat": lat, "home_lng": lng, "updated": firestore.SERVER_TIMESTAMP}
+        if name:
+            payload["home_name"] = name
+        db.collection('Users').document(user_id).set(payload, merge=True)
+    except Exception:
+        import traceback
+        print(f"[ERROR] save_user_home failed: {traceback.format_exc()}", flush=True)
 
 def save_user_location(user_id, lat, lng, city=None):
     """位置情報をメモリとFirestoreの両方に保存する。"""
@@ -941,9 +958,11 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
-def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None):
+def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None, center_latlng=None, radius_km=None, home_latlng=None):
     """地点名(Place/Area/Title)の自由文検索。
     今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
+    center_latlng+radius_km を指定すると、その中心から半径内の作品に絞り近い順に返す。
+    home_latlng も指定すると、自宅に近づく方向(帰路)の作品だけに絞り、寄り道の少ない順に返す。
     返り値: {'status': 'in_season'|'off_season'|'not_found', 'results': [(emoji,label,item),...]}"""
     if not db:
         return {'status': 'not_found', 'results': []}
@@ -982,6 +1001,20 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                 continue
             pref = extract_pref(area)
             wll = work_latlng(area, pref)
+            cll = wll if wll else (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
+            if center_latlng and radius_km:
+                if not cll or haversine(center_latlng[0], center_latlng[1], cll[0], cll[1]) > radius_km:
+                    continue
+            cdist = haversine(center_latlng[0], center_latlng[1], cll[0], cll[1]) if (center_latlng and cll) else 0
+            detour = 0
+            if home_latlng and center_latlng:
+                if not cll:
+                    continue
+                d_ch = haversine(center_latlng[0], center_latlng[1], home_latlng[0], home_latlng[1])
+                d_wh = haversine(cll[0], cll[1], home_latlng[0], home_latlng[1])
+                if d_wh >= d_ch:   # 自宅に近づかない(=帰路方向でない)ものは除外
+                    continue
+                detour = cdist + d_wh - d_ch   # 寄り道距離(現在地→作品→自宅 と 現在地→自宅 の差)
             if wll:
                 dist = haversine(origin[0], origin[1], wll[0], wll[1])
             elif pref and pref in PREF_LATLNG:
@@ -993,7 +1026,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             except Exception:
                 year = 0
             item = {
-                'dist': dist, 'pref': pref or '', 'area': area, 'place': place,
+                'dist': dist, 'pref': pref or '', 'area': area, 'place': place, 'cdist': cdist, 'detour': detour,
                 'title': title, 'period': format_period(d.get('Month'), d.get('Day')), 'winner': d.get('Winner', ''), 'winner_area': d.get('WinnerArea', ''),
                 'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
                 'pic': d.get('PicFileName', ''), 'pub': pub,
@@ -1021,7 +1054,12 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         pool, status = all_time, 'off_season'
     else:
         return {'status': 'not_found', 'results': []}
-    pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
+    if home_latlng and center_latlng:
+        pool.sort(key=lambda x: (x.get('detour', 0), x.get('cdist', 0)))
+    elif center_latlng:
+        pool.sort(key=lambda x: (x.get('cdist', 0), -x['ascore']))
+    else:
+        pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
     results, used = [], set()
     for p in pool:
         if len(results) >= 7:
@@ -1035,6 +1073,66 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         return {'status': 'not_found', 'results': []}
     peaks = compute_peaks(bin_counter)
     return {'status': status, 'results': results, 'peaks': peaks}
+
+def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
+    """中心から半径内の公開作品を被写体別に集計し、現在(base_date)が見頃にあたる被写体を返す。
+    戻り値: [(subject, peaks_text, count), ...] を件数の多い順で。"""
+    if not db or not center_latlng:
+        return []
+    base = base_date or date.today()
+    cur_bin = bin_index(base.month, base.day)
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    from collections import defaultdict
+    bins = defaultdict(Counter)
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict()
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            if d.get('Winner') in excl_authors:
+                continue
+            area = d.get('Area', '') or ''
+            place = d.get('Place', '') or ''
+            title = d.get('Title', '') or ''
+            if is_area_blocked(place, area, blocked_areas):
+                continue
+            pref = extract_pref(area)
+            wll = work_latlng(area, pref) or (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
+            if not wll or haversine(center_latlng[0], center_latlng[1], wll[0], wll[1]) > radius_km:
+                continue
+            try:
+                mo = int(d.get('Month'))
+            except Exception:
+                continue
+            if not (1 <= mo <= 12):
+                continue
+            bi = bin_index(mo, d.get('Day'))
+            sfield = d.get('Subject', '')
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                if subject_matches(variants, title=title, place=place, area=area, subject_field=sfield):
+                    bins[canon][bi] += 1
+    except Exception:
+        import traceback
+        print(f"[ERROR] subjects_in_peak_near: {traceback.format_exc()}", flush=True)
+        return []
+    out = []
+    for canon, bc in bins.items():
+        peaks = compute_peaks(bc)
+        if not peaks:
+            continue
+        for c in peaks:
+            if min((cur_bin - c) % 36, (c - cur_bin) % 36) <= 1:  # 現在が見頃クラスタの±1旬以内
+                out.append((canon, peaks_text(peaks), sum(bc.values())))
+                break
+    out.sort(key=lambda x: -x[2])
+    return out
+
 
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
@@ -1343,16 +1441,14 @@ def handle_message(event):
             ch = user_message.strip()
             if ch in ("1", "１"):
                 del SUBJECT_PENDING[user_id]
-                res = select_three_points(
-                    base_date=sp['date'], base_latlng=sp['place_latlng'], radius=300,
-                    keyword=sp['subject'], expand_time=True,
-                    origin_latlng=sp['origin_latlng'], origin_name=sp['origin_name'],
-                )
-                if (not res) or isinstance(res, tuple):
+                rr = search_by_place([], base_date=sp['date'], origin_latlng=sp['origin_latlng'],
+                                     origin_name=sp['origin_name'], subject=sp['subject'],
+                                     center_latlng=sp['place_latlng'], radius_km=100)
+                if rr['status'] == 'not_found' or not rr['results']:
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=f"「{sp['place_disp']}」の周辺・前後の時期を広げても{sp['subject']}の作品が見つかりませんでした。全国で探す場合はもう一度「{sp['place_disp']} {sp['subject']}」と送って2をお選びください。"))
+                        text=f"「{sp['place_disp']}」の周辺（約100km）にも{sp['subject']}の作品が見つかりませんでした。全国で探す場合はもう一度「{sp['place_disp']} {sp['subject']}」と送って2をお選びください。"))
                     return
-                reply_with_carousel(reply_token, f"「{sp['place_disp']}」の周辺で{sp['subject']}の作品を、時期と距離を広げて探しました。", res)
+                reply_with_carousel(reply_token, f"「{sp['place_disp']}」の周辺（約100km）で{sp['subject']}の作品をご紹介します。", rr['results'])
                 return
             elif ch in ("2", "２"):
                 del SUBJECT_PENDING[user_id]
@@ -1403,6 +1499,92 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="条件を広げても見つかりませんでした。別の地域やキーワードをお試しください。"))
                 return
             reply_with_carousel(reply_token, "条件を広げて探しました。こんなところはいかがでしょう。", results)
+            return
+
+        # ── 便利コマンド ──
+        # 「<被写体>現在地<半径>」(例: アジサイ現在地100) / 「見頃<半径>」(例: 見頃150)
+        _u = USER_LOCATION.get(user_id)
+        _ccenter = (_u["lat"], _u["lng"]) if _u else SHINJUKU
+        _cname = (_u.get("city") or "現在地") if _u else "東京"
+        _co = (_u["lat"], _u["lng"]) if _u else None
+        _con = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
+
+        m_now = re.match(r'^\s*(.+?)\s*現在地\s*(\d+)\s*(?:km|キロ\S*)?\s*$', user_message)
+        if m_now:
+            subj_txt, radius = m_now.group(1), max(5, min(int(m_now.group(2)), 2000))
+            _cs = None
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                if any(v in subj_txt for v in variants):
+                    _cs = canon
+                    break
+            if _cs:
+                rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
+                                     subject=_cs, center_latlng=_ccenter, radius_km=radius)
+                if rr['status'] == 'not_found' or not rr['results']:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"{_cname}から半径{radius}km圏内に{_cs}の作品が見つかりませんでした。半径を広げてお試しください。"))
+                    return
+                speaks = rr.get('peaks', [])
+                if _cs in SEASONAL_SUBJECTS and speaks:
+                    head = f"{_cname}から半径{radius}km圏内の{_cs}の作品です（見頃は{peaks_text(speaks)}ごろ）。近い順にご紹介します。"
+                else:
+                    head = f"{_cname}から半径{radius}km圏内の{_cs}の作品を近い順にご紹介します。"
+                reply_with_carousel(reply_token, head, rr['results'])
+                return
+            # 被写体が認識できなければ通常処理へフォールスルー
+
+        m_peak = re.match(r'^\s*見頃\s*(\d+)?\s*(?:km|キロ\S*)?\s*$', user_message)
+        if m_peak:
+            radius = max(5, min(int(m_peak.group(1) or 100), 2000))
+            lst = subjects_in_peak_near(_ccenter, radius, date.today())
+            if not lst:
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=f"{_cname}から半径{radius}km圏内では、今が見頃の被写体が見つかりませんでした。半径を広げてお試しください。"))
+                return
+            lines = "\n".join(f"・{s}（見頃 {pk}・{n}件）" for s, pk, n in lst[:12])
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=f"{_cname}から半径{radius}km圏内で、今が見頃の被写体です。\n{lines}\n\n気になる被写体名を送ると撮影地をご案内します。"))
+            return
+
+        # 自宅(帰路の基準点)の登録: 「自宅 川越市」「帰宅先 ○○」
+        m_home = re.match(r'^\s*(?:自宅|帰宅先|帰路先)\s*[:：]?\s*(.+?)\s*$', user_message)
+        if m_home:
+            hname = m_home.group(1).strip()
+            hll = geocode(hname)
+            if not hll:
+                _an, _all, _ad = parse_target_area(hname)
+                if _all:
+                    hll = _all
+            if not hll:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=f"「{hname}」の場所が特定できませんでした。市区町村名でお試しください（例：自宅 川越市）。"))
+                return
+            save_user_home(user_id, hll[0], hll[1], hname)
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地R150』のように送ると、現在地から{hname}方向（帰路）で半径150km圏内の撮影地を寄り道の少ない順にご案内します。"))
+            return
+
+        # 「[被写体]R<半径>」(例: 現在地R150 / アジサイR150) → 現在地から自宅方向(帰路)で半径内を検索
+        m_route = re.match(r'^\s*(.*?)[RＲｒr]\s*(\d+)\s*(?:km|キロ\S*)?\s*$', user_message)
+        if m_route and ('R' in user_message.upper().replace('Ｒ', 'R')):
+            pre, radius = m_route.group(1), max(5, min(int(m_route.group(2)), 2000))
+            if not _u:
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="現在地が分からないため帰路方向を計算できません。先にLINEの位置情報を送ってから『現在地R150』とお試しください。"))
+                return
+            _cs = None
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                if any(v in pre for v in variants):
+                    _cs = canon
+                    break
+            _hu = USER_HOME.get(user_id)
+            home_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
+            home_nm = (_hu.get("name") if _hu else None) or "東京（自宅未登録）"
+            rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
+                                 subject=_cs, center_latlng=_ccenter, radius_km=radius, home_latlng=home_ll)
+            if rr['status'] == 'not_found' or not rr['results']:
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=f"{_cname}から{home_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}が見つかりませんでした。半径を広げてお試しください。"))
+                return
+            subj_txt = (_cs + "の") if _cs else ""
+            reply_with_carousel(reply_token, f"{_cname}から{home_nm}方向（帰路）・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
             return
 
         # 問い返し待ちの回答処理
@@ -1499,14 +1681,25 @@ def handle_message(event):
                     text=(f"「{place_disp}」では{_subj}の作品が見つかりませんでした。\nどうしますか？\n"
                           f"1. 条件を広げて探す（期間と距離）\n2. 全国で探す\n3. 戻る")))
                 return
-            # 地名なしの被写体のみ → 全国を直接
+            # 地名なしの被写体のみ → 現在地(既定は東京)中心・約100kmで探し、近くに無ければ全国
+            center = _ol or SHINJUKU
+            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj, center_latlng=center, radius_km=100)
+            if prn['status'] != 'not_found' and prn['results']:
+                speaks = prn.get('peaks', [])
+                near_name = _on if _ol else "東京"
+                if _subj in SEASONAL_SUBJECTS and speaks:
+                    shead = f"{near_name}周辺の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
+                else:
+                    shead = f"{near_name}周辺の{_subj}の作品をご紹介します。"
+                reply_with_carousel(reply_token, shead, prn['results'])
+                return
             prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
             if prn['status'] != 'not_found':
                 speaks = prn.get('peaks', [])
                 if _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"{_subj}の見頃は{peaks_text(speaks)}ごろ。全国の{_subj}の作品をご紹介します。"
+                    shead = f"近くには見当たらないため、全国の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"全国の{_subj}の作品をご紹介します。"
+                    shead = f"近くには見当たらないため、全国の{_subj}の作品をご紹介します。"
                 reply_with_carousel(reply_token, shead, prn['results'])
                 return
             # 被写体でも全く該当が無ければ通常フローへフォールスルー
