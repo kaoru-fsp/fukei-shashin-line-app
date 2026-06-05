@@ -97,6 +97,25 @@ try:
 except Exception as _e:
     print(f"[WARN] city_latlng.json load failed: {_e}", flush=True)
 
+# 全国に複数ある同名の区（中央区・北区など）→ [(正式名, (lat,lng)), ...]。曖昧解決の候補に使う。
+WARD_INDEX = {}
+try:
+    _tmp_w = {}
+    for _k, _v in CITY_LATLNG.items():
+        if not _k.endswith('区'):
+            continue
+        _mw = re.search(r'(?:市|郡)([^市郡]*区)$', _k) or re.search(r'(?:都|道|府|県)(.*区)$', _k)
+        _w = _mw.group(1) if _mw else _k
+        _tmp_w.setdefault(_w, []).append((_k, _v))
+    WARD_INDEX = {w: fs for w, fs in _tmp_w.items() if len(fs) >= 2}
+    print(f"[INFO] ward index: {len(WARD_INDEX)} ambiguous ward names", flush=True)
+except Exception as _e:
+    print(f"[WARN] ward index build failed: {_e}", flush=True)
+
+# 現在地が無いときの候補並び順（主要都市の都道府県を上位に）
+MAJOR_PREF_ORDER = ['東京都', '大阪府', '愛知県', '北海道', '福岡県', '神奈川県', '京都府', '兵庫県',
+                    '埼玉県', '千葉県', '広島県', '宮城県', '新潟県', '静岡県', '岡山県', '熊本県']
+
 SHINJUKU = (35.70044, 139.71827)      # デフォルト起点: 東京都新宿区
 DEFAULT_ORIGIN_NAME = "東京都新宿区"
 
@@ -335,6 +354,7 @@ AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
 ROUTE_PENDING = {}  # tコマンドで目的地が未確定のときの入力待ち  # user_id -> {center,center_nm,subject,radius}
+WARD_PENDING = {}  # 同名の区(中央区など)の選択待ち  # user_id -> {cands,mode,center,...}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_HOME = {}  # user_id -> {"lat":.., "lng":.., "name": "..."}  自宅(帰路の基準点)
 USER_SEEN = set()  # 初回メッセージ済みuser_id
@@ -1196,6 +1216,60 @@ def do_route_search(reply_token, center, center_nm, dest_ll, dest_nm, subject, r
     reply_with_carousel(reply_token, note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
 
 
+def ambiguous_ward_candidates(txt, origin_latlng=None, limit=6):
+    """txt がちょうど曖昧な区名(中央区など)なら候補を返す。現在地があれば近い順、無ければ主要都市順。
+    曖昧でなければ None。戻り値: [(正式名, (lat,lng)), ...]。"""
+    fs = WARD_INDEX.get((txt or '').strip())
+    if not fs:
+        return None
+    if origin_latlng:
+        ranked = sorted(fs, key=lambda x: haversine(origin_latlng[0], origin_latlng[1], x[1][0], x[1][1]))
+    else:
+        def _rank(x):
+            for i, p in enumerate(MAJOR_PREF_ORDER):
+                if x[0].startswith(p):
+                    return i
+            return len(MAJOR_PREF_ORDER)
+        ranked = sorted(fs, key=_rank)
+    return ranked[:limit]
+
+
+def ask_ward(reply_token, user_id, ward_name, cands, mode, center, center_nm,
+             subject, radius, origin_latlng, origin_name):
+    """同名の区の候補を、クイックリプライ(ボタン)＋本文の番号併記で提示し、選択待ち状態にする。"""
+    WARD_PENDING[user_id] = {"cands": cands, "mode": mode, "center": center, "center_nm": center_nm,
+                             "subject": subject, "radius": radius,
+                             "origin_latlng": origin_latlng, "origin_name": origin_name}
+    qr = QuickReply(items=[
+        QuickReplyButton(action=PostbackAction(label=full[:20], data=f"action=ward&i={i}", display_text=full))
+        for i, (full, _) in enumerate(cands)])
+    body = "\n".join(f"{i+1}．{full}" for i, (full, _) in enumerate(cands))
+    line_bot_api.reply_message(reply_token, TextSendMessage(
+        text=(f"「{ward_name}」は各地にあります。下のボタンか番号でお選びください。\n{body}\n\n"
+              f"これ以外は『大阪市{ward_name}』のように市名を付けて送ってください。"),
+        quick_reply=qr))
+
+
+def finish_ward_choice(reply_token, user_id, full_name, latlng):
+    """WARD_PENDING の文脈に従って、選ばれた区で帰宅(自宅登録+検索) または 目的地検索を実行する。"""
+    wp = WARD_PENDING.pop(user_id, None)
+    if not wp:
+        return
+    center, center_nm = wp["center"], wp["center_nm"]
+    if wp["mode"] == "home":
+        save_user_home(user_id, latlng[0], latlng[1], full_name)
+        note = f"自宅を「{full_name}」に登録しました。次回からは末尾に『r』を付けるだけで帰り道をご案内します。\n"
+        if center is None:
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=note + "今回は起点（現在地）が分からないため帰り道の検索はできませんでした。位置情報を送るか『茅野r』のように起点を付けてお試しください。"))
+            return
+        do_route_search(reply_token, center, center_nm, latlng, full_name,
+                        wp["subject"], wp["radius"], wp["origin_latlng"], wp["origin_name"], note=note)
+        return
+    do_route_search(reply_token, center, center_nm, latlng, full_name,
+                    wp["subject"], wp["radius"], wp["origin_latlng"], wp["origin_name"])
+
+
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
     s = str(s or '').strip()
@@ -1541,6 +1615,12 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="目的地の入力をやめました。地名や被写体（例：弘前 桜）をお知らせください。"))
                 return
+            _wc = ambiguous_ward_candidates(ch, rp["origin_latlng"])
+            if _wc:
+                del ROUTE_PENDING[user_id]
+                ask_ward(reply_token, user_id, ch, _wc, "dest", rp["center"], rp["center_nm"],
+                         rp["subject"], rp["radius"], rp["origin_latlng"], rp["origin_name"])
+                return
             _dll, _dnm, _dconf = resolve_place(ch)
             if _dll is not None and _dconf:
                 del ROUTE_PENDING[user_id]
@@ -1549,6 +1629,34 @@ def handle_message(event):
                 return
             line_bot_api.reply_message(reply_token, TextSendMessage(
                 text=f"「{ch}」は確認できませんでした。目的地を市区町村名で入力してください（例：函館市、名古屋市中区）。やめる場合は『戻る』。"))
+            return
+
+        # 同名の区(中央区など)の選択待ち（番号 or 正式名テキストでも選べる。ボタンはPostbackで処理）
+        if user_id in WARD_PENDING:
+            wp = WARD_PENDING[user_id]
+            ch = user_message.strip()
+            if ch in ("戻る", "もどる", "キャンセル", "中止", "やめる"):
+                del WARD_PENDING[user_id]
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text="選択をやめました。地名や被写体（例：弘前 桜）をお知らせください。"))
+                return
+            idx = None
+            mnum = re.match(r'^\s*(\d{1,2})\s*$', ch)
+            if mnum:
+                i = int(mnum.group(1)) - 1
+                if 0 <= i < len(wp["cands"]):
+                    idx = i
+            if idx is None:  # 正式名・部分一致でも選べるように
+                for i, (full, _) in enumerate(wp["cands"]):
+                    if ch and (ch == full or ch in full or full in ch):
+                        idx = i
+                        break
+            if idx is not None:
+                full, ll = wp["cands"][idx]
+                finish_ward_choice(reply_token, user_id, full, ll)
+                return
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text="番号（例：1）か、下のボタンでお選びください。やめる場合は『戻る』。"))
             return
 
         # 検索拡張の回答処理
@@ -1639,11 +1747,12 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地r』や『茅野r』のように送ると、起点から{hname}方向（帰り道）の撮影地を寄り道の少ない順にご案内します。半径は『現在地r150』のように付けられます。"))
             return
 
-        # ルートコマンド: r=帰宅(目的地=登録した自宅)、t=目的地指定
+        # ルートコマンド: r=帰宅(目的地=登録した自宅)、t=目的地指定(その場限り)
         #   r: 「[起点]S[被写体]r[半径]」      例: 茅野s滝r / 現在地r150 / 美瑛r
+        #   r<地名>: その地名を自宅として登録(上書き)し、今回もそこへ向かう  例: r板橋区 / 茅野s滝r板橋区
         #   t: 「[起点]S[被写体]t[半径][目的地]」例: 茅野s滝t函館市 / 現在地t名古屋栄 / 美瑛s桜t札幌150
         #   起点は現在地(省略時)または地名。半径省略時は起点→目的地の距離(×1.15)。
-        #   r で自宅未登録 → 登録を案内。t で目的地が未指定/未確定 → ROUTE_PENDING で入力待ち(勝手に倒さない)。
+        #   r で自宅未登録&地名なし → r<地名>での登録を案内。t で目的地が未指定/未確定 → ROUTE_PENDING で入力待ち。
         m_route = re.match(r'^\s*(.*?)([RＲｒrTＴｔt])(.*)$', user_message)
         if m_route:
             pre, marker, after = m_route.group(1), m_route.group(2), m_route.group(3)
@@ -1665,26 +1774,52 @@ def handle_message(event):
                 center, center_nm, _ = resolve_place(start_txt)
             # コマンド成立の意思判定（誤爆防止）
             if start_is_current:
-                intent = (radius is not None or '現在地' in pre or _cs is not None or (not is_home and dest_txt != ''))
+                intent = (radius is not None or '現在地' in pre or _cs is not None or dest_txt != '')
             else:
                 intent = (center is not None)  # 地名起点が解決できれば意思あり
             if intent:
+                # r<地名>: その地名を自宅として登録(上書き)し、今回もそこへ向かう。
+                #          現在地が無くても登録だけは行う。
+                if is_home and len(dest_txt) >= 2:
+                    _wc = ambiguous_ward_candidates(dest_txt, _co)
+                    if _wc:
+                        ask_ward(reply_token, user_id, dest_txt, _wc, "home",
+                                 center, center_nm, _cs, radius, _co, _con)
+                        return
+                    _dll, _dnm, _dconf = resolve_place(dest_txt)
+                    if _dll is None or not _dconf:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text=f"「{dest_txt}」は確認できませんでした。『r板橋区』のように市区町村名でお試しください。"))
+                        return
+                    save_user_home(user_id, _dll[0], _dll[1], _dnm)
+                    note = f"自宅を「{_dnm}」に登録しました。次回からは末尾に『r』を付けるだけで帰り道をご案内します。\n"
+                    if center is None:  # 現在地が無く今回の検索はできないが、登録は完了
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text=note + "今回は起点（現在地）が分からないため帰り道の検索はできませんでした。位置情報を送るか『茅野r』のように起点を付けてお試しください。"))
+                        return
+                    do_route_search(reply_token, center, center_nm, _dll, _dnm, _cs, radius, _co, _con, note=note)
+                    return
                 if center is None:  # 現在地起点なのに位置情報なし
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送るか、起点の地名を付けて『茅野t函館市』のようにお試しください。"))
                     return
                 if is_home:
-                    # 帰宅: 目的地=登録した自宅。未登録なら倒さず登録を案内。
+                    # 地名なしの r → 登録済み自宅へ。未登録なら『r<地名>』での登録を案内。
                     _hu = USER_HOME.get(user_id)
                     if not _hu:
                         line_bot_api.reply_message(reply_token, TextSendMessage(
-                            text="帰宅先（自宅）が未登録です。『自宅 ◯◯』で登録してください（例：自宅 板橋区）。登録後は『現在地r』や『茅野r』だけで、自宅方向（帰り道）の撮影地をご案内します。"))
+                            text="帰宅先（自宅）が未登録です。次に『r板橋区』のように市区町村名を付けて送れば、それを自宅として登録します（例：r板橋区）。登録後は末尾に『r』を付けるだけで、帰り道（自宅方向）の撮影地をご案内します。"))
                         return
                     do_route_search(reply_token, center, center_nm, (_hu["lat"], _hu["lng"]),
                                     _hu.get("name") or "自宅", _cs, radius, _co, _con)
                     return
                 # 目的地指定(t): 確定できれば検索、できなければ入力待ち(勝手に倒さない)
                 if len(dest_txt) >= 2:
+                    _wc = ambiguous_ward_candidates(dest_txt, _co)
+                    if _wc:
+                        ask_ward(reply_token, user_id, dest_txt, _wc, "dest",
+                                 center, center_nm, _cs, radius, _co, _con)
+                        return
                     _dll, _dnm, _dconf = resolve_place(dest_txt)
                     if _dll is not None and _dconf:
                         do_route_search(reply_token, center, center_nm, _dll, _dnm, _cs, radius, _co, _con)
@@ -2018,6 +2153,21 @@ def handle_postback(event):
         params = dict(item.split('=') for item in data.split('&'))
         action = params.get('action')
         pic_filename = params.get('pic', '')
+
+        if action == 'ward':
+            user_id = event.source.user_id
+            wp = WARD_PENDING.get(user_id)
+            try:
+                i = int(params.get('i', '-1'))
+            except ValueError:
+                i = -1
+            if wp and 0 <= i < len(wp["cands"]):
+                full, ll = wp["cands"][i]
+                finish_ward_choice(reply_token, user_id, full, ll)
+            else:
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text="選択の有効期限が切れたようです。もう一度コマンドを送ってください。"))
+            return
 
         if action == 'feedback':
             rating = params.get('rating', '')
