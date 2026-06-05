@@ -334,6 +334,7 @@ CITY_TO_PREF_MULTI = {}
 AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
+ROUTE_PENDING = {}  # tコマンドで目的地が未確定のときの入力待ち  # user_id -> {center,center_nm,subject,radius}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_HOME = {}  # user_id -> {"lat":.., "lng":.., "name": "..."}  自宅(帰路の基準点)
 USER_SEEN = set()  # 初回メッセージ済みuser_id
@@ -1176,6 +1177,25 @@ def resolve_place(txt):
     return None, None, False
 
 
+def do_route_search(reply_token, center, center_nm, dest_ll, dest_nm, subject, radius,
+                    origin_latlng, origin_name, note=""):
+    """起点centerから目的地dest方向・半径radius(km)圏内を寄り道の少ない順に返す。
+    radius=None なら起点→目的地の距離(×1.15)を半径にする。"""
+    if radius is None:
+        d = haversine(center[0], center[1], dest_ll[0], dest_ll[1])
+        radius = int(max(30, min(d * 1.15, 2000)))
+    else:
+        radius = max(5, min(radius, 2000))
+    rr = search_by_place([], base_date=date.today(), origin_latlng=origin_latlng, origin_name=origin_name,
+                         subject=subject, center_latlng=center, radius_km=radius, home_latlng=dest_ll)
+    if rr['status'] == 'not_found' or not rr['results']:
+        line_bot_api.reply_message(reply_token, TextSendMessage(
+            text=note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内に{(subject or '撮影地')}の作品が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
+        return
+    subj_txt = (subject + "の") if subject else ""
+    reply_with_carousel(reply_token, note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
+
+
 def expand_pref_name(s):
     """短縮県名を正式名に展開（例: 東京→東京都、大阪→大阪府、北海道→北海道）"""
     s = str(s or '').strip()
@@ -1512,6 +1532,25 @@ def handle_message(event):
             else:
                 del SUBJECT_PENDING[user_id]  # 番号以外は新規クエリとして続行
 
+        # 目的地入力待ち（tコマンドで目的地が未確定だったとき）
+        if user_id in ROUTE_PENDING:
+            rp = ROUTE_PENDING[user_id]
+            ch = user_message.strip()
+            if ch in ("戻る", "もどる", "キャンセル", "中止", "やめる"):
+                del ROUTE_PENDING[user_id]
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text="目的地の入力をやめました。地名や被写体（例：弘前 桜）をお知らせください。"))
+                return
+            _dll, _dnm, _dconf = resolve_place(ch)
+            if _dll is not None and _dconf:
+                del ROUTE_PENDING[user_id]
+                do_route_search(reply_token, rp["center"], rp["center_nm"], _dll, _dnm,
+                                rp["subject"], rp["radius"], rp["origin_latlng"], rp["origin_name"])
+                return
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=f"「{ch}」は確認できませんでした。目的地を市区町村名で入力してください（例：函館市、名古屋市中区）。やめる場合は『戻る』。"))
+            return
+
         # 検索拡張の回答処理
         if user_id in EXPAND_PENDING:
             pending = EXPAND_PENDING[user_id]
@@ -1597,16 +1636,18 @@ def handle_message(event):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=f"「{hname}」の場所が特定できませんでした。市区町村名でお試しください（例：自宅 川越市）。"))
                 return
             save_user_home(user_id, hll[0], hll[1], hname)
-            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地R150』のように送ると、現在地から{hname}方向（帰路）で半径150km圏内の撮影地を寄り道の少ない順にご案内します。"))
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=f"自宅を「{hname}」に登録しました。『現在地r』や『茅野r』のように送ると、起点から{hname}方向（帰り道）の撮影地を寄り道の少ない順にご案内します。半径は『現在地r150』のように付けられます。"))
             return
 
-        # 帰路/ルートコマンド: 「[起点]S[被写体]R[半径][目的地]」
-        #   例: 現在地R名古屋栄 / R150 / アジサイR岡山 / 茅野S渓流R名古屋栄 / 美瑛S桜R札幌150
-        #   起点(無指定なら現在地)から「目的地(無指定なら登録した自宅、無ければ東京)」へ向かう途中を寄り道の少ない順に。
-        #   半径を省くと起点→目的地の距離を半径にする。起点は「現在地」または地名。
-        m_route = re.match(r'^\s*(.*?)[RＲｒr](.*)$', user_message)
+        # ルートコマンド: r=帰宅(目的地=登録した自宅)、t=目的地指定
+        #   r: 「[起点]S[被写体]r[半径]」      例: 茅野s滝r / 現在地r150 / 美瑛r
+        #   t: 「[起点]S[被写体]t[半径][目的地]」例: 茅野s滝t函館市 / 現在地t名古屋栄 / 美瑛s桜t札幌150
+        #   起点は現在地(省略時)または地名。半径省略時は起点→目的地の距離(×1.15)。
+        #   r で自宅未登録 → 登録を案内。t で目的地が未指定/未確定 → ROUTE_PENDING で入力待ち(勝手に倒さない)。
+        m_route = re.match(r'^\s*(.*?)([RＲｒrTＴｔt])(.*)$', user_message)
         if m_route:
-            pre, after = m_route.group(1), m_route.group(2)
+            pre, marker, after = m_route.group(1), m_route.group(2), m_route.group(3)
+            is_home = marker in 'RＲｒr'
             _cs, _rem = extract_subject(pre)
             start_txt = re.sub(r'現在地|[\s　]+', '', _rem)
             num_m = re.search(r'(\d{1,4})', after)
@@ -1622,43 +1663,43 @@ def handle_message(event):
                     center, center_nm = _ccenter, _cname
             elif len(start_txt) >= 2:
                 center, center_nm, _ = resolve_place(start_txt)
+            # コマンド成立の意思判定（誤爆防止）
             if start_is_current:
-                route_intent = (dest_txt != '' or radius is not None or '現在地' in pre)
+                intent = (radius is not None or '現在地' in pre or _cs is not None or (not is_home and dest_txt != ''))
             else:
-                route_intent = (dest_txt != '' or radius is not None)  # 地名起点は目的地か半径が必須
-            if center is not None and route_intent:
-                dest_ll = dest_nm = None
-                dest_note = ""
+                intent = (center is not None)  # 地名起点が解決できれば意思あり
+            if intent:
+                if center is None:  # 現在地起点なのに位置情報なし
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送るか、起点の地名を付けて『茅野t函館市』のようにお試しください。"))
+                    return
+                if is_home:
+                    # 帰宅: 目的地=登録した自宅。未登録なら倒さず登録を案内。
+                    _hu = USER_HOME.get(user_id)
+                    if not _hu:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text="帰宅先（自宅）が未登録です。『自宅 ◯◯』で登録してください（例：自宅 板橋区）。登録後は『現在地r』や『茅野r』だけで、自宅方向（帰り道）の撮影地をご案内します。"))
+                        return
+                    do_route_search(reply_token, center, center_nm, (_hu["lat"], _hu["lng"]),
+                                    _hu.get("name") or "自宅", _cs, radius, _co, _con)
+                    return
+                # 目的地指定(t): 確定できれば検索、できなければ入力待ち(勝手に倒さない)
                 if len(dest_txt) >= 2:
                     _dll, _dnm, _dconf = resolve_place(dest_txt)
                     if _dll is not None and _dconf:
-                        dest_ll, dest_nm = _dll, _dnm
-                    else:  # 目的地を確定できない → 自宅/新宿で代替し、その旨を伝える
-                        _hu = USER_HOME.get(user_id)
-                        dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
-                        dest_nm = (_hu.get("name") if _hu else None) or "新宿区"
-                        dest_note = f"「{dest_txt}」は確認できませんでしたので、{dest_nm}を目的地としてお探しします。\n"
-                if dest_ll is None:  # 目的地指定なし → 登録した自宅 or 東京
-                    _hu = USER_HOME.get(user_id)
-                    dest_ll = (_hu["lat"], _hu["lng"]) if _hu else SHINJUKU
-                    dest_nm = (_hu.get("name") if _hu else None) or "東京（自宅未登録）"
-                if radius is None:   # 半径未指定 → 起点→目的地の距離(やや余裕)を半径に
-                    d = haversine(center[0], center[1], dest_ll[0], dest_ll[1])
-                    radius = int(max(30, min(d * 1.15, 2000)))
-                else:
-                    radius = max(5, min(radius, 2000))
-                rr = search_by_place([], base_date=date.today(), origin_latlng=_co, origin_name=_con,
-                                     subject=_cs, center_latlng=center, radius_km=radius, home_latlng=dest_ll)
-                if rr['status'] == 'not_found' or not rr['results']:
+                        do_route_search(reply_token, center, center_nm, _dll, _dnm, _cs, radius, _co, _con)
+                        return
+                    ROUTE_PENDING[user_id] = {"center": center, "center_nm": center_nm,
+                                              "subject": _cs, "radius": radius,
+                                              "origin_latlng": _co, "origin_name": _con}
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=dest_note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内に{(_cs or '撮影地')}の作品が見つかりませんでした。半径を広げるか目的地を変えてお試しください。"))
+                        text=f"「{dest_txt}」は確認できませんでした。目的地を市区町村名で入力してください（例：函館市、名古屋市中区）。"))
                     return
-                subj_txt = (_cs + "の") if _cs else ""
-                reply_with_carousel(reply_token, dest_note + f"{center_nm}から{dest_nm}方向・半径{radius}km圏内の{subj_txt}撮影地を、寄り道の少ない順にご紹介します。", rr['results'])
-                return
-            elif start_is_current and not _u and (dest_txt != '' or '現在地' in pre):
+                ROUTE_PENDING[user_id] = {"center": center, "center_nm": center_nm,
+                                          "subject": _cs, "radius": radius,
+                                          "origin_latlng": _co, "origin_name": _con}
                 line_bot_api.reply_message(reply_token, TextSendMessage(
-                    text="現在地が分からないため方向を計算できません。先にLINEの位置情報を送るか、起点の地名を付けて『茅野R名古屋栄』のようにお試しください。"))
+                    text="目的地を市区町村名で入力してください（例：函館市、名古屋市中区）。"))
                 return
             # コマンドでなければ通常処理へフォールスルー
 
