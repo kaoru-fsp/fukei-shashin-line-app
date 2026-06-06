@@ -2071,6 +2071,7 @@ def handle_message(event):
             off = (prn['status'] == 'off_season')
             near_name = _on if _ol else "東京"
             added_nation = False
+            _note_subj = famous_spots_note(subject=_subj, origin_latlng=_ol, base_date=target_date)
             if len(near) < 3:  # 近くに少ない → 全国からも補う(重複除く・最大7件)
                 prn2 = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
                 if not speaks:
@@ -2099,7 +2100,7 @@ def handle_message(event):
                     shead = body.rstrip("。") + f"（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = body
-                reply_with_carousel(reply_token, shead, near[:7])
+                reply_with_carousel(reply_token, shead, near[:7], note_text=_note_subj)
                 return
             # 近くに全く無い → 全国のみ
             prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
@@ -2112,7 +2113,7 @@ def handle_message(event):
                     shead = f"近くには見当たらないため、全国の{_subj}の作品です（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"近くには見当たらないため、全国の{_subj}の作品をご紹介します。"
-                reply_with_carousel(reply_token, shead, prn['results'])
+                reply_with_carousel(reply_token, shead, prn['results'], note_text=_note_subj)
                 return
             # 被写体でも全く該当が無ければ通常フローへフォールスルー
 
