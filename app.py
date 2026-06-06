@@ -236,17 +236,16 @@ def pick_famous_spots(subject=None, region_text=None, origin_latlng=None, base_d
 
 
 def famous_spots_note(subject=None, region_text=None, origin_latlng=None, base_date=None, limit=3):
-    """参考撮影地のテキスト（Googleマップのリンク付き）を返す。該当が無ければ None。"""
-    spots = pick_famous_spots(subject, region_text, origin_latlng, base_date, limit)
+    """参考撮影地のテキスト（Googleマップのリンク付き）を返す。該当が無ければ None。
+    LINEのリンクプレビューは1メッセージにつき最後の1件しか展開されず、複数URLだと
+    どの場所か分からない汎用表示になってしまうため、最も近い(または最優先の)1件だけを出す。"""
+    spots = pick_famous_spots(subject, region_text, origin_latlng, base_date, limit=1)
     if not spots:
         return None
-    lines = ["参考までに、『風景写真』の入賞作品は少なめですが、撮影地として知られている場所です。",
-             "（入賞作品ではありません／Googleマップで写真や場所をご覧いただけます）", ""]
-    for sp in spots:
-        season = f"／撮り頃 {sp['season']}" if sp.get("season") else ""
-        lines.append(f"・{sp['name']}{season}")
-        lines.append(f"　{gmaps_link(sp['query'])}")
-    return "\n".join(lines)
+    sp = spots[0]
+    season = f"／撮り頃 {sp['season']}" if sp.get("season") else ""
+    return ("参考までに、撮影地として知られている場所です（『風景写真』の入賞作品ではありません）。\n"
+            f"・{sp['name']}{season}\n{gmaps_link(sp['query'])}")
 
 def _jun_offset(day):
     return {'上旬': 0, '中旬': 1, '下旬': 2}.get(junkun(day), 1)  # 日不明は中旬扱い
