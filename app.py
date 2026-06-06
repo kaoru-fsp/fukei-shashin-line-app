@@ -243,7 +243,7 @@ def famous_spots_note(subject=None, region_text=None, origin_latlng=None, base_d
     lines = ["参考までに、『風景写真』の入賞作品は少なめですが、撮影地として知られている場所です。",
              "（入賞作品ではありません／Googleマップで写真や場所をご覧いただけます）", ""]
     for sp in spots:
-        season = f"／見頃 {sp['season']}" if sp.get("season") else ""
+        season = f"／撮り頃 {sp['season']}" if sp.get("season") else ""
         lines.append(f"・{sp['name']}{season}")
         lines.append(f"　{gmaps_link(sp['query'])}")
     return "\n".join(lines)
@@ -1676,7 +1676,7 @@ def handle_message(event):
                     return
                 speaks = prn.get('peaks', [])
                 if sp['subject'] in SEASONAL_SUBJECTS and speaks:
-                    head = f"全国の{sp['subject']}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
+                    head = f"全国の{sp['subject']}の作品です（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     head = f"全国の{sp['subject']}の作品をご紹介します。"
                 reply_with_carousel(reply_token, head, prn['results'])
@@ -1793,24 +1793,24 @@ def handle_message(event):
                     return
                 speaks = rr.get('peaks', [])
                 if _cs in SEASONAL_SUBJECTS and speaks:
-                    head = f"{_cname}から半径{radius}km圏内の{_cs}の作品です（見頃は{peaks_text(speaks)}ごろ）。近い順にご紹介します。"
+                    head = f"{_cname}から半径{radius}km圏内の{_cs}の作品です（撮り頃は{peaks_text(speaks)}ごろ）。近い順にご紹介します。"
                 else:
                     head = f"{_cname}から半径{radius}km圏内の{_cs}の作品を近い順にご紹介します。"
                 reply_with_carousel(reply_token, head, rr['results'])
                 return
             # 被写体が認識できなければ通常処理へフォールスルー
 
-        m_peak = re.match(r'^\s*見頃\s*(\d+)?\s*(?:km|キロ\S*)?\s*$', user_message)
+        m_peak = re.match(r'^\s*(?:見頃|撮り頃|撮りごろ|みごろ)\s*(\d+)?\s*(?:km|キロ\S*)?\s*$', user_message)
         if m_peak:
             radius = max(5, min(int(m_peak.group(1) or 100), 2000))
             lst = subjects_in_peak_near(_ccenter, radius, date.today())
             if not lst:
                 line_bot_api.reply_message(reply_token, TextSendMessage(
-                    text=f"{_cname}から半径{radius}km圏内では、今が見頃の被写体が見つかりませんでした。半径を広げてお試しください。"))
+                    text=f"{_cname}から半径{radius}km圏内では、今が撮り頃の被写体が見つかりませんでした。半径を広げてお試しください。"))
                 return
-            lines = "\n".join(f"・{s}（見頃 {pk}・{n}件）" for s, pk, n in lst[:12])
+            lines = "\n".join(f"・{s}（撮り頃 {pk}・{n}件）" for s, pk, n in lst[:12])
             line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=f"{_cname}から半径{radius}km圏内で、今が見頃の被写体です。\n{lines}\n\n気になる被写体名を送ると撮影地をご案内します。"))
+                text=f"{_cname}から半径{radius}km圏内で、今が撮り頃の被写体です。\n{lines}\n\n気になる被写体名を送ると撮影地をご案内します。"))
             return
 
         # 自宅(帰路の基準点)の登録: 「自宅 川越市」「帰宅先 ○○」
@@ -1946,7 +1946,7 @@ def handle_message(event):
                 if rr['status'] == 'in_season':
                     head = f"{center_name}から半径{radius}km圏内で、今の時期に撮れる{subj_txt}撮影地を近い順にご紹介します。"
                 elif _cs in SEASONAL_SUBJECTS and speaks:
-                    head = f"{center_name}から半径{radius}km圏内は、今の時期の{subj_txt}作品が少なめです（{_cs}の見頃は{peaks_text(speaks)}ごろ）。これまでの作品を近い順にご紹介します。"
+                    head = f"{center_name}から半径{radius}km圏内は、今の時期の{subj_txt}作品が少なめです（{_cs}の撮り頃は{peaks_text(speaks)}ごろ）。これまでの作品を近い順にご紹介します。"
                 else:
                     head = f"{center_name}から半径{radius}km圏内は、今の時期の作品が少なめでした。これまでの{subj_txt}作品を近い順にご紹介します。"
                 reply_with_carousel(reply_token, head, rr['results'], note_text=_note)
@@ -2043,10 +2043,10 @@ def handle_message(event):
                 if pr['status'] != 'not_found':
                     speaks = pr.get('peaks', [])
                     if pr['status'] == 'off_season':
-                        migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                        migp = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
                         shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
                     elif _subj in SEASONAL_SUBJECTS and speaks:
-                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（見頃は{peaks_text(speaks)}ごろ）。"
+                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                     else:
                         shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
                     reply_with_carousel(reply_token, shead, pr['results'], note_text=_note)
@@ -2062,29 +2062,54 @@ def handle_message(event):
                           f"1. 条件を広げて探す（期間と距離）\n2. 全国で探す\n3. 戻る"
                           + (("\n\n" + _note) if _note else ""))))
                 return
-            # 地名なしの被写体のみ → 現在地(既定は東京)中心・約100kmで探し、近くに無ければ全国
+            # 地名なしの被写体のみ → 現在地(既定は東京)中心・半径150kmで探し、少なければ全国で補う
             center = _ol or SHINJUKU
-            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj, center_latlng=center, radius_km=100)
-            if prn['status'] != 'not_found' and prn['results']:
-                speaks = prn.get('peaks', [])
-                near_name = _on if _ol else "東京"
-                if prn['status'] == 'off_season':
-                    migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migp}参考に、{near_name}周辺の{_subj}の作品をご紹介します。"
-                elif _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"{near_name}周辺の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
+            RADIUS_SUBJ = 150
+            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj, center_latlng=center, radius_km=RADIUS_SUBJ)
+            near = list(prn['results']) if prn['status'] != 'not_found' else []
+            speaks = prn.get('peaks', [])
+            off = (prn['status'] == 'off_season')
+            near_name = _on if _ol else "東京"
+            added_nation = False
+            if len(near) < 3:  # 近くに少ない → 全国からも補う(重複除く・最大7件)
+                prn2 = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
+                if not speaks:
+                    speaks = prn2.get('peaks', [])
+                if prn2['status'] != 'not_found':
+                    def _rkey(r):
+                        it = r[2]
+                        return it.get('PicFileName') or (it.get('Title'), it.get('Place'), it.get('WinnerArea'))
+                    seen = {_rkey(r) for r in near}
+                    for r in prn2['results']:
+                        if len(near) >= 7:
+                            break
+                        if _rkey(r) not in seen:
+                            near.append(r)
+                            seen.add(_rkey(r))
+                            added_nation = True
+            if near:
+                migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                if added_nation:
+                    body = f"{near_name}の近くには{_subj}の作品が少ないため、全国の作品も合わせてご紹介します。"
                 else:
-                    shead = f"{near_name}周辺の{_subj}の作品をご紹介します。"
-                reply_with_carousel(reply_token, shead, prn['results'])
+                    body = f"{near_name}を中心に半径{RADIUS_SUBJ}kmで撮られた{_subj}の作品です。"
+                if off:
+                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migq}参考に、{body}"
+                elif _subj in SEASONAL_SUBJECTS and speaks:
+                    shead = body.rstrip("。") + f"（撮り頃は{peaks_text(speaks)}ごろ）。"
+                else:
+                    shead = body
+                reply_with_carousel(reply_token, shead, near[:7])
                 return
+            # 近くに全く無い → 全国のみ
             prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
             if prn['status'] != 'not_found':
                 speaks = prn.get('peaks', [])
+                migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
                 if prn['status'] == 'off_season':
-                    migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migp}参考に、全国の{_subj}の作品をご紹介します。"
+                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migq}参考に、全国の{_subj}の作品をご紹介します。"
                 elif _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"近くには見当たらないため、全国の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"近くには見当たらないため、全国の{_subj}の作品です（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"近くには見当たらないため、全国の{_subj}の作品をご紹介します。"
                 reply_with_carousel(reply_token, shead, prn['results'])
@@ -2148,7 +2173,7 @@ def handle_message(event):
                 peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
                 if peaks:
                     head = (f"「{place_query}」は今の時期（{cur}）の作品が少ないようです。"
-                            f"見頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
+                            f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
                     head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
             reply_with_carousel(reply_token, head, results, note_text=_note)
