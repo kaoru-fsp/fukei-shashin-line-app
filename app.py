@@ -1586,18 +1586,6 @@ def build_city_to_pref():
 
 build_city_to_pref()
 
-# 診断: 被写体語と衝突しうる地名キー（「桜」「藤」等を含む or 1文字の短いキー）を起動時に出す
-try:
-    _susp = {k: v for k, v in CITY_TO_PREF.items()
-             if any(s in k for s in ['桜', '藤', '滝', '海', '川', '湖', '星', '雪', '霧', '氷']) or len(re.sub(r'[市区町村郡]', '', k)) <= 1}
-    print(f"[DIAG-DATA] CITY_TO_PREF総数={len(CITY_TO_PREF)} 同名={len(CITY_TO_PREF_MULTI)} 衝突しうるキー={_susp}", flush=True)
-    _susp_m = {k: v for k, v in CITY_TO_PREF_MULTI.items() if any(s in k for s in ['桜', '藤', '滝'])}
-    if _susp_m:
-        print(f"[DIAG-DATA] MULTI衝突キー={_susp_m}", flush=True)
-    print("[DIAG-VERSION] subject-priority + diag build", flush=True)
-except Exception as _e:
-    print(f"[DIAG-DATA] 失敗: {_e}", flush=True)
-
 # ──────────────── LINE Webhook ────────────────
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -2004,7 +1992,6 @@ def handle_message(event):
         else:
             target_date = parse_target_date(user_message)
             area_name, area_latlng, area_display = parse_target_area(user_message)
-        _diag_raw_area = (area_name, area_display)  # 診断用: 被写体除去前のarea判定
         # 被写体（キーワード）を先に判定する。地名の部分一致（例：「桜」がさいたま市桜区に一致）に
         # 被写体を取られないよう、被写体語を除いた文字列で地名を取り直す。
         _subj = None
@@ -2028,9 +2015,6 @@ def handle_message(event):
                 if any(v in user_message for v in variants):
                     search_keyword = canonical
                     break
-        print(f"[DIAG] msg={user_message!r} raw_area={_diag_raw_area} subj={_subj!r} "
-              f"msg_wo_subj={(_msg_wo_subj if _subj else None)!r} "
-              f"area_after={(area_name, area_display)} search_keyword={search_keyword!r}", flush=True)
         # 「地域名＋被写体」(例: 吉野山 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
         # 同名地名の問い返しより前に処理（被写体があれば地名はその語で直接検索でき、問い返し不要）。
         if _subj:
@@ -2058,10 +2042,11 @@ def handle_message(event):
                 _note = famous_spots_note(subject=_subj, region_text=place_disp, origin_latlng=_ol, base_date=target_date)
                 if pr['status'] != 'not_found':
                     speaks = pr.get('peaks', [])
-                    if _subj in SEASONAL_SUBJECTS and speaks:
-                        shead = f"「{place_disp}」の{_subj}の見頃は{peaks_text(speaks)}ごろのようです。これまでの作品をご紹介します。"
-                    elif pr['status'] == 'off_season':
-                        shead = f"「{place_disp}」の{_subj}は今の時期の作品が見当たらず、これまでの作品をご紹介します。"
+                    if pr['status'] == 'off_season':
+                        migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                        shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
+                    elif _subj in SEASONAL_SUBJECTS and speaks:
+                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（見頃は{peaks_text(speaks)}ごろ）。"
                     else:
                         shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
                     reply_with_carousel(reply_token, shead, pr['results'], note_text=_note)
@@ -2083,7 +2068,10 @@ def handle_message(event):
             if prn['status'] != 'not_found' and prn['results']:
                 speaks = prn.get('peaks', [])
                 near_name = _on if _ol else "東京"
-                if _subj in SEASONAL_SUBJECTS and speaks:
+                if prn['status'] == 'off_season':
+                    migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migp}参考に、{near_name}周辺の{_subj}の作品をご紹介します。"
+                elif _subj in SEASONAL_SUBJECTS and speaks:
                     shead = f"{near_name}周辺の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"{near_name}周辺の{_subj}の作品をご紹介します。"
@@ -2092,7 +2080,10 @@ def handle_message(event):
             prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
             if prn['status'] != 'not_found':
                 speaks = prn.get('peaks', [])
-                if _subj in SEASONAL_SUBJECTS and speaks:
+                if prn['status'] == 'off_season':
+                    migp = f"{_subj}の見頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migp}参考に、全国の{_subj}の作品をご紹介します。"
+                elif _subj in SEASONAL_SUBJECTS and speaks:
                     shead = f"近くには見当たらないため、全国の{_subj}の作品です（見頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"近くには見当たらないため、全国の{_subj}の作品をご紹介します。"
