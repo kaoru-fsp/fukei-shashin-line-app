@@ -2066,11 +2066,15 @@ def handle_message(event):
             area_name, area_latlng, area_display = parse_target_area(user_message)
         # 被写体（キーワード）を先に判定する。地名の部分一致（例：「桜」がさいたま市桜区に一致）に
         # 被写体を取られないよう、被写体語を除いた文字列で地名を取り直す。
-        # まず、検出済みの都道府県名は被写体判定の対象から外す（「茨城」「宮城」の“城”を被写体と誤認しないため）。
+        # まず、検出済みの地名（県名・市区町村名）は被写体判定の対象から外す
+        # （「茨城」「神奈川」の“城/川”、「川越」「海老名」の“川/海”などを被写体と誤認しないため）。
         _msg_for_subj = user_message
+        for _rm in (area_name, area_display):
+            if isinstance(_rm, str) and _rm not in ('', 'AMBIGUOUS', '現在地'):
+                _msg_for_subj = _msg_for_subj.replace(_rm, " ")
         if area_name in PREF_NEIGHBORS:
             _short = area_name if area_name == "北海道" else area_name.replace("都", "").replace("府", "").replace("県", "")
-            _msg_for_subj = _msg_for_subj.replace(area_name, " ").replace(_short, " ")
+            _msg_for_subj = _msg_for_subj.replace(_short, " ")
         _subj = None
         for _canon, _vars in KEYWORD_NORMALIZE.items():
             if any(v in _msg_for_subj for v in _vars):
