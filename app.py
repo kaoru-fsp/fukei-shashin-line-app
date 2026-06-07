@@ -639,6 +639,57 @@ PREF_CITY = {
     "宮崎県":"宮崎市","鹿児島県":"鹿児島市","沖縄県":"那覇市",
 }
 
+# 陸続きで隣接する都道府県（県検索を「県内→隣県」に広げるための表）。海上のみで接する組合せは含めない。
+PREF_NEIGHBORS = {
+    "北海道": [],
+    "青森県": ["岩手県", "秋田県"],
+    "岩手県": ["青森県", "秋田県", "宮城県"],
+    "宮城県": ["岩手県", "秋田県", "山形県", "福島県"],
+    "秋田県": ["青森県", "岩手県", "宮城県", "山形県"],
+    "山形県": ["秋田県", "宮城県", "福島県", "新潟県"],
+    "福島県": ["宮城県", "山形県", "新潟県", "群馬県", "栃木県", "茨城県"],
+    "茨城県": ["福島県", "栃木県", "埼玉県", "千葉県"],
+    "栃木県": ["福島県", "茨城県", "群馬県", "埼玉県"],
+    "群馬県": ["福島県", "栃木県", "埼玉県", "長野県", "新潟県"],
+    "埼玉県": ["群馬県", "栃木県", "茨城県", "千葉県", "東京都", "山梨県", "長野県"],
+    "千葉県": ["茨城県", "埼玉県", "東京都"],
+    "東京都": ["埼玉県", "千葉県", "神奈川県", "山梨県"],
+    "神奈川県": ["東京都", "山梨県", "静岡県"],
+    "新潟県": ["山形県", "福島県", "群馬県", "長野県", "富山県"],
+    "富山県": ["新潟県", "長野県", "岐阜県", "石川県"],
+    "石川県": ["富山県", "岐阜県", "福井県"],
+    "福井県": ["石川県", "岐阜県", "滋賀県", "京都府"],
+    "山梨県": ["埼玉県", "東京都", "神奈川県", "静岡県", "長野県"],
+    "長野県": ["群馬県", "埼玉県", "山梨県", "静岡県", "愛知県", "岐阜県", "富山県", "新潟県"],
+    "岐阜県": ["富山県", "石川県", "福井県", "長野県", "愛知県", "三重県", "滋賀県"],
+    "静岡県": ["神奈川県", "山梨県", "長野県", "愛知県"],
+    "愛知県": ["長野県", "岐阜県", "三重県", "静岡県"],
+    "三重県": ["岐阜県", "愛知県", "滋賀県", "京都府", "奈良県", "和歌山県"],
+    "滋賀県": ["福井県", "岐阜県", "三重県", "京都府"],
+    "京都府": ["福井県", "滋賀県", "三重県", "奈良県", "大阪府", "兵庫県"],
+    "大阪府": ["京都府", "兵庫県", "奈良県", "和歌山県"],
+    "兵庫県": ["京都府", "大阪府", "鳥取県", "岡山県"],
+    "奈良県": ["京都府", "大阪府", "和歌山県", "三重県"],
+    "和歌山県": ["大阪府", "奈良県", "三重県"],
+    "鳥取県": ["兵庫県", "岡山県", "広島県", "島根県"],
+    "島根県": ["鳥取県", "広島県", "山口県"],
+    "岡山県": ["兵庫県", "鳥取県", "広島県"],
+    "広島県": ["岡山県", "鳥取県", "島根県", "山口県"],
+    "山口県": ["島根県", "広島県"],
+    "徳島県": ["香川県", "愛媛県", "高知県"],
+    "香川県": ["徳島県", "愛媛県"],
+    "愛媛県": ["香川県", "徳島県", "高知県"],
+    "高知県": ["徳島県", "愛媛県"],
+    "福岡県": ["佐賀県", "大分県", "熊本県"],
+    "佐賀県": ["福岡県", "長崎県"],
+    "長崎県": ["佐賀県"],
+    "熊本県": ["福岡県", "大分県", "宮崎県", "鹿児島県"],
+    "大分県": ["福岡県", "熊本県", "宮崎県"],
+    "宮崎県": ["熊本県", "大分県", "鹿児島県"],
+    "鹿児島県": ["熊本県", "宮崎県"],
+    "沖縄県": [],
+}
+
 
 def parse_target_date(text):
     today = date.today()
@@ -728,7 +779,7 @@ def build_greeting(target_date, area_name, date_specified=False):
         return "ようこそ風景写真コンシェルジュの部屋へ。こんなところはいかがでしょう。"
 
 # ──────────────── 3分類選定エンジン ────────────────
-def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False, target_city=None, origin_latlng=None, origin_name=None):
+def select_three_points(base_date=None, base_latlng=None, radius=None, place_name=None, keyword=None, expand_time=False, target_city=None, origin_latlng=None, origin_name=None, allowed_prefs=None):
 
     if not db:
         return []
@@ -782,12 +833,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             wlat, wlng = wll if wll else (lat, lng)          # 表示用座標: 市区町村, なければ県重心
             disp_dist = haversine(origin[0], origin[1], wlat, wlng)  # 起点→撮影地の実距離
 
-            # 指定都道府県がある場合は同県を優先、足りなければ半径内も追加
+            # 指定都道府県がある場合の絞り込み
             if target_pref:
                 if target_city and base_latlng:
                     # 市指定時は「指定地点中心」で近隣を判定（撮影地の市座標で精密に）
                     base_dist = haversine(base_latlng[0], base_latlng[1], wlat, wlng)
                     if pref != target_pref and base_dist > radius:
+                        continue
+                elif allowed_prefs is not None:
+                    # 県指定時は「対象とする県の集合」で絞る（初回は県内のみ、拡張時は県＋隣県）
+                    if pref not in allowed_prefs:
                         continue
                 else:
                     if pref != target_pref and dist > radius:
@@ -955,11 +1010,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         results = []
 
         ibaraki_in_pool = [p for p in pool if p['pref'] == '茨城県']
+        _expanded = allowed_prefs is not None and len(allowed_prefs) > 1
         # 🎯 ベストマッチ（同県優先、最大7枚）
         if target_pref:
-            best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
-            if len(best_pool) < 3:
-                return 'TOO_FEW', target_pref, len(best_pool)
+            if _expanded:
+                # 拡張検索(県＋隣県): 対象県すべてから集める。県内が少なくても隣県で補うのでTOO_FEW判定はしない
+                best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
+            else:
+                best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
+                if len(best_pool) < 3:
+                    return 'TOO_FEW', target_pref, len(best_pool)
         else:
             best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
         used_areas = set()
@@ -979,7 +1039,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             for a, ys in place_years.items()
         }
         hot_pool = sorted(pool, key=lambda x: (-attention_score.get(x['area'], 0), -x['ascore']))
-        if target_pref:
+        if target_pref and not _expanded:
             hot_cand = [p for p in hot_pool if p['pref'] == target_pref and p['pic'] not in used_pics] or [p for p in hot_pool if p['pic'] not in used_pics]
         else:
             hot_cand = [p for p in hot_pool if p['pic'] not in used_pics]
@@ -1751,24 +1811,38 @@ def handle_message(event):
             del EXPAND_PENDING[user_id]
             expand_time = choice in ['1', '１', '3', '３']
             expand_area = choice in ['2', '２', '3', '３']
-            new_radius = 300 if expand_area else 150
+            _pref = pending.get('pref')
+            # 地域を広げる → 県＋隣接県を対象に。広げない → 県内のみ。
+            if expand_area and _pref in PREF_NEIGHBORS:
+                _eallowed = {_pref} | set(PREF_NEIGHBORS.get(_pref, []))
+            elif _pref in PREF_NEIGHBORS:
+                _eallowed = {_pref}
+            else:
+                _eallowed = None
             _eu = USER_LOCATION.get(user_id)
             _eo = (_eu["lat"], _eu["lng"]) if _eu else None
             _en = (_eu.get("city") or "現在地") if _eu else DEFAULT_ORIGIN_NAME
             results = select_three_points(
                 base_date=pending['date'],
                 base_latlng=pending['latlng'],
-                radius=new_radius,
+                radius=None,
                 place_name=pending['display'],
                 keyword=pending['keyword'],
                 expand_time=expand_time,
                 origin_latlng=_eo,
                 origin_name=_en,
+                allowed_prefs=_eallowed,
             )
             if not results or isinstance(results, tuple):
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="条件を広げても見つかりませんでした。別の地域やキーワードをお試しください。"))
                 return
-            reply_with_carousel(reply_token, "条件を広げて探しました。こんなところはいかがでしょう。", results)
+            if expand_area and expand_time:
+                _ehead = f"期間を広げ、{_pref}と近隣の県も含めて探しました。こんなところはいかがでしょう。"
+            elif expand_area:
+                _ehead = f"{_pref}と近隣の県も含めて探しました。こんなところはいかがでしょう。"
+            else:
+                _ehead = f"期間を広げて{_pref}で探しました。こんなところはいかがでしょう。"
+            reply_with_carousel(reply_token, _ehead, results)
             return
 
         # ── 便利コマンド ──
@@ -2198,7 +2272,9 @@ def handle_message(event):
         elif area_latlng is None:
             pass  # 位置情報未登録時は何も言わない
         target_city = area_display if (city_specified or city_from_dict) else None
-        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city, origin_latlng=origin_latlng, origin_name=origin_name)
+        # 県のみ指定(市区町村でない)のときは、まず県内だけを対象にする（足りなければ後で隣県に広げる）
+        _allowed = {area_name} if (area_name in PREF_NEIGHBORS and not target_city) else None
+        results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city, origin_latlng=origin_latlng, origin_name=origin_name, allowed_prefs=_allowed)
         if isinstance(results, tuple) and results[0] == 'CITY':
             _, city_base, city_count, results = results
             if not results:
@@ -2222,8 +2298,12 @@ def handle_message(event):
                 'display': area_display,
                 'keyword': search_keyword,
             }
+            if count == 0:
+                _lead = f"{found_pref}で探しましたが、今の時期の作品は見つかりませんでした。"
+            else:
+                _lead = f"{found_pref}で探したところ、今の時期の作品は{count}件でした。"
             msg = TextSendMessage(
-                text=f"{found_pref}の今の時期の作品が少ししか見つかりません（{count}件）。\nどうしますか？\n1. 時期を広げて探す\n2. 近隣地域も含めて探す\n3. 両方広げて探す\n4. やめる（別の条件で探す）"
+                text=f"{_lead}\nどうしますか？\n1. 期間を広げて探す\n2. 地域を広げて探す（隣の県まで）\n3. 両方広げて探す\n4. やめる（別の条件で探す）"
             )
             line_bot_api.reply_message(reply_token, msg)
             return
