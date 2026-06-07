@@ -1728,13 +1728,27 @@ def handle_message(event):
             _on2 = (_u2.get("city") or "現在地") if _u2 else DEFAULT_ORIGIN_NAME
             pr = search_by_place(place_q, base_date=target_date, origin_latlng=_ol2, origin_name=_on2)
             _note = famous_spots_note(region_text=place_q, origin_latlng=_ol2, base_date=target_date)
+            _proximity = False
+            if pr['status'] == 'not_found':
+                # 地名そのものの作品が無い場合は、地点として解決し周辺(約80km)の作品を探す
+                _pll, _pname, _conf = resolve_place(place_q)
+                print(f"[DIAG-AT] place={place_q!r} text_match=not_found resolve_place={_pll} conf={_conf}", flush=True)
+                if _pll:
+                    pr2 = search_by_place([], base_date=target_date, origin_latlng=_ol2, origin_name=_on2,
+                                          center_latlng=_pll, radius_km=80)
+                    print(f"[DIAG-AT] proximity status={pr2['status']} count={len(pr2.get('results', []))}", flush=True)
+                    if pr2['status'] != 'not_found' and pr2['results']:
+                        pr = pr2
+                        _proximity = True
             if pr['status'] == 'not_found':
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text=f"「{place_q}」に合う撮影地は見つかりませんでした。\n地名の表記を変えるか、被写体（滝・桜・紅葉など）でもお試しください。"
                          + (("\n\n" + _note) if _note else "")))
                 return
             results = pr['results']
-            if pr['status'] == 'in_season':
+            if _proximity:
+                head = f"「{place_q}」の周辺で撮られた作品を近い順にご紹介します。"
+            elif pr['status'] == 'in_season':
                 head = f"「{place_q}」の今の時期の撮影地はこちらです。"
             else:
                 cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
