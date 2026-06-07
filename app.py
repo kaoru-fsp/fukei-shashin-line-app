@@ -563,7 +563,11 @@ def usage_guide_messages():
             "▼送り方の例\n"
             "・地域で探す：栃木県／美瑛／箱根\n"
             "・被写体で探す：滝／桜／紅葉／星空／海\n"
-            "・日付を添える：週末 京都／明日 滝／3日後"
+            "・日付を添える：週末 京都／明日 滝／3日後\n"
+            "\n"
+            "▼地名がうまく伝わらないとき\n"
+            "頭に「@」を付けると、その語を必ず地名として探します。\n"
+            "例：@川越／@海老名／@中央区"
         ),
         (
             "▼使える日付の言い方\n"
@@ -1710,6 +1714,38 @@ def handle_message(event):
             from linebot.models import TextSendMessage as TSM
             line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
             line_bot_api.push_message(user_id, [TSM(text=t) for t in usage_guide_messages()])
+
+        # 「@地名」コマンド: @に続く文字を必ず地名として検索する。
+        # （辞書に無い地名や、川越・海老名のように地名内の単漢字が被写体に化けるケースの確実な回避策）
+        _at = re.match(r'^[@＠]\s*(.+)$', user_message)
+        if _at:
+            for _pd in (SUBJECT_PENDING, EXPAND_PENDING, AMBIGUOUS_PENDING, ROUTE_PENDING, WARD_PENDING):
+                _pd.pop(user_id, None)
+            place_q = _at.group(1).strip()
+            target_date = parse_target_date(place_q)
+            _u2 = USER_LOCATION.get(user_id)
+            _ol2 = (_u2["lat"], _u2["lng"]) if _u2 else None
+            _on2 = (_u2.get("city") or "現在地") if _u2 else DEFAULT_ORIGIN_NAME
+            pr = search_by_place(place_q, base_date=target_date, origin_latlng=_ol2, origin_name=_on2)
+            _note = famous_spots_note(region_text=place_q, origin_latlng=_ol2, base_date=target_date)
+            if pr['status'] == 'not_found':
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=f"「{place_q}」に合う撮影地は見つかりませんでした。\n地名の表記を変えるか、被写体（滝・桜・紅葉など）でもお試しください。"
+                         + (("\n\n" + _note) if _note else "")))
+                return
+            results = pr['results']
+            if pr['status'] == 'in_season':
+                head = f"「{place_q}」の今の時期の撮影地はこちらです。"
+            else:
+                cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
+                peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
+                if peaks:
+                    head = (f"「{place_q}」は今の時期（{cur}）の作品が少ないようです。"
+                            f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
+                else:
+                    head = f"「{place_q}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+            reply_with_carousel(reply_token, head, results, note_text=_note)
+            return
 
         # 地域＋被写体が0件だったときの選択（1.条件を広げる 2.全国 3.戻る）
         if user_id in SUBJECT_PENDING:
