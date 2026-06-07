@@ -1009,7 +1009,6 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         used_pics = set()
         results = []
 
-        ibaraki_in_pool = [p for p in pool if p['pref'] == '茨城県']
         _expanded = allowed_prefs is not None and len(allowed_prefs) > 1
         # 🎯 ベストマッチ（同県優先、最大7枚）
         if target_pref:
