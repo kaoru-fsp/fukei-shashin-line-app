@@ -678,7 +678,7 @@ def parse_target_area(text):
         else:
             short = pref.replace("都","").replace("府","").replace("県","")
         if pref in text or short in text:
-            return pref, PREF_LATLNG[pref], PREF_CITY.get(pref, pref)
+            return pref, PREF_LATLNG[pref], pref  # 県のみ指定 → 表示も検索キーも県名（県庁所在地名にしない）
     for city, pref in CITY_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref], city
