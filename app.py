@@ -2115,6 +2115,7 @@ def handle_message(event):
             # 地名が解決できなければ通常処理へフォールスルー
 
         # 問い返し待ちの回答処理
+        _amb_keyword = None  # 同名地名の問い返しで「被写体として」を選んだ場合に確定する被写体
         if user_id in AMBIGUOUS_PENDING:
             pending = AMBIGUOUS_PENDING[user_id]
             prefs = pending["prefs"]
@@ -2136,6 +2137,7 @@ def handle_message(event):
             if kw_option and choice == kw_num:
                 # 被写体候補を選択
                 del AMBIGUOUS_PENDING[user_id]
+                _amb_keyword = kw_option[0]
                 search_keyword = kw_option[0]
                 target_date = parse_target_date(user_message)
                 area_name, area_latlng, area_display = None, None, None
@@ -2169,7 +2171,11 @@ def handle_message(event):
             if any(v in _msg_for_subj for v in _vars):
                 _subj = _canon
                 break
-        if _subj:
+        if _amb_keyword:
+            # 同名地名で「被写体として」を選んだ場合は、その被写体で確定（入力番号から再判定しない）
+            _subj = _amb_keyword
+            area_name, area_latlng, area_display = None, None, None
+        if _subj and not _amb_keyword:
             _msg_wo_subj = user_message
             for v in KEYWORD_NORMALIZE.get(_subj, []):
                 _msg_wo_subj = _msg_wo_subj.replace(v, ' ')
