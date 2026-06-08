@@ -2373,7 +2373,10 @@ def handle_message(event):
                 area_display = "現在地"
         elif area_latlng is None:
             pass  # 位置情報未登録時は何も言わない
-        target_city = area_display if (city_specified or city_from_dict) else None
+        # 県名そのもの(例:「山梨県」)は市ではない。県のみ指定のときは市扱いにせず県内検索にする。
+        # （「山梨県」に「山梨」(山梨市)が含まれる等の city_from_dict 誤判定で隣県が混ざるのを防ぐ）
+        _is_bare_pref = (area_name in PREF_NEIGHBORS) and (area_display == area_name)
+        target_city = None if _is_bare_pref else (area_display if (city_specified or city_from_dict) else None)
         # 県のみ指定(市区町村でない)のときは、まず県内だけを対象にする（足りなければ後で隣県に広げる）
         _allowed = {area_name} if (area_name in PREF_NEIGHBORS and not target_city) else None
         results = select_three_points(base_date=target_date, base_latlng=area_latlng, radius=_radius, place_name=area_display, keyword=search_keyword, target_city=target_city, origin_latlng=origin_latlng, origin_name=origin_name, allowed_prefs=_allowed)
