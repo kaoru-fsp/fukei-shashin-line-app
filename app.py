@@ -592,6 +592,43 @@ def usage_guide_messages():
         ),
     ]
 
+def command_list_text():
+    """「コマンド」で表示するコマンド一覧と用例。"""
+    return (
+        "【コマンド一覧】\n"
+        "\n"
+        "■ 基本の探し方（そのまま送る）\n"
+        "・地域：栃木県／美瑛／箱根\n"
+        "・被写体：滝／桜／紅葉／星空／海\n"
+        "・地域＋被写体：栃木県 紅葉\n"
+        "・日付を添える：週末 京都／明日 滝／3日後\n"
+        "（日付を言わなければ今の時期でご提案）\n"
+        "\n"
+        "■ @地名（必ず地名として探す）\n"
+        "・例：@川越／@海老名／@中央区\n"
+        "・地名が被写体と紛れるときや、見つかりにくい地名に\n"
+        "\n"
+        "■ 半径を指定する\n"
+        "・地名や被写体の後ろに数字（km）：美瑛150／滝80\n"
+        "\n"
+        "■ 現在地から探す（位置情報の送信が必要）\n"
+        "・<被写体>現在地<半径>：アジサイ現在地100\n"
+        "・撮り頃<半径>：撮り頃150（今が撮り頃の被写体一覧）\n"
+        "・位置情報を送ると、地域を言わなくても近くからご提案\n"
+        "\n"
+        "■ 道中・帰り道で探す\n"
+        "・自宅を登録：自宅 川越市\n"
+        "・帰り道：茅野r／現在地r150（r＝登録した自宅へ）\n"
+        "・r<地名>：r板橋区（その地名を自宅に登録し、今回もそこへ）\n"
+        "・目的地へ：茅野t函館市（t＝その場限りの目的地）\n"
+        "・被写体も挟める：茅野s滝t函館市（sの後ろが被写体）\n"
+        "\n"
+        "■ その他\n"
+        "・使い方／ヘルプ：使い方ガイド\n"
+        "・データ削除：記録の消去\n"
+        "・コマンド：この一覧"
+    )
+
 KEYWORD_NORMALIZE = {
     '滝': ['滝', '瀧', 'たき', 'タキ'],
     '桜': ['桜', '櫻', 'さくら', 'サクラ', '桜花'],
@@ -1690,6 +1727,10 @@ def handle_message(event):
     if event.message.text.strip() in ("使い方", "つかいかた", "ヘルプ", "help", "Help"):
         line_bot_api.reply_message(reply_token, [TextSendMessage(text=t) for t in usage_guide_messages()])
         return
+    # 「コマンド」でコマンド一覧と用例を表示
+    if event.message.text.strip() in ("コマンド", "こまんど", "コマンド一覧", "command"):
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=command_list_text()))
+        return
     # データ削除コマンド(同意の撤回・記録消去)。検索として記録される前に処理する
     if event.message.text.strip() in ("データ削除", "データ消去", "記録削除"):
         delete_user_data(user_id)
@@ -1732,11 +1773,9 @@ def handle_message(event):
             if pr['status'] == 'not_found':
                 # 地名そのものの作品が無い場合は、地点として解決し周辺(約80km)の作品を探す
                 _pll, _pname, _conf = resolve_place(place_q)
-                print(f"[DIAG-AT] place={place_q!r} text_match=not_found resolve_place={_pll} conf={_conf}", flush=True)
                 if _pll:
                     pr2 = search_by_place([], base_date=target_date, origin_latlng=_ol2, origin_name=_on2,
                                           center_latlng=_pll, radius_km=80)
-                    print(f"[DIAG-AT] proximity status={pr2['status']} count={len(pr2.get('results', []))}", flush=True)
                     if pr2['status'] != 'not_found' and pr2['results']:
                         pr = pr2
                         _proximity = True
