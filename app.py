@@ -948,7 +948,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
 
         # 地域指定時にpoolが空の場合はTOO_FEWを返す
         if not pool and target_pref:
-            return 'TOO_FEW', target_pref, 0
+            return 'TOO_FEW', target_pref, 0, []
         # 地域未指定時にpoolが空の場合、旬ウィンドウを前後1ヶ月に広げてリトライ
         if not pool and base_latlng and not target_pref:
             wider_window = set()
@@ -1007,7 +1007,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
 
         if not pool:
             if target_pref:
-                return 'TOO_FEW', target_pref, 0
+                return 'TOO_FEW', target_pref, 0, []
             return []
 
         # 市町村が明示された場合: 市一致をベストマッチ、それ以外を「◯◯周辺の撮影地」に分けて返す
@@ -1065,7 +1065,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             else:
                 best_pool = [p for p in sorted(pool, key=lambda x: (-x['ascore'], x['dist'])) if p['pref'] == target_pref]
                 if len(best_pool) < 3:
-                    return 'TOO_FEW', target_pref, len(best_pool)
+                    return 'TOO_FEW', target_pref, len(best_pool), filter_broken_images([('🎯', 'ベストマッチ', p) for p in best_pool])
         else:
             best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
         used_areas = set()
@@ -1832,7 +1832,7 @@ def handle_message(event):
             if _proximity:
                 head = f"「{place_q}」の周辺で撮られた作品を近い順にご紹介します。"
             elif pr['status'] == 'in_season':
-                head = f"「{place_q}」の今の時期の撮影地はこちらです。"
+                head = f"今の時期に「{place_q}」で撮影された作品はこちらです。"
             else:
                 cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
                 peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
@@ -2462,7 +2462,7 @@ def handle_message(event):
                 return
             results = pr['results']
             if pr['status'] == 'in_season':
-                head = f"「{place_query}」の今の時期の撮影地はこちらです。"
+                head = f"今の時期に「{place_query}」で撮影された作品はこちらです。"
             else:
                 cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
                 peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
@@ -2510,11 +2510,11 @@ def handle_message(event):
             elif city_count <= 3:
                 head = f"{target_date.month}月{target_date.day}日の前後で{city_base}で調べたところ該当は{city_count}件でした。周辺の候補も合わせて表示します。"
             else:
-                head = f"{city_base}の今の時期の撮影地はこちらです。"
+                head = f"今の時期に「{city_base}」で撮影された作品はこちらです。"
             reply_with_carousel(reply_token, head, results)
             return
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
-            _, found_pref, count = results
+            _, found_pref, count, few_results = results
             EXPAND_PENDING[user_id] = {
                 'pref': found_pref,
                 'date': target_date,
@@ -2522,14 +2522,18 @@ def handle_message(event):
                 'display': area_display,
                 'keyword': search_keyword,
             }
-            if count == 0:
-                _lead = f"{found_pref}で探しましたが、今の時期の作品は見つかりませんでした。"
+            _disp = area_display or found_pref
+            _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
+            if count == 0 or not few_results:
+                # 0件 → メニューのみ
+                _lead = f"今の時期に「{_disp}」で撮影された作品は見つかりませんでした。"
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(_lead, _opts)))
             else:
-                _lead = f"{found_pref}で探したところ、今の時期の作品は{count}件でした。"
-            msg = TextSendMessage(
-                text=f"{_lead}\nどうしますか？\n1. 期間を広げて探す\n2. 地域を広げて探す（隣の県まで）\n3. 両方広げて探す\n4. やめる（別の条件で探す）"
-            )
-            line_bot_api.reply_message(reply_token, msg)
+                # 1〜3件 → 県内の作品をカルーセルで出し、続けてメニュー
+                _shead = f"今の時期に「{_disp}」で撮影された作品はこちらです。"
+                _mlead = f"今の時期の「{_disp}」の作品は{count}件でした。もっと広げて探せます。"
+                reply_with_carousel(reply_token, _shead, few_results,
+                                    menu_text=expand_menu_text(_mlead, _opts))
             return
         if not results:
             results = []
