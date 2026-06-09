@@ -181,19 +181,19 @@ FILLER_WORDS = ['撮影地', '撮影', '写真', 'スポット', '撮れる', '�
 # season は表示用の見頃（無ければ空文字）。lat/lng は近い順の判定に使う（任意）。
 FAMOUS_SPOTS = [
     {"name": "河津桜（静岡県河津町）", "query": "河津桜 静岡県河津町", "subject": "桜",
-     "pref": "静岡県", "names": ["河津", "河津桜"], "season": "2月中旬〜3月上旬", "lat": 34.7449, "lng": 138.9534},
+     "pref": "静岡県", "names": ["河津", "河津桜"], "season": "2月中旬〜3月上旬", "months": {2, 3}, "lat": 34.7449, "lng": 138.9534},
     {"name": "三春滝桜（福島県三春町）", "query": "三春滝桜 福島県三春町", "subject": "桜",
-     "pref": "福島県", "names": ["三春", "滝桜", "三春滝桜"], "season": "4月中旬", "lat": 37.4439, "lng": 140.4906},
+     "pref": "福島県", "names": ["三春", "滝桜", "三春滝桜"], "season": "4月中旬", "months": {4}, "lat": 37.4439, "lng": 140.4906},
     {"name": "高遠城址公園（長野県伊那市）", "query": "高遠城址公園 桜", "subject": "桜",
-     "pref": "長野県", "names": ["高遠"], "season": "4月上旬〜中旬", "lat": 35.8339, "lng": 138.0617},
+     "pref": "長野県", "names": ["高遠"], "season": "4月上旬〜中旬", "months": {4}, "lat": 35.8339, "lng": 138.0617},
     {"name": "あしかがフラワーパークの大藤（栃木県足利市）", "query": "あしかがフラワーパーク 藤", "subject": "藤",
-     "pref": "栃木県", "names": ["あしかが", "足利", "フラワーパーク"], "season": "4月下旬〜5月上旬", "lat": 36.3146, "lng": 139.5206},
+     "pref": "栃木県", "names": ["あしかが", "足利", "フラワーパーク"], "season": "4月下旬〜5月上旬", "months": {4, 5}, "lat": 36.3146, "lng": 139.5206},
     {"name": "上高地（長野県松本市）", "query": "上高地 長野県松本市", "subject": None,
-     "pref": "長野県", "names": ["上高地"], "season": "新緑6月・紅葉10月中旬", "lat": 36.2506, "lng": 137.6319},
+     "pref": "長野県", "names": ["上高地"], "season": "新緑6月・紅葉10月中旬", "months": {4, 5, 6, 7, 8, 9, 10, 11}, "lat": 36.2506, "lng": 137.6319},
     {"name": "国営ひたち海浜公園 ネモフィラ（茨城県ひたちなか市）", "query": "国営ひたち海浜公園 ネモフィラ", "subject": "ネモフィラ",
-     "pref": "茨城県", "names": ["ひたち海浜", "ネモフィラ"], "season": "4月中旬〜5月上旬", "lat": 36.4017, "lng": 140.5928},
+     "pref": "茨城県", "names": ["ひたち海浜", "ネモフィラ"], "season": "4月中旬〜5月上旬", "months": {4, 5}, "lat": 36.4017, "lng": 140.5928},
     {"name": "富士芝桜まつり（山梨県富士河口湖町）", "query": "富士本栖湖リゾート 芝桜", "subject": "芝桜",
-     "pref": "山梨県", "names": ["本栖", "富士芝桜"], "season": "4月中旬〜5月下旬", "lat": 35.4530, "lng": 138.5870},
+     "pref": "山梨県", "names": ["本栖", "富士芝桜"], "season": "4月中旬〜5月下旬", "months": {4, 5}, "lat": 35.4530, "lng": 138.5870},
 ]
 
 
@@ -207,8 +207,13 @@ def pick_famous_spots(subject=None, region_text=None, origin_latlng=None, base_d
     今が見頃のもの・近いものを優先して最大limit件返す。該当が無ければ空リスト。"""
     region_text = region_text or ''
     region_core = re.sub(r'[都道府県市区町村郡]', '', region_text)
+    cur_month = base_date.month if base_date else date.today().month
     scored = []
     for sp in FAMOUS_SPOTS:
+        # 撮り頃(出してよい月)から外れた参考スポットは出さない。例: 河津桜(2〜3月)は6月には出さない。
+        sp_months = sp.get("months")
+        if sp_months and cur_month not in sp_months:
+            continue
         subj_match = bool(subject) and sp.get("subject") == subject
         reg_match = False
         if region_text:
