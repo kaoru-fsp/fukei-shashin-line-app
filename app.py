@@ -1890,7 +1890,31 @@ def handle_message(event):
                         return
                     reply_with_carousel(reply_token, head, rr['results'])
                     return
-                # 想定外のkindは安全に終了
+                if pend.get('kind') == 'subject_only':
+                    subj = pend['subject']; center = pend.get('center_latlng')
+                    near_name = pend.get('near_name', '現在地'); rad = pend.get('radius', 150)
+                    date_ = pend['date']; _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    et = action in ('time', 'both')
+                    widen_area = action in ('area', 'both')
+                    if widen_area:
+                        # 地域を広げる: 全国を対象に、起点から近い順に並べる
+                        rr = search_by_place([], base_date=date_, origin_latlng=_ol, origin_name=_on,
+                                             subject=subj, center_latlng=center, radius_km=3000, expand_time=et)
+                        if et:
+                            head = f"全国の{subj}の作品を、期間も広げて{near_name}から近い順にご紹介します。"
+                        else:
+                            head = f"全国の{subj}の作品を、{near_name}から近い順にご紹介します。"
+                    else:
+                        # 期間だけ広げる: 近く(半径そのまま)で判定窓を前後およそ1.5か月に広げる
+                        rr = search_by_place([], base_date=date_, origin_latlng=_ol, origin_name=_on,
+                                             subject=subj, center_latlng=center, radius_km=rad, expand_time=True)
+                        head = f"{near_name}の近くで期間を広げて{subj}の作品を探しました。"
+                    if rr['status'] == 'not_found' or not rr['results']:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text=f"広げて探しましたが、{subj}の作品は見つかりませんでした。別の被写体でもお試しください。"))
+                        return
+                    reply_with_carousel(reply_token, head, rr['results'])
+                    return
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="承知しました。別の条件でお試しください。"))
                 return
@@ -2321,7 +2345,7 @@ def handle_message(event):
                 if pr['status'] == 'not_found':
                     # 0件 → メニューのみ
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _lead = f"「{place_disp}」では{_subj}の作品が見つかりませんでした。"
+                    _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。"
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
                     return
@@ -2344,60 +2368,44 @@ def handle_message(event):
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note)
                 return
-            # 地名なしの被写体のみ → 現在地(既定は東京)中心・半径150kmで探し、少なければ全国で補う
+            # 地名なしの被写体のみ → 現在地(既定は東京)中心・半径150kmで近い順に探す。件数で出し分け、足りなければメニューで広げる
             center = _ol or SHINJUKU
             RADIUS_SUBJ = 150
-            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj, center_latlng=center, radius_km=RADIUS_SUBJ)
-            near = list(prn['results']) if prn['status'] != 'not_found' else []
-            speaks = prn.get('peaks', [])
-            off = (prn['status'] == 'off_season')
             near_name = _on if _ol else "東京"
-            added_nation = False
+            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj, center_latlng=center, radius_km=RADIUS_SUBJ)
+            speaks = prn.get('peaks', [])
             _note_subj = famous_spots_note(subject=_subj, origin_latlng=_ol, base_date=target_date)
-            if len(near) < 3:  # 近くに少ない → 全国からも補う(重複除く・最大7件)
-                prn2 = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
-                if not speaks:
-                    speaks = prn2.get('peaks', [])
-                if prn2['status'] != 'not_found':
-                    def _rkey(r):
-                        it = r[2]
-                        return it.get('PicFileName') or (it.get('Title'), it.get('Place'), it.get('WinnerArea'))
-                    seen = {_rkey(r) for r in near}
-                    for r in prn2['results']:
-                        if len(near) >= 7:
-                            break
-                        if _rkey(r) not in seen:
-                            near.append(r)
-                            seen.add(_rkey(r))
-                            added_nation = True
-            if near:
-                migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                if added_nation:
-                    body = f"{near_name}の近くには{_subj}の作品が少ないため、全国の作品も合わせてご紹介します。"
-                else:
-                    body = f"{near_name}を中心に半径{RADIUS_SUBJ}kmで撮られた{_subj}の作品です。"
-                if off:
-                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migq}参考に、{body}"
-                elif _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = body.rstrip("。") + f"（撮り頃は{peaks_text(speaks)}ごろ）。"
-                else:
-                    shead = body
-                reply_with_carousel(reply_token, shead, near[:7], note_text=_note_subj)
-                return
-            # 近くに全く無い → 全国のみ
-            prn = search_by_place([], base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
+            _pend_ctx = {
+                'kind': 'subject_only', 'subject': _subj, 'center_latlng': center,
+                'near_name': near_name, 'radius': RADIUS_SUBJ, 'date': target_date,
+                'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
+            }
+            _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
             if prn['status'] != 'not_found':
-                speaks = prn.get('peaks', [])
-                migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                results = prn['results']
+                count = len(results)
                 if prn['status'] == 'off_season':
-                    shead = f"今の時期は{_subj}の作品が見当たりませんでした。{migq}参考に、全国の{_subj}の作品をご紹介します。"
+                    migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                    shead = f"今の時期は{near_name}の近くで{_subj}の作品が見当たりませんでした。{migq}参考に、これまでの作品をご紹介します。"
                 elif _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"近くには見当たらないため、全国の{_subj}の作品です（撮り頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"近くには見当たらないため、全国の{_subj}の作品をご紹介します。"
-                reply_with_carousel(reply_token, shead, prn['results'], note_text=_note_subj)
+                    shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです。"
+                if prn['status'] == 'off_season' or count <= 3:
+                    RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
+                    _mlead = ("ほかの作品も探せます。" if prn['status'] == 'off_season'
+                              else f"今の時期に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。")
+                    reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
+                                        menu_text=expand_menu_text(_mlead, _opts))
+                else:
+                    reply_with_carousel(reply_token, shead, results, note_text=_note_subj)
                 return
-            # 被写体でも全く該当が無ければ通常フローへフォールスルー
+            # 近くに0件 → メニューのみ（「地域を広げる」で全国を近い順に探せる）
+            RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
+            _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。"
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
+            return
 
         # 同名地名の問い返し
         if area_name == "AMBIGUOUS":
