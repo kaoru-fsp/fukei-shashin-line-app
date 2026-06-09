@@ -2350,7 +2350,8 @@ def handle_message(event):
                                 else "別の時期には作品があります。")
                         _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
                     else:
-                        _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。"
+                        _lead = (f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。\n"
+                                 f"再度検索する場合は地域を広げて探すことをおすすめします。")
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
                     return
@@ -2404,7 +2405,8 @@ def handle_message(event):
                         else "別の時期には近くに作品があります。")
                 _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。{hint}"
             else:
-                _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。"
+                _lead = (f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。\n"
+                         f"再度検索する場合は地域を広げて探すことをおすすめします。")
             line_bot_api.reply_message(reply_token, TextSendMessage(
                 text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
             return
