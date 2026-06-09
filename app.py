@@ -297,9 +297,10 @@ def haversine(lat1, lng1, lat2, lng2):
     h = math.sin(dphi/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dlmb/2)**2
     return 2 * R * math.asin(math.sqrt(h))
 
-def half_month_window(base_date):
+def half_month_window(base_date, expand=False):
     pairs = set()
-    for delta in range(-7, 14):
+    lo, hi = (-45, 46) if expand else (-7, 14)  # expand=「期間を広げる」: 前後およそ1.5か月
+    for delta in range(lo, hi):
         d = base_date + timedelta(days=delta)
         pairs.add((d.month, junkun(d.day)))
     return pairs
@@ -435,6 +436,7 @@ CITY_TO_PREF_MULTI = {}
 AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
+RESULT_PENDING = {}  # 件数分岐の統一メニュー待ち  # user_id -> {kind, options, subject, place_terms, ...}
 ROUTE_PENDING = {}  # tコマンドで目的地が未確定のときの入力待ち  # user_id -> {center,center_nm,subject,radius}
 WARD_PENDING = {}  # 同名の区(中央区など)の選択待ち  # user_id -> {cands,mode,center,...}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
@@ -1160,16 +1162,17 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
-def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None, center_latlng=None, radius_km=None, home_latlng=None):
+def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None, center_latlng=None, radius_km=None, home_latlng=None, expand_time=False):
     """地点名(Place/Area/Title)の自由文検索。
     今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
     center_latlng+radius_km を指定すると、その中心から半径内の作品に絞り近い順に返す。
     home_latlng も指定すると、自宅に近づく方向(帰路)の作品だけに絞り、寄り道の少ない順に返す。
+    expand_time=True で「今の時期」の判定窓を前後およそ1.5か月に広げる(期間を広げる)。
     返り値: {'status': 'in_season'|'off_season'|'not_found', 'results': [(emoji,label,item),...]}"""
     if not db:
         return {'status': 'not_found', 'results': []}
     base = base_date if base_date else date.today() + timedelta(days=1)
-    window = half_month_window(base)
+    window = half_month_window(base, expand=expand_time)
     tokyo = PREF_LATLNG["東京都"]
     origin = origin_latlng if origin_latlng else SHINJUKU
     base_name = origin_name or DEFAULT_ORIGIN_NAME
@@ -1604,9 +1607,33 @@ def build_info_bubble(text):
     }
 
 
-def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None):
+def expand_menu_options(enable_peak=False):
+    """統一メニューの選択肢リスト(順序が番号に対応)。撮り頃が明確で時期外れのときだけ peak を含める。"""
+    opts = ['time', 'area', 'both']
+    if enable_peak:
+        opts.append('peak')
+    opts.append('cancel')
+    return opts
+
+def expand_menu_text(lead, options, peak_text=None):
+    """統一メニューの本文を作る。options は expand_menu_options() の戻り値。"""
+    labels = {
+        'time': "期間を広げて探す",
+        'area': "地域を広げて探す",
+        'both': "両方広げて探す",
+        'peak': (f"撮り頃で探す（{peak_text}ごろ）" if peak_text else "撮り頃で探す"),
+        'cancel': "やめる（別の条件で探す）",
+    }
+    lines = [lead, "どうしますか？"]
+    for i, o in enumerate(options, 1):
+        lines.append(f"{i}. {labels[o]}")
+    return "\n".join(lines)
+
+
+def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
-    note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。"""
+    note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
+    menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。"""
     bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw')) for e, l, it in results]
     if head_text:
         bubbles = [build_info_bubble(head_text)] + bubbles
@@ -1618,6 +1645,8 @@ def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地の�
     msgs = [carousel]
     if note_text:
         msgs.append(TextSendMessage(text=note_text))
+    if menu_text:
+        msgs.append(TextSendMessage(text=menu_text))
     line_bot_api.reply_message(reply_token, msgs)
 
 
@@ -1764,7 +1793,7 @@ def handle_message(event):
         # （辞書に無い地名や、川越・海老名のように地名内の単漢字が被写体に化けるケースの確実な回避策）
         _at = re.match(r'^[@＠]\s*(.+)$', user_message)
         if _at:
-            for _pd in (SUBJECT_PENDING, EXPAND_PENDING, AMBIGUOUS_PENDING, ROUTE_PENDING, WARD_PENDING):
+            for _pd in (SUBJECT_PENDING, EXPAND_PENDING, AMBIGUOUS_PENDING, ROUTE_PENDING, WARD_PENDING, RESULT_PENDING):
                 _pd.pop(user_id, None)
             place_q = _at.group(1).strip()
             # @は地名専用。地名以外の語(被写体やつなぎ語)が紛れていても、地名部分だけで検索・表示する。
@@ -1814,6 +1843,57 @@ def handle_message(event):
                     head = f"「{place_q}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
             reply_with_carousel(reply_token, head, results, note_text=_note)
             return
+
+        # 件数分岐の統一メニューへの応答（1.期間 2.地域 3.両方 [4.撮り頃] 最後=やめる）
+        if user_id in RESULT_PENDING:
+            pend = RESULT_PENDING[user_id]
+            ch = user_message.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+            m = re.match(r'^(\d+)', ch)
+            if not m:
+                del RESULT_PENDING[user_id]  # 番号以外は新規クエリとして続行
+            else:
+                opts = pend.get('options', ['time', 'area', 'both', 'cancel'])
+                idx = int(m.group(1)) - 1
+                if idx < 0 or idx >= len(opts):
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"1〜{len(opts)}の番号でお選びください。やめる場合は{len(opts)}番です。"))
+                    return
+                action = opts[idx]
+                del RESULT_PENDING[user_id]
+                if action == 'cancel':
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text="承知しました。別の地域や被写体（例：奥日光 滝）でお試しください。"))
+                    return
+                if pend.get('kind') == 'place_subject':
+                    subj = pend['subject']; pterms = pend['place_terms']; disp = pend['place_disp']
+                    pll = pend.get('place_latlng'); date_ = pend['date']
+                    _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    et = action in ('time', 'both')
+                    widen_area = action in ('area', 'both')
+                    if widen_area:
+                        # 地域を広げる: 地名のしばりを外し、その地点から近い順に全国で被写体を探す
+                        center = pll or _ol or SHINJUKU
+                        rr = search_by_place([], base_date=date_, origin_latlng=_ol, origin_name=_on,
+                                             subject=subj, center_latlng=center, radius_km=3000, expand_time=et)
+                        if et:
+                            head = f"「{disp}」にこだわらず期間も広げ、近い順に{subj}の作品を探しました。"
+                        else:
+                            head = f"「{disp}」にこだわらず、近い順に{subj}の作品を広げて探しました。"
+                    else:
+                        # 期間だけ広げる: 同じ地域で判定窓を前後およそ1.5か月に広げる
+                        rr = search_by_place(pterms, base_date=date_, origin_latlng=_ol, origin_name=_on,
+                                             subject=subj, expand_time=True)
+                        head = f"「{disp}」で期間を広げて{subj}の作品を探しました。"
+                    if rr['status'] == 'not_found' or not rr['results']:
+                        line_bot_api.reply_message(reply_token, TextSendMessage(
+                            text=f"広げて探しましたが、{subj}の作品は見つかりませんでした。別の地域や被写体でお試しください。"))
+                        return
+                    reply_with_carousel(reply_token, head, rr['results'])
+                    return
+                # 想定外のkindは安全に終了
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text="承知しました。別の条件でお試しください。"))
+                return
 
         # 地域＋被写体が0件だったときの選択（1.条件を広げる 2.全国 3.戻る）
         if user_id in SUBJECT_PENDING:
@@ -2227,31 +2307,42 @@ def handle_message(event):
             _ol = (_u["lat"], _u["lng"]) if _u else None
             _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
             place_disp = "・".join(place_terms)
-            # ① 地域＋被写体
+            # ① 地域＋被写体（件数で出し分け: 0件=メニューのみ / 1〜3件=カルーセル+メニュー / 4件以上=カルーセルのみ）
             if place_terms:
                 pr = search_by_place(place_terms, base_date=target_date, origin_latlng=_ol, origin_name=_on, subject=_subj)
                 _note = famous_spots_note(subject=_subj, region_text=place_disp, origin_latlng=_ol, base_date=target_date)
-                if pr['status'] != 'not_found':
-                    speaks = pr.get('peaks', [])
-                    if pr['status'] == 'off_season':
-                        migp = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                        shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
-                    elif _subj in SEASONAL_SUBJECTS and speaks:
-                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
-                    else:
-                        shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
-                    reply_with_carousel(reply_token, shead, pr['results'], note_text=_note)
-                    return
-                # 0件 → 「見つかりませんでした」と伝えたうえで選択肢を提示
-                SUBJECT_PENDING[user_id] = {
-                    'subject': _subj, 'place_disp': place_disp,
-                    'place_latlng': area_latlng or geocode(place_terms[0]),
-                    'date': target_date, 'origin_latlng': _ol, 'origin_name': _on,
+                speaks = pr.get('peaks', [])
+                _pend_ctx = {
+                    'kind': 'place_subject', 'subject': _subj, 'place_terms': place_terms,
+                    'place_disp': place_disp, 'place_latlng': area_latlng or geocode(place_terms[0]),
+                    'date': target_date, 'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
                 }
-                line_bot_api.reply_message(reply_token, TextSendMessage(
-                    text=(f"「{place_disp}」では{_subj}の作品が見つかりませんでした。\nどうしますか？\n"
-                          f"1. 条件を広げて探す（期間と距離）\n2. 全国で探す\n3. 戻る"
-                          + (("\n\n" + _note) if _note else ""))))
+                _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
+                if pr['status'] == 'not_found':
+                    # 0件 → メニューのみ
+                    RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
+                    _lead = f"「{place_disp}」では{_subj}の作品が見つかりませんでした。"
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
+                    return
+                results = pr['results']
+                count = len(results)
+                if pr['status'] == 'off_season':
+                    migp = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+                    shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
+                elif _subj in SEASONAL_SUBJECTS and speaks:
+                    shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
+                else:
+                    shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
+                # 1〜3件 または 時期外れ → カルーセル＋「もっと広げますか?」メニュー / 4件以上 → カルーセルのみ
+                if pr['status'] == 'off_season' or count <= 3:
+                    RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
+                    _mlead = ("ほかの作品も探せます。" if pr['status'] == 'off_season'
+                              else f"「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。")
+                    reply_with_carousel(reply_token, shead, results, note_text=_note,
+                                        menu_text=expand_menu_text(_mlead, _opts))
+                else:
+                    reply_with_carousel(reply_token, shead, results, note_text=_note)
                 return
             # 地名なしの被写体のみ → 現在地(既定は東京)中心・半径150kmで探し、少なければ全国で補う
             center = _ol or SHINJUKU
