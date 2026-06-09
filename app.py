@@ -1762,6 +1762,17 @@ def handle_message(event):
             for _pd in (SUBJECT_PENDING, EXPAND_PENDING, AMBIGUOUS_PENDING, ROUTE_PENDING, WARD_PENDING):
                 _pd.pop(user_id, None)
             place_q = _at.group(1).strip()
+            # @は地名専用。地名以外の語(被写体やつなぎ語)が紛れていても、地名部分だけで検索・表示する。
+            _at_tokens = re.split(r'[\s　]+', place_q)
+            if len(_at_tokens) >= 2:
+                _kept = []
+                for _tok in _at_tokens:
+                    _is_subj = any(_tok == _c or _tok in _vs for _c, _vs in KEYWORD_NORMALIZE.items())
+                    if _is_subj or _tok in FILLER_WORDS:
+                        continue  # 被写体語・つなぎ語は地名から落とす
+                    _kept.append(_tok)
+                if _kept:
+                    place_q = ' '.join(_kept).strip()
             target_date = parse_target_date(place_q)
             _u2 = USER_LOCATION.get(user_id)
             _ol2 = (_u2["lat"], _u2["lng"]) if _u2 else None
