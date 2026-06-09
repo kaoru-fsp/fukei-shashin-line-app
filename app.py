@@ -2342,27 +2342,28 @@ def handle_message(event):
                     'date': target_date, 'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
                 }
                 _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
-                if pr['status'] == 'not_found':
-                    # 0件 → メニューのみ
+                if pr['status'] in ('not_found', 'off_season'):
+                    # 今の時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。"
+                    if pr['status'] == 'off_season':
+                        hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
+                                else "別の時期には作品があります。")
+                        _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                    else:
+                        _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。"
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
                     return
                 results = pr['results']
                 count = len(results)
-                if pr['status'] == 'off_season':
-                    migp = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                    shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
-                elif _subj in SEASONAL_SUBJECTS and speaks:
+                if _subj in SEASONAL_SUBJECTS and speaks:
                     shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです。"
-                # 1〜3件 または 時期外れ → カルーセル＋「もっと広げますか?」メニュー / 4件以上 → カルーセルのみ
-                if pr['status'] == 'off_season' or count <= 3:
+                # 1〜3件 → カルーセル＋「もっと広げますか?」メニュー / 4件以上 → カルーセルのみ
+                if count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _mlead = ("ほかの作品も探せます。" if pr['status'] == 'off_season'
-                              else f"今の時期の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。")
+                    _mlead = f"今の時期の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
@@ -2381,28 +2382,29 @@ def handle_message(event):
                 'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
             }
             _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
-            if prn['status'] != 'not_found':
+            if prn['status'] == 'in_season':
                 results = prn['results']
                 count = len(results)
-                if prn['status'] == 'off_season':
-                    migq = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-                    shead = f"今の時期は{near_name}の近くで{_subj}の作品が見当たりませんでした。{migq}参考に、これまでの作品をご紹介します。"
-                elif _subj in SEASONAL_SUBJECTS and speaks:
+                if _subj in SEASONAL_SUBJECTS and speaks:
                     shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
                     shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです。"
-                if prn['status'] == 'off_season' or count <= 3:
+                if count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _mlead = ("ほかの作品も探せます。" if prn['status'] == 'off_season'
-                              else f"今の時期に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。")
+                    _mlead = f"今の時期に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj)
                 return
-            # 近くに0件 → メニューのみ（「地域を広げる」で全国を近い順に探せる）
+            # 今の時期に近くで該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-            _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。"
+            if prn['status'] == 'off_season':
+                hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
+                        else "別の時期には近くに作品があります。")
+                _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。{hint}"
+            else:
+                _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。"
             line_bot_api.reply_message(reply_token, TextSendMessage(
                 text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
             return
