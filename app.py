@@ -2331,14 +2331,14 @@ def handle_message(event):
                     migp = f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks) else ""
                     shead = f"今の時期は「{place_disp}」の{_subj}の作品が見当たりませんでした。{migp}参考に、これまでの作品をご紹介します。"
                 elif _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"「{place_disp}」の{_subj}の撮影地はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"「{place_disp}」の{_subj}の撮影地はこちらです。"
+                    shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです。"
                 # 1〜3件 または 時期外れ → カルーセル＋「もっと広げますか?」メニュー / 4件以上 → カルーセルのみ
                 if pr['status'] == 'off_season' or count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     _mlead = ("ほかの作品も探せます。" if pr['status'] == 'off_season'
-                              else f"「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。")
+                              else f"今の時期の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。")
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
