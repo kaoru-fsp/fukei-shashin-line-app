@@ -751,36 +751,89 @@ PREF_NEIGHBORS = {
 }
 
 
-def parse_target_date(text):
-    today = date.today()
+JUN_REP_DAY = {'上旬': 5, '中旬': 15, '下旬': 25}  # 旬の代表日（窓の中心に使う）
+
+def _resolve_month(today, mo, rep_day):
+    """月/旬用。『その月という季節』なので月単位でロール（同月なら今年のまま、
+    過去の月だけ翌年へ）。rep_day は窓の中心に使う代表日。"""
+    year = today.year + 1 if mo < today.month else today.year
+    try:
+        return date(year, mo, rep_day)
+    except ValueError:
+        return None
+
+def parse_period(text, today=None):
+    """対象時期を解釈して {'date','specified','granularity'} を返す。
+    granularity: 'day' | 'jun'(上中下旬) | 'month' | None(指定なし)。
+    指定が無ければ date=today, specified=False, granularity=None（＝「今の時期」）。
+    判定順: 相対(明日等) → M月D日 → M月(上中下旬) → 来週等 → M月単独。"""
+    today = today or date.today()
+    P = lambda d, s, g: {'date': d, 'specified': s, 'granularity': g}
+
     if "明日" in text or "あした" in text:
-        return today + timedelta(days=1)
+        return P(today + timedelta(days=1), True, 'day')
     if "明後日" in text or "あさって" in text:
-        return today + timedelta(days=2)
+        return P(today + timedelta(days=2), True, 'day')
+    if "今日" in text or "本日" in text:
+        return P(today, True, 'day')
     m = re.search(r'(\d+)日後', text)
     if m:
-        return today + timedelta(days=int(m.group(1)))
+        return P(today + timedelta(days=int(m.group(1))), True, 'day')
+
     m = re.search(r'(\d{1,2})月(\d{1,2})日', text)
     if m:
         mo, dy = int(m.group(1)), int(m.group(2))
         try:
-            target = date(today.year, mo, dy)
-            if target < today:
-                target = date(today.year + 1, mo, dy)
-            return target
-        except:
+            t = date(today.year, mo, dy)
+            if t < today:
+                t = date(today.year + 1, mo, dy)
+            return P(t, True, 'day')
+        except ValueError:
             pass
+
+    # M月 + 上旬/中旬/下旬
+    m = re.search(r'(\d{1,2})月\s*(上旬|中旬|下旬)', text)
+    if m:
+        t = _resolve_month(today, int(m.group(1)), JUN_REP_DAY[m.group(2)])
+        if t:
+            return P(t, True, 'jun')
+
     if "来週末" in text:
-        days_ahead = 5 - today.weekday() + 7
-        return today + timedelta(days=days_ahead)
+        return P(today + timedelta(days=(5 - today.weekday() + 7)), True, 'day')
     if "来週" in text:
-        return today + timedelta(days=7)
+        return P(today + timedelta(days=7), True, 'day')
     if "今週末" in text or "週末" in text:
         days_ahead = 5 - today.weekday()
         if days_ahead <= 0:
             days_ahead += 7
-        return today + timedelta(days=days_ahead)
-    return today
+        return P(today + timedelta(days=days_ahead), True, 'day')
+
+    # M月 単独（直後が 日/数字/上中下 でないとき＝その月全体）
+    m = re.search(r'(\d{1,2})月(?![\d上中下])', text)
+    if m:
+        t = _resolve_month(today, int(m.group(1)), 15)  # 月の中心（±3週窓で月全体を概ねカバー）
+        if t:
+            return P(t, True, 'month')
+
+    return P(today, False, None)
+
+def period_phrase(pp=None, date_=None, specified=False, granularity=None):
+    """検索の対象時期を表す名詞句。見出しの「今の時期」を置換する単一の出所。
+    pp（parse_periodの戻り値）を渡すか、date_/specified/granularity を直接渡す。
+    指定なしは『今の時期』。日指定は『◯月◯日ごろ』、旬は『◯月中旬』、月は『◯月』。"""
+    if pp is not None:
+        date_ = pp.get('date'); specified = pp.get('specified'); granularity = pp.get('granularity')
+    if not specified or date_ is None:
+        return "今の時期"
+    if granularity == 'month':
+        return f"{date_.month}月"
+    if granularity == 'jun':
+        return f"{date_.month}月{junkun(date_.day)}"
+    return f"{date_.month}月{date_.day}日ごろ"  # 'day' その他
+
+def parse_target_date(text):
+    """後方互換: 対象日のみ返す。解釈は parse_period に委譲。"""
+    return parse_period(text)['date']
 
 def parse_target_area(text):
     for pref in PREF_LATLNG:
@@ -1655,7 +1708,8 @@ def _staged_terms(stage, pref, city):
         return [pref] + PREF_NEIGHBORS.get(pref, [])
     return []  # nation = 全国（テキスト絞り込みなし）
 
-def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, ol, on, expand_time=False):
+def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, ol, on, expand_time=False,
+                      specified=False, granularity=None):
     """県の略称と同名の市があるケース(例「静岡」)を、市→県→隣県→全国と段階的に広げて返す。
     常に上限内・近い順の代表のみを見せ、各段にメニューを添えて段階的に辿れるようにする。"""
     center = ol or SHINJUKU
@@ -1665,6 +1719,7 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     speaks = pr.get('peaks', [])
     subjlabel = f"{subject}の" if subject else ""
     sname = city.replace('市', '')
+    _phr = period_phrase(date_=date_, specified=specified, granularity=granularity)  # 「今の時期」or「◯月」等
     idx = STAGED_SCOPES.index(stage)
     can_widen = idx < len(STAGED_SCOPES) - 1
     opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
@@ -1677,32 +1732,33 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     else:
         scope_disp = "全国"; widen_hint = ""
     _pend = {'kind': 'staged_area', 'stage': stage, 'subject': subject, 'pref': pref,
-             'city': city, 'date': date_, 'origin_latlng': ol, 'origin_name': on, 'options': opts}
+             'city': city, 'date': date_, 'origin_latlng': ol, 'origin_name': on, 'options': opts,
+             'specified': specified, 'granularity': granularity}
     peaknote = f"（撮り頃は{peaks_text(speaks)}ごろ）" if (subject in SEASONAL_SUBJECTS and speaks) else ""
     if pr['status'] == 'not_found':
         if stage == 'city':
             lead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
-                    f"今の時期に撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}")
+                    f"{_phr}に撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}")
         else:
-            lead = f"今の時期に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
+            lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts)))
         return
     results = pr['results']
     count = len(results)
     if stage == 'city':
-        shead = f"まず{scope_disp}で、今の時期に撮影された{subjlabel}作品はこちらです{peaknote}。"
+        shead = f"まず{scope_disp}で、{_phr}に撮影された{subjlabel}作品はこちらです{peaknote}。"
         mlead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
-                 f"今の時期に撮影された{subjlabel}作品は{count}件でした。{widen_hint}")
+                 f"{_phr}に撮影された{subjlabel}作品は{count}件でした。{widen_hint}")
     elif stage == 'nation':
         shead = f"全国の{subjlabel}作品を、近い順にご紹介します{peaknote}。"
         mlead = f"全国の{subjlabel}作品を近い順にご紹介しました。"
     elif stage == 'neighbor':
-        shead = f"{scope_disp}で、今の時期に撮影された{subjlabel}作品を近い順にご紹介します{peaknote}。"
-        mlead = f"今の時期の{scope_disp}の{subjlabel}作品です。{widen_hint}"
+        shead = f"{scope_disp}で、{_phr}に撮影された{subjlabel}作品を近い順にご紹介します{peaknote}。"
+        mlead = f"{_phr}の{scope_disp}の{subjlabel}作品です。{widen_hint}"
     else:  # pref
-        shead = f"今の時期に{scope_disp}で撮影された{subjlabel}作品はこちらです{peaknote}。"
-        mlead = f"今の時期の{scope_disp}の{subjlabel}作品は{count}件でした。{widen_hint}"
+        shead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品はこちらです{peaknote}。"
+        mlead = f"{_phr}の{scope_disp}の{subjlabel}作品は{count}件でした。{widen_hint}"
     # 段階探索では常にメニューを添えて段階的に辿れるようにする（上限内・近い順の代表のみ）
     RESULT_PENDING[user_id] = _pend
     reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts))
@@ -1885,7 +1941,8 @@ def handle_message(event):
                     _kept.append(_tok)
                 if _kept:
                     place_q = ' '.join(_kept).strip()
-            target_date = parse_target_date(place_q)
+            _pp = parse_period(place_q)
+            target_date = _pp['date']
             _u2 = USER_LOCATION.get(user_id)
             _ol2 = (_u2["lat"], _u2["lng"]) if _u2 else None
             _on2 = (_u2.get("city") or "現在地") if _u2 else DEFAULT_ORIGIN_NAME
@@ -1910,15 +1967,16 @@ def handle_message(event):
             if _proximity:
                 head = f"「{place_q}」の周辺で撮られた作品を近い順にご紹介します。"
             elif pr['status'] == 'in_season':
-                head = f"今の時期に「{place_q}」で撮影された作品はこちらです。"
+                head = f"{period_phrase(_pp)}に「{place_q}」で撮影された作品はこちらです。"
             else:
                 cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
+                _cur_sfx = "" if _pp['specified'] else f"（{cur}）"
                 peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
                 if peaks:
-                    head = (f"「{place_q}」は今の時期（{cur}）の作品が少ないようです。"
+                    head = (f"「{place_q}」は{period_phrase(_pp)}{_cur_sfx}の作品が少ないようです。"
                             f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
-                    head = f"「{place_q}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+                    head = f"「{place_q}」は{period_phrase(_pp)}の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
             reply_with_carousel(reply_token, head, results, note_text=_note)
             return
 
@@ -1997,14 +2055,17 @@ def handle_message(event):
                     stage = pend['stage']; subj = pend['subject']
                     pref = pend['pref']; city = pend['city']; date_ = pend['date']
                     _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    _sp = pend.get('specified', False); _gr = pend.get('granularity')
                     idx = STAGED_SCOPES.index(stage)
                     if action == 'time':
                         # 同じ範囲のまま期間を広げる
-                        reply_staged_area(reply_token, user_id, stage, subj, pref, city, date_, _ol, _on, expand_time=True)
+                        reply_staged_area(reply_token, user_id, stage, subj, pref, city, date_, _ol, _on,
+                                          expand_time=True, specified=_sp, granularity=_gr)
                     else:
                         # 地域を広げる（市→県→隣県→全国）。both は期間も広げる
                         nxt = STAGED_SCOPES[min(idx + 1, len(STAGED_SCOPES) - 1)]
-                        reply_staged_area(reply_token, user_id, nxt, subj, pref, city, date_, _ol, _on, expand_time=(action == 'both'))
+                        reply_staged_area(reply_token, user_id, nxt, subj, pref, city, date_, _ol, _on,
+                                          expand_time=(action == 'both'), specified=_sp, granularity=_gr)
                     return
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="承知しました。別の条件でお試しください。"))
@@ -2349,21 +2410,21 @@ def handle_message(event):
                 del AMBIGUOUS_PENDING[user_id]
                 _amb_keyword = kw_option[0]
                 search_keyword = kw_option[0]
-                target_date = parse_target_date(user_message)
+                _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = None, None, None
             elif resolved_pref:
                 # 地域を確定（番号や県名で選択）
                 del AMBIGUOUS_PENDING[user_id]
                 latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
-                target_date = parse_target_date(user_message)
+                _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = resolved_pref, latlng, city
             else:
                 # 番号でも県名でもない → 新規クエリとして処理
                 del AMBIGUOUS_PENDING[user_id]
-                target_date = parse_target_date(user_message)
+                _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = parse_target_area(user_message)
         else:
-            target_date = parse_target_date(user_message)
+            _pp = parse_period(user_message); target_date = _pp['date']
             area_name, area_latlng, area_display = parse_target_area(user_message)
         # 被写体（キーワード）を先に判定する。地名の部分一致（例：「桜」がさいたま市桜区に一致）に
         # 被写体を取られないよう、被写体語を除いた文字列で地名を取り直す。
@@ -2415,7 +2476,8 @@ def handle_message(event):
             _u = USER_LOCATION.get(user_id)
             _ol = (_u["lat"], _u["lng"]) if _u else None
             _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
-            reply_staged_area(reply_token, user_id, 'city', _subj, _short_pref, _short_city, target_date, _ol, _on)
+            reply_staged_area(reply_token, user_id, 'city', _subj, _short_pref, _short_city, target_date, _ol, _on,
+                              specified=_pp['specified'], granularity=_pp['granularity'])
             return
         # 「地域名＋被写体」(例: 吉野山 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
         # 同名地名の問い返しより前に処理（被写体があれば地名はその語で直接検索でき、問い返し不要）。
@@ -2450,14 +2512,14 @@ def handle_message(event):
                 }
                 _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
                 if pr['status'] in ('not_found', 'off_season'):
-                    # 今の時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
+                    # 対象時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     if pr['status'] == 'off_season':
                         hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
                                 else "別の時期には作品があります。")
-                        _lead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                        _lead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
                     else:
-                        _lead = (f"今の時期に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。\n"
+                        _lead = (f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。\n"
                                  f"再度検索する場合は地域を広げて探すことをおすすめします。")
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
@@ -2465,13 +2527,13 @@ def handle_message(event):
                 results = pr['results']
                 count = len(results)
                 if _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"今の時期に「{place_disp}」で撮影された{_subj}の作品はこちらです。"
+                    shead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品はこちらです。"
                 # 1〜3件 → カルーセル＋「もっと広げますか?」メニュー / 4件以上 → カルーセルのみ
                 if count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _mlead = f"今の時期の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
+                    _mlead = f"{period_phrase(_pp)}の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
@@ -2494,25 +2556,25 @@ def handle_message(event):
                 results = prn['results']
                 count = len(results)
                 if _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"{period_phrase(_pp)}に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"今の時期に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです。"
+                    shead = f"{period_phrase(_pp)}に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです。"
                 if count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _mlead = f"今の時期に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。"
+                    _mlead = f"{period_phrase(_pp)}に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj)
                 return
-            # 今の時期に近くで該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
+            # 対象時期に近くで該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
             if prn['status'] == 'off_season':
                 hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
                         else "別の時期には近くに作品があります。")
-                _lead = f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                _lead = f"{period_phrase(_pp)}に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。{hint}"
             else:
-                _lead = (f"今の時期に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。\n"
+                _lead = (f"{period_phrase(_pp)}に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。\n"
                          f"再度検索する場合は地域を広げて探すことをおすすめします。")
             line_bot_api.reply_message(reply_token, TextSendMessage(
                 text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
@@ -2569,15 +2631,16 @@ def handle_message(event):
                 return
             results = pr['results']
             if pr['status'] == 'in_season':
-                head = f"今の時期に「{place_query}」で撮影された作品はこちらです。"
+                head = f"{period_phrase(_pp)}に「{place_query}」で撮影された作品はこちらです。"
             else:
                 cur = f"{target_date.month}月{junkun(target_date.day) or ''}"
+                _cur_sfx = "" if _pp['specified'] else f"（{cur}）"
                 peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
                 if peaks:
-                    head = (f"「{place_query}」は今の時期（{cur}）の作品が少ないようです。"
+                    head = (f"「{place_query}」は{period_phrase(_pp)}{_cur_sfx}の作品が少ないようです。"
                             f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
-                    head = f"「{place_query}」は今の時期の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+                    head = f"「{place_query}」は{period_phrase(_pp)}の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
             reply_with_carousel(reply_token, head, results, note_text=_note)
             return
 
@@ -2617,7 +2680,7 @@ def handle_message(event):
             elif city_count <= 3:
                 head = f"{target_date.month}月{target_date.day}日の前後で{city_base}で調べたところ該当は{city_count}件でした。周辺の候補も合わせて表示します。"
             else:
-                head = f"今の時期に「{city_base}」で撮影された作品はこちらです。"
+                head = f"{period_phrase(_pp)}に「{city_base}」で撮影された作品はこちらです。"
             reply_with_carousel(reply_token, head, results)
             return
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
@@ -2633,12 +2696,12 @@ def handle_message(event):
             _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
             if count == 0 or not few_results:
                 # 0件 → メニューのみ
-                _lead = f"今の時期に「{_disp}」で撮影された作品は見つかりませんでした。"
+                _lead = f"{period_phrase(_pp)}に「{_disp}」で撮影された作品は見つかりませんでした。"
                 line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(_lead, _opts)))
             else:
                 # 1〜3件 → 県内の作品をカルーセルで出し、続けてメニュー
-                _shead = f"今の時期に「{_disp}」で撮影された作品はこちらです。"
-                _mlead = f"今の時期の「{_disp}」の作品は{count}件でした。もっと広げて探せます。"
+                _shead = f"{period_phrase(_pp)}に「{_disp}」で撮影された作品はこちらです。"
+                _mlead = f"{period_phrase(_pp)}の「{_disp}」の作品は{count}件でした。もっと広げて探せます。"
                 reply_with_carousel(reply_token, _shead, few_results,
                                     menu_text=expand_menu_text(_mlead, _opts))
             return
@@ -2655,7 +2718,7 @@ def handle_message(event):
             line_bot_api.reply_message(reply_token, msg)
             return
 
-        _date_specified = any(w in user_message for w in ['明日','明後日','今日','来週','週末','月','日後'])
+        _date_specified = _pp['specified']
         _note = famous_spots_note(subject=search_keyword, region_text=(area_display or area_name or ''),
                                   origin_latlng=origin_latlng, base_date=target_date)
         reply_with_carousel(
