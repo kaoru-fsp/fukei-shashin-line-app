@@ -686,6 +686,19 @@ PREF_CITY = {
     "宮崎県":"宮崎市","鹿児島県":"鹿児島市","沖縄県":"那覇市",
 }
 
+# 県名の略称と同名の「市」が実在する都道府県（地名としての実在で判定。作品データの有無は問わない）。
+# 単独で略称が送られたとき(例「静岡」)、まず市で答えてから県・隣県へ広げる「狭→広」のために使う。
+PREF_SAME_NAME_CITY = {
+    "青森県": "青森市", "秋田県": "秋田市", "山形県": "山形市", "福島県": "福島市",
+    "栃木県": "栃木市", "千葉県": "千葉市", "新潟県": "新潟市", "富山県": "富山市",
+    "福井県": "福井市", "山梨県": "山梨市", "長野県": "長野市", "岐阜県": "岐阜市",
+    "静岡県": "静岡市", "京都府": "京都市", "大阪府": "大阪市", "奈良県": "奈良市",
+    "和歌山県": "和歌山市", "鳥取県": "鳥取市", "岡山県": "岡山市", "広島県": "広島市",
+    "山口県": "山口市", "徳島県": "徳島市", "高知県": "高知市", "福岡県": "福岡市",
+    "佐賀県": "佐賀市", "長崎県": "長崎市", "熊本県": "熊本市", "大分県": "大分市",
+    "宮崎県": "宮崎市", "鹿児島県": "鹿児島市", "沖縄県": "沖縄市",
+}
+
 # 陸続きで隣接する都道府県（県検索を「県内→隣県」に広げるための表）。海上のみで接する組合せは含めない。
 PREF_NEIGHBORS = {
     "北海道": [],
@@ -1630,6 +1643,71 @@ def expand_menu_text(lead, options, peak_text=None):
     return "\n".join(lines)
 
 
+# 県の略称＝同名市があるケースの「狭→広」段階。市→県→隣県→全国の順に広げる。
+STAGED_SCOPES = ['city', 'pref', 'neighbor', 'nation']
+
+def _staged_terms(stage, pref, city):
+    if stage == 'city':
+        return [city]
+    if stage == 'pref':
+        return [pref]
+    if stage == 'neighbor':
+        return [pref] + PREF_NEIGHBORS.get(pref, [])
+    return []  # nation = 全国（テキスト絞り込みなし）
+
+def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, ol, on, expand_time=False):
+    """県の略称と同名の市があるケース(例「静岡」)を、市→県→隣県→全国と段階的に広げて返す。
+    常に上限内・近い順の代表のみを見せ、各段にメニューを添えて段階的に辿れるようにする。"""
+    center = ol or SHINJUKU
+    terms = _staged_terms(stage, pref, city)
+    pr = search_by_place(terms, base_date=date_, origin_latlng=ol, origin_name=on,
+                         subject=subject, center_latlng=center, radius_km=3000, expand_time=expand_time)
+    speaks = pr.get('peaks', [])
+    subjlabel = f"{subject}の" if subject else ""
+    sname = city.replace('市', '')
+    idx = STAGED_SCOPES.index(stage)
+    can_widen = idx < len(STAGED_SCOPES) - 1
+    opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
+    if stage == 'city':
+        scope_disp = f"「{city}」"; widen_hint = "県全体に広げるなら「地域を広げて探す」を選んでください。"
+    elif stage == 'pref':
+        scope_disp = f"「{pref}」"; widen_hint = "近隣の県も含めるなら「地域を広げて探す」を選んでください。"
+    elif stage == 'neighbor':
+        scope_disp = f"「{pref}」と近隣の県"; widen_hint = "全国まで広げるなら「地域を広げて探す」を選んでください。"
+    else:
+        scope_disp = "全国"; widen_hint = ""
+    _pend = {'kind': 'staged_area', 'stage': stage, 'subject': subject, 'pref': pref,
+             'city': city, 'date': date_, 'origin_latlng': ol, 'origin_name': on, 'options': opts}
+    peaknote = f"（撮り頃は{peaks_text(speaks)}ごろ）" if (subject in SEASONAL_SUBJECTS and speaks) else ""
+    if pr['status'] == 'not_found':
+        if stage == 'city':
+            lead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
+                    f"今の時期に撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}")
+        else:
+            lead = f"今の時期に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
+        RESULT_PENDING[user_id] = _pend
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts)))
+        return
+    results = pr['results']
+    count = len(results)
+    if stage == 'city':
+        shead = f"まず{scope_disp}で、今の時期に撮影された{subjlabel}作品はこちらです{peaknote}。"
+        mlead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
+                 f"今の時期に撮影された{subjlabel}作品は{count}件でした。{widen_hint}")
+    elif stage == 'nation':
+        shead = f"全国の{subjlabel}作品を、近い順にご紹介します{peaknote}。"
+        mlead = f"全国の{subjlabel}作品を近い順にご紹介しました。"
+    elif stage == 'neighbor':
+        shead = f"{scope_disp}で、今の時期に撮影された{subjlabel}作品を近い順にご紹介します{peaknote}。"
+        mlead = f"今の時期の{scope_disp}の{subjlabel}作品です。{widen_hint}"
+    else:  # pref
+        shead = f"今の時期に{scope_disp}で撮影された{subjlabel}作品はこちらです{peaknote}。"
+        mlead = f"今の時期の{scope_disp}の{subjlabel}作品は{count}件でした。{widen_hint}"
+    # 段階探索では常にメニューを添えて段階的に辿れるようにする（上限内・近い順の代表のみ）
+    RESULT_PENDING[user_id] = _pend
+    reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts))
+
+
 def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
     note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
@@ -1914,6 +1992,19 @@ def handle_message(event):
                             text=f"広げて探しましたが、{subj}の作品は見つかりませんでした。別の被写体でもお試しください。"))
                         return
                     reply_with_carousel(reply_token, head, rr['results'])
+                    return
+                if pend.get('kind') == 'staged_area':
+                    stage = pend['stage']; subj = pend['subject']
+                    pref = pend['pref']; city = pend['city']; date_ = pend['date']
+                    _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    idx = STAGED_SCOPES.index(stage)
+                    if action == 'time':
+                        # 同じ範囲のまま期間を広げる
+                        reply_staged_area(reply_token, user_id, stage, subj, pref, city, date_, _ol, _on, expand_time=True)
+                    else:
+                        # 地域を広げる（市→県→隣県→全国）。both は期間も広げる
+                        nxt = STAGED_SCOPES[min(idx + 1, len(STAGED_SCOPES) - 1)]
+                        reply_staged_area(reply_token, user_id, nxt, subj, pref, city, date_, _ol, _on, expand_time=(action == 'both'))
                     return
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="承知しました。別の条件でお試しください。"))
@@ -2310,6 +2401,22 @@ def handle_message(event):
                 if any(v in user_message for v in variants):
                     search_keyword = canonical
                     break
+        # 県の略称と同名の市があるケース（静岡・山梨など）。県/府も市も付けず単独略称で送られたら、
+        # まず市(狭い)で答え、メニューの「地域を広げる」で市→県→隣県→全国と段階的に広げる（狭→広）。
+        _short_pref = None
+        _short_city = None
+        if not _amb_keyword:
+            for _pf, _ct in PREF_SAME_NAME_CITY.items():
+                _sh = _pf.replace('県', '').replace('府', '').replace('都', '')
+                if _sh in user_message and _pf not in user_message and _ct not in user_message:
+                    _short_pref, _short_city = _pf, _ct
+                    break
+        if _short_pref:
+            _u = USER_LOCATION.get(user_id)
+            _ol = (_u["lat"], _u["lng"]) if _u else None
+            _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
+            reply_staged_area(reply_token, user_id, 'city', _subj, _short_pref, _short_city, target_date, _ol, _on)
+            return
         # 「地域名＋被写体」(例: 吉野山 桜 / 奈良、京都 滝 / 青森県 紅葉) → その地域・被写体で絞り込む。
         # 同名地名の問い返しより前に処理（被写体があれば地名はその語で直接検索でき、問い返し不要）。
         if _subj:
