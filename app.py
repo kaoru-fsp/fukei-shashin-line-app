@@ -189,7 +189,8 @@ FAMOUS_SPOTS = [
     {"name": "あしかがフラワーパークの大藤（栃木県足利市）", "query": "あしかがフラワーパーク 藤", "subject": "藤",
      "pref": "栃木県", "names": ["あしかが", "足利", "フラワーパーク"], "season": "4月下旬〜5月上旬", "months": {4, 5}, "lat": 36.3146, "lng": 139.5206},
     {"name": "上高地（長野県松本市）", "query": "上高地 長野県松本市", "subject": None,
-     "pref": "長野県", "names": ["上高地"], "season": "新緑6月・紅葉10月中旬", "months": {4, 5, 6, 7, 8, 9, 10, 11}, "lat": 36.2506, "lng": 137.6319},
+     "pref": "長野県", "names": ["上高地"], "season": "新緑6月・紅葉10月中旬", "months": {4, 5, 6, 7, 8, 9, 10, 11}, "lat": 36.2506, "lng": 137.6319,
+     "closed_note": "上高地は冬期は閉山中です。入山には冬山装備と相応の経験が必要なため、最新の入山・アクセス情報を必ずご確認ください。"},
     {"name": "国営ひたち海浜公園 ネモフィラ（茨城県ひたちなか市）", "query": "国営ひたち海浜公園 ネモフィラ", "subject": "ネモフィラ",
      "pref": "茨城県", "names": ["ひたち海浜", "ネモフィラ"], "season": "4月中旬〜5月上旬", "months": {4, 5}, "lat": 36.4017, "lng": 140.5928},
     {"name": "富士芝桜まつり（山梨県富士河口湖町）", "query": "富士本栖湖リゾート 芝桜", "subject": "芝桜",
@@ -251,6 +252,39 @@ def famous_spots_note(subject=None, region_text=None, origin_latlng=None, base_d
     season = f"／撮り頃 {sp['season']}" if sp.get("season") else ""
     return ("参考までに、撮影地として知られている場所です（『風景写真』の入賞作品ではありません）。\n"
             f"・{sp['name']}{season}\n{gmaps_link(sp['query'])}")
+
+
+def _spot_name_in(text, sp):
+    """text に スポット名(names) が含まれるか。県名一致は対象外（ノイズ防止）。"""
+    if not text:
+        return False
+    core = re.sub(r'[都道府県市区町村郡]', '', text)
+    for nm in sp.get("names", []):
+        if nm and (nm in text or (core and (nm in core or core in nm))):
+            return True
+    return False
+
+
+def closed_spot_caution(region_text=None, results=None, base_date=None):
+    """指定地（region_text）またはカルーセル結果(results)の撮影地が、開放月(months)の外の
+    有名スポットに該当するとき、軽い注意書き(※…)を返す。該当しなければ ''。
+    閉山注記(closed_note)を持つスポットのみ対象。一致はスポット名のみ。
+    『能動的おすすめでは閉山地を出さない／明示検索では正直に出すが注意を添える』の後者を担う。"""
+    if not base_date:
+        return ''
+    cur_month = base_date.month
+    res_texts = []
+    for it in (results or []):
+        doc = it[2] if isinstance(it, (list, tuple)) and len(it) >= 3 else it
+        if isinstance(doc, dict):
+            res_texts.append(f"{doc.get('place', '')} {doc.get('area', '')}")
+    for sp in FAMOUS_SPOTS:
+        note = sp.get("closed_note"); months = sp.get("months")
+        if not note or not months or cur_month in months:
+            continue  # 注記が無い/開放月のときは何もしない
+        if _spot_name_in(region_text, sp) or any(_spot_name_in(t, sp) for t in res_texts):
+            return f"※{note}"
+    return ''
 
 def _jun_offset(day):
     return {'上旬': 0, '中旬': 1, '下旬': 2}.get(junkun(day), 1)  # 日不明は中旬扱い
@@ -1764,10 +1798,11 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts))
 
 
-def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None):
+def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
     note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
-    menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。"""
+    menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。
+    base_date を渡すと、結果や指定地が開放月外の閉山スポットに該当する場合に注意書きを添える。"""
     bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw')) for e, l, it in results]
     if head_text:
         bubbles = [build_info_bubble(head_text)] + bubbles
@@ -1779,6 +1814,9 @@ def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地の�
     msgs = [carousel]
     if note_text:
         msgs.append(TextSendMessage(text=note_text))
+    _caution = closed_spot_caution(region_text=region_text, results=results, base_date=base_date)
+    if _caution:
+        msgs.append(TextSendMessage(text=_caution))
     if menu_text:
         msgs.append(TextSendMessage(text=menu_text))
     line_bot_api.reply_message(reply_token, msgs)
@@ -1977,7 +2015,8 @@ def handle_message(event):
                             f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
                     head = f"「{place_q}」は{period_phrase(_pp)}の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
-            reply_with_carousel(reply_token, head, results, note_text=_note)
+            reply_with_carousel(reply_token, head, results, note_text=_note,
+                                base_date=target_date, region_text=place_q)
             return
 
         # 件数分岐の統一メニューへの応答（1.期間 2.地域 3.両方 [4.撮り頃] 最後=やめる）
@@ -2535,9 +2574,11 @@ def handle_message(event):
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     _mlead = f"{period_phrase(_pp)}の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
-                                        menu_text=expand_menu_text(_mlead, _opts))
+                                        menu_text=expand_menu_text(_mlead, _opts),
+                                        base_date=target_date, region_text=place_disp)
                 else:
-                    reply_with_carousel(reply_token, shead, results, note_text=_note)
+                    reply_with_carousel(reply_token, shead, results, note_text=_note,
+                                        base_date=target_date, region_text=place_disp)
                 return
             # 地名なしの被写体のみ → 現在地(既定は東京)中心・半径150kmで近い順に探す。件数で出し分け、足りなければメニューで広げる
             center = _ol or SHINJUKU
@@ -2563,9 +2604,11 @@ def handle_message(event):
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     _mlead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
-                                        menu_text=expand_menu_text(_mlead, _opts))
+                                        menu_text=expand_menu_text(_mlead, _opts),
+                                        base_date=target_date)
                 else:
-                    reply_with_carousel(reply_token, shead, results, note_text=_note_subj)
+                    reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
+                                        base_date=target_date)
                 return
             # 対象時期に圏内で該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
@@ -2642,7 +2685,8 @@ def handle_message(event):
                             f"撮り頃は{peaks_text(peaks)}あたり。参考にこれまでの作品をご紹介します。")
                 else:
                     head = f"「{place_query}」は{period_phrase(_pp)}の作品が見つかりませんでしたが、これまでの作品をご紹介します。"
-            reply_with_carousel(reply_token, head, results, note_text=_note)
+            reply_with_carousel(reply_token, head, results, note_text=_note,
+                                base_date=target_date, region_text=place_query)
             return
 
 
@@ -2682,7 +2726,8 @@ def handle_message(event):
                 head = f"{target_date.month}月{target_date.day}日の前後で{city_base}で調べたところ該当は{city_count}件でした。周辺の候補も合わせて表示します。"
             else:
                 head = f"{period_phrase(_pp)}に「{city_base}」で撮影された作品はこちらです。"
-            reply_with_carousel(reply_token, head, results)
+            reply_with_carousel(reply_token, head, results,
+                                base_date=target_date, region_text=city_base)
             return
         if isinstance(results, tuple) and results[0] == 'TOO_FEW':
             _, found_pref, count, few_results = results
@@ -2704,7 +2749,8 @@ def handle_message(event):
                 _shead = f"{period_phrase(_pp)}に「{_disp}」で撮影された作品はこちらです。"
                 _mlead = f"{period_phrase(_pp)}の「{_disp}」の作品は{count}件でした。もっと広げて探せます。"
                 reply_with_carousel(reply_token, _shead, few_results,
-                                    menu_text=expand_menu_text(_mlead, _opts))
+                                    menu_text=expand_menu_text(_mlead, _opts),
+                                    base_date=target_date, region_text=_disp)
             return
         if not results:
             results = []
@@ -2728,6 +2774,8 @@ def handle_message(event):
             results,
             alt_text="風景写真コンシェルジュ・今日の3選",
             note_text=_note,
+            base_date=target_date,
+            region_text=(area_display or area_name or ''),
         )
 
 
