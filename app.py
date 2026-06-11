@@ -2486,7 +2486,7 @@ def handle_message(event):
             for v in KEYWORD_NORMALIZE.get(_subj, []):
                 txt = txt.replace(v, ' ')
             txt = re.sub(r'(見頃|みごろ|時期|いつ|頃|ごろ)', ' ', txt)
-            txt = re.sub(r'\d{1,2}月\d{0,2}日?|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', txt)
+            txt = re.sub(r'\d{1,2}月(?:上旬|中旬|下旬)?\d{0,2}日?|上旬|中旬|下旬|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', txt)
             for _fw in FILLER_WORDS:
                 txt = txt.replace(_fw, ' ')
             txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', txt)
@@ -2556,25 +2556,25 @@ def handle_message(event):
                 results = prn['results']
                 count = len(results)
                 if _subj in SEASONAL_SUBJECTS and speaks:
-                    shead = f"{period_phrase(_pp)}に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
+                    shead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品はこちらです（撮り頃は{peaks_text(speaks)}ごろ）。"
                 else:
-                    shead = f"{period_phrase(_pp)}に{near_name}の近く（半径{RADIUS_SUBJ}km）で撮影された{_subj}の作品はこちらです。"
+                    shead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品はこちらです。"
                 if count <= 3:
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
-                    _mlead = f"{period_phrase(_pp)}に{near_name}の近くで見つかった{_subj}は{count}件でした。もっと広げて探せます。"
+                    _mlead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
                                         menu_text=expand_menu_text(_mlead, _opts))
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj)
                 return
-            # 対象時期に近くで該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
+            # 対象時期に圏内で該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
             if prn['status'] == 'off_season':
                 hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
-                        else "別の時期には近くに作品があります。")
-                _lead = f"{period_phrase(_pp)}に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                        else "別の時期には圏内に作品があります。")
+                _lead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。{hint}"
             else:
-                _lead = (f"{period_phrase(_pp)}に{near_name}の近くで撮影された{_subj}の作品は見つかりませんでした。\n"
+                _lead = (f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。\n"
                          f"再度検索する場合は地域を広げて探すことをおすすめします。")
             line_bot_api.reply_message(reply_token, TextSendMessage(
                 text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
@@ -2606,7 +2606,8 @@ def handle_message(event):
                 residual = residual.replace(w, '')
             residual = re.sub(r'\d+日後', '', residual)
             residual = re.sub(r'\d{1,2}月\d{1,2}日', '', residual)
-            residual = re.sub(r'\d{1,2}月', '', residual)
+            residual = re.sub(r'\d{1,2}月(?:上旬|中旬|下旬)?', '', residual)
+            residual = re.sub(r'上旬|中旬|下旬', '', residual)
             for w in FILLER_WORDS:
                 residual = residual.replace(w, '')
             residual = re.sub(r'[、,。.・/／｜|\s　]+', '', residual).strip()
