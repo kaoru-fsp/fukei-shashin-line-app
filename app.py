@@ -842,8 +842,9 @@ def parse_period(text, today=None):
             days_ahead += 7
         return P(today + timedelta(days=days_ahead), True, 'day')
 
-    # M月 単独（直後が 日/数字/上中下 でないとき＝その月全体）
-    m = re.search(r'(\d{1,2})月(?![\d上中下])', text)
+    # M月 単独（直後が 日/数字 でないとき＝その月全体）。旬は前段で判定済みのため上中下は弾かない
+    # （弾くと「12月上高地」の『上』まで巻き込み12月が読めなくなる）
+    m = re.search(r'(\d{1,2})月(?!\d)', text)
     if m:
         t = _resolve_month(today, int(m.group(1)), 15)  # 月の中心（±3週窓で月全体を概ねカバー）
         if t:
