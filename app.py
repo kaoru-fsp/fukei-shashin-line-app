@@ -358,6 +358,17 @@ def peak_reason_text(scope_label, subject, speaks):
     return (f"{scope_label}では{subject}の入賞作品が{peaks_text(speaks)}ごろに"
             f"ピークとなることから、この頃が撮り頃と思われます。")
 
+def time_widen_empty_actions(pterms, base_date, ol, on, subject, center_latlng=None, radius_km=None):
+    """off_season時の軽量先読み(検索1回)。期間を広げても in_season の作品が出ない
+    （＝その時期に実質作品が無い）なら ['time'] を返す。時期が近づけば自然に空[]になる。
+    area/both は全国フォールバックで0にならないため対象外（軽量運用）。"""
+    kw = dict(base_date=base_date, origin_latlng=ol, origin_name=on, subject=subject, expand_time=True)
+    if center_latlng is not None:
+        kw['center_latlng'] = center_latlng
+        kw['radius_km'] = radius_km
+    pf = search_by_place(pterms or [], **kw)
+    return ['time'] if pf.get('status') != 'in_season' else []
+
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -1751,8 +1762,10 @@ def expand_menu_options(enable_peak=False):
     opts.append('cancel')
     return opts
 
-def expand_menu_text(lead, options, peak_text=None):
-    """統一メニューの本文を作る。options は expand_menu_options() の戻り値。"""
+def expand_menu_text(lead, options, peak_text=None, empty_actions=None):
+    """統一メニューの本文を作る。options は expand_menu_options() の戻り値。
+    empty_actions に含む選択肢には『（今は該当なし）』を付す(時期が近づけば外れる)。"""
+    empty_actions = empty_actions or []
     labels = {
         'time': "期間を広げて探す",
         'area': "地域を広げて探す",
@@ -1762,7 +1775,8 @@ def expand_menu_text(lead, options, peak_text=None):
     }
     lines = [lead, "どうしますか？"]
     for i, o in enumerate(options, 1):
-        lines.append(f"{i}. {labels[o]}")
+        suffix = "（今は該当なし）" if o in empty_actions else ""
+        lines.append(f"{i}. {labels[o]}{suffix}")
     return "\n".join(lines)
 
 
@@ -1826,9 +1840,11 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
                     f"{_phr}に撮影された{subjlabel}作品は見つかりませんでした。{reason}")
         else:
             lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{reason}"
+        _empty = time_widen_empty_actions(terms, date_, ol, on, subject, center_latlng=center, radius_km=3000)
+        _pend['empty_actions'] = _empty
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(
-            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl)))
+            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl, empty_actions=_empty)))
         return
     results = pr['results']
     count = len(results)
@@ -2002,9 +2018,10 @@ def handle_message(event):
     _mnum = re.match(r'^(\d+)', event.message.text.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789")))
     if _mnum and user_id in RESULT_PENDING:
         _opts = RESULT_PENDING[user_id].get('options') or []
+        _empty = RESULT_PENDING[user_id].get('empty_actions') or []
         _n = int(_mnum.group(1))
         _act = _opts[_n - 1] if 1 <= _n <= len(_opts) else None
-        if _act not in ('time', 'area', 'both', 'peak'):  # cancel または範囲外 = 検索なし
+        if _act not in ('time', 'area', 'both', 'peak') or _act in _empty:  # cancel/範囲外/該当なし = 検索なし
             _show_loading = False
     if _show_loading:
         try:
@@ -2097,10 +2114,15 @@ def handle_message(event):
                         text=f"1〜{len(opts)}の番号でお選びください。やめる場合は{len(opts)}番です。"))
                     return
                 action = opts[idx]
+                if action in (pend.get('empty_actions') or []):
+                    # 「（今は該当なし）」の選択肢 → 検索せず、pendを残して再選択を促す
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text="その番号は今は選べません。他の番号をお選びください。"))
+                    return
                 del RESULT_PENDING[user_id]
                 if action == 'cancel':
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text="承知しました。別の地域や被写体（例：奥日光 滝）でお試しください。"))
+                        text="承知しました。気になる地名や被写体があれば、いつでも送ってください。"))
                     return
                 if pend.get('kind') == 'place_subject':
                     subj = pend['subject']; pterms = pend['place_terms']; disp = pend['place_disp']
@@ -2666,17 +2688,20 @@ def handle_message(event):
                 _opts = expand_menu_options(enable_peak=_peak_on)
                 if pr['status'] in ('not_found', 'off_season'):
                     # 対象時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
-                    RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     if pr['status'] == 'off_season':
                         hint = (peak_reason_text(f"ちなみに「{place_disp}」", _subj, speaks)
                                 if (_subj in SEASONAL_SUBJECTS and speaks)
                                 else "別の時期には作品があります。")
                         _lead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                        _empty = (time_widen_empty_actions(pterms, target_date, _ol, _on, _subj)
+                                  if (_subj in SEASONAL_SUBJECTS and speaks) else [])
                     else:
                         _lead = (f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。\n"
                                  f"再度検索する場合は地域を広げて探すことをおすすめします。")
+                        _empty = []
+                    RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts, empty_actions=_empty)
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl) + (("\n\n" + _note) if _note else "")))
+                        text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note) if _note else "")))
                     return
                 results = pr['results']
                 count = len(results)
@@ -2728,17 +2753,20 @@ def handle_message(event):
                                         base_date=target_date)
                 return
             # 対象時期に圏内で該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
-            RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
             if prn['status'] == 'off_season':
                 hint = (peak_reason_text("この圏内", _subj, speaks)
                         if (_subj in SEASONAL_SUBJECTS and speaks)
                         else "別の時期には圏内に作品があります。")
                 _lead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。{hint}"
+                _empty = (time_widen_empty_actions(None, target_date, _ol, _on, _subj, center_latlng=center, radius_km=RADIUS_SUBJ)
+                          if (_subj in SEASONAL_SUBJECTS and speaks) else [])
             else:
                 _lead = (f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。\n"
                          f"再度検索する場合は地域を広げて探すことをおすすめします。")
+                _empty = []
+            RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts, empty_actions=_empty)
             line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl) + (("\n\n" + _note_subj) if _note_subj else "")))
+                text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note_subj) if _note_subj else "")))
             return
 
         # 同名地名の問い返し
