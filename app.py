@@ -1996,10 +1996,21 @@ def handle_message(event):
             TextSendMessage(text="あなたの記録(検索された言葉・ご提案への評価・登録された位置情報)をすべて削除しました。\nご協力ありがとうございました。またいつでもご利用いただけます。")
         )
         return
-    try:
-        line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
-    except:
-        pass
+    # 「検索中」表示は実際に検索が走るときだけ出す。メニューで「やめる」や範囲外の番号を
+    # 選んだだけのときは検索しないので出さない。新規ワードや検索が走る選択(期間/地域/両方/撮り頃)では出す。
+    _show_loading = True
+    _mnum = re.match(r'^(\d+)', event.message.text.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+    if _mnum and user_id in RESULT_PENDING:
+        _opts = RESULT_PENDING[user_id].get('options') or []
+        _n = int(_mnum.group(1))
+        _act = _opts[_n - 1] if 1 <= _n <= len(_opts) else None
+        if _act not in ('time', 'area', 'both', 'peak'):  # cancel または範囲外 = 検索なし
+            _show_loading = False
+    if _show_loading:
+        try:
+            line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
+        except:
+            pass
 
     try:
 
