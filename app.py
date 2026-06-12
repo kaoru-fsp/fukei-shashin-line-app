@@ -323,6 +323,31 @@ def compute_peaks(bin_counter, min_count=3, max_peaks=2):
 def peaks_text(peaks):
     return "・".join(bin_label(c) for c in peaks)
 
+def next_peak_date(peak_bins, today=None):
+    """撮り頃ビン(0..35)のうち、今日から見て最も近い未来の旬を選び、
+    その代表日(date)と旬ラベル(例『4月中旬』)を返す。該当が無ければ (None, None)。
+    『撮り頃で探す』が複数撮り頃のとき"次に近い"へ飛ぶための選定に使う。"""
+    today = today or date.today()
+    rep = {0: 5, 1: 15, 2: 25}  # 上旬/中旬/下旬の代表日
+    best = None
+    for b in (peak_bins or []):
+        mo = b // 3 + 1
+        day = rep[b % 3]
+        try:
+            d = date(today.year, mo, day)
+        except ValueError:
+            continue
+        if d < today:  # 今年その旬を過ぎていれば来年へ
+            try:
+                d = date(today.year + 1, mo, day)
+            except ValueError:
+                continue
+        if best is None or d < best[0]:
+            best = (d, b)
+    if best is None:
+        return (None, None)
+    return (best[0], bin_label(best[1]))
+
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -2044,6 +2069,26 @@ def handle_message(event):
                     subj = pend['subject']; pterms = pend['place_terms']; disp = pend['place_disp']
                     pll = pend.get('place_latlng'); date_ = pend['date']
                     _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    if action == 'peak':
+                        # 撮り頃で探す: 次に近い撮り頃へ時期を移して同条件で再検索
+                        _nd, _lbl = next_peak_date(pend.get('peak_months') or [])
+                        if not _nd:
+                            line_bot_api.reply_message(reply_token, TextSendMessage(
+                                text="撮り頃の情報が見つかりませんでした。別の条件でお試しください。"))
+                            return
+                        rr = search_by_place(pterms, base_date=_nd, origin_latlng=_ol, origin_name=_on, subject=subj)
+                        if rr['status'] == 'not_found' or not rr['results']:
+                            # 地名内に撮り頃の作品が無ければ、地点周辺(近い順)に広げて撮り頃の作品を出す
+                            center = pll or _ol or SHINJUKU
+                            rr = search_by_place([], base_date=_nd, origin_latlng=_ol, origin_name=_on,
+                                                 subject=subj, center_latlng=center, radius_km=3000)
+                        if rr['status'] == 'not_found' or not rr['results']:
+                            line_bot_api.reply_message(reply_token, TextSendMessage(
+                                text=f"撮り頃（{_lbl}ごろ）の{subj}の作品は見つかりませんでした。"))
+                            return
+                        head = f"{subj}の撮り頃は{_lbl}ごろです。その時期に「{disp}」周辺で撮影された{subj}の作品はこちらです。"
+                        reply_with_carousel(reply_token, head, rr['results'], base_date=_nd, region_text=disp)
+                        return
                     et = action in ('time', 'both')
                     widen_area = action in ('area', 'both')
                     if widen_area:
@@ -2070,6 +2115,25 @@ def handle_message(event):
                     subj = pend['subject']; center = pend.get('center_latlng')
                     near_name = pend.get('near_name', '現在地'); rad = pend.get('radius', 150)
                     date_ = pend['date']; _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
+                    if action == 'peak':
+                        # 撮り頃で探す: 次に近い撮り頃へ時期を移し、圏内→無ければ全国を近い順で
+                        _nd, _lbl = next_peak_date(pend.get('peak_months') or [])
+                        if not _nd:
+                            line_bot_api.reply_message(reply_token, TextSendMessage(
+                                text="撮り頃の情報が見つかりませんでした。別の条件でお試しください。"))
+                            return
+                        rr = search_by_place([], base_date=_nd, origin_latlng=_ol, origin_name=_on,
+                                             subject=subj, center_latlng=center, radius_km=rad)
+                        if rr['status'] == 'not_found' or not rr['results']:
+                            rr = search_by_place([], base_date=_nd, origin_latlng=_ol, origin_name=_on,
+                                                 subject=subj, center_latlng=center, radius_km=3000)
+                        if rr['status'] == 'not_found' or not rr['results']:
+                            line_bot_api.reply_message(reply_token, TextSendMessage(
+                                text=f"撮り頃（{_lbl}ごろ）の{subj}の作品は見つかりませんでした。"))
+                            return
+                        head = f"{subj}の撮り頃は{_lbl}ごろです。その時期の{subj}の作品を{near_name}から近い順にご紹介します。"
+                        reply_with_carousel(reply_token, head, rr['results'], base_date=_nd)
+                        return
                     et = action in ('time', 'both')
                     widen_area = action in ('area', 'both')
                     if widen_area:
@@ -2550,7 +2614,9 @@ def handle_message(event):
                     'place_disp': place_disp, 'place_latlng': area_latlng or geocode(place_terms[0]),
                     'date': target_date, 'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
                 }
-                _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
+                _peak_on = (_subj in SEASONAL_SUBJECTS and bool(speaks))
+                _peak_date, _peak_lbl = next_peak_date(speaks) if _peak_on else (None, None)
+                _opts = expand_menu_options(enable_peak=_peak_on)
                 if pr['status'] in ('not_found', 'off_season'):
                     # 対象時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
@@ -2562,7 +2628,7 @@ def handle_message(event):
                         _lead = (f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。\n"
                                  f"再度検索する場合は地域を広げて探すことをおすすめします。")
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=expand_menu_text(_lead, _opts) + (("\n\n" + _note) if _note else "")))
+                        text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl) + (("\n\n" + _note) if _note else "")))
                     return
                 results = pr['results']
                 count = len(results)
@@ -2575,7 +2641,7 @@ def handle_message(event):
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     _mlead = f"{period_phrase(_pp)}の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
-                                        menu_text=expand_menu_text(_mlead, _opts),
+                                        menu_text=expand_menu_text(_mlead, _opts, peak_text=_peak_lbl),
                                         base_date=target_date, region_text=place_disp)
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
@@ -2593,7 +2659,9 @@ def handle_message(event):
                 'near_name': near_name, 'radius': RADIUS_SUBJ, 'date': target_date,
                 'origin_latlng': _ol, 'origin_name': _on, 'peak_months': speaks,
             }
-            _opts = expand_menu_options(enable_peak=False)  # 撮り頃オプションはステップ2で有効化
+            _peak_on = (_subj in SEASONAL_SUBJECTS and bool(speaks))
+            _peak_date, _peak_lbl = next_peak_date(speaks) if _peak_on else (None, None)
+            _opts = expand_menu_options(enable_peak=_peak_on)
             if prn['status'] == 'in_season':
                 results = prn['results']
                 count = len(results)
@@ -2605,7 +2673,7 @@ def handle_message(event):
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     _mlead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
-                                        menu_text=expand_menu_text(_mlead, _opts),
+                                        menu_text=expand_menu_text(_mlead, _opts, peak_text=_peak_lbl),
                                         base_date=target_date)
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
@@ -2621,7 +2689,7 @@ def handle_message(event):
                 _lead = (f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。\n"
                          f"再度検索する場合は地域を広げて探すことをおすすめします。")
             line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=expand_menu_text(_lead, _opts) + (("\n\n" + _note_subj) if _note_subj else "")))
+                text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl) + (("\n\n" + _note_subj) if _note_subj else "")))
             return
 
         # 同名地名の問い返し
