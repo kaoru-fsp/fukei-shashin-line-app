@@ -348,6 +348,16 @@ def next_peak_date(peak_bins, today=None):
         return (None, None)
     return (best[0], bin_label(best[1]))
 
+def peak_reason_text(scope_label, subject, speaks):
+    """季節もの×季節外れのときの根拠つき一文を返す。speaks が空なら ''。
+    例: scope_label='ちなみに「京都」' → 「ちなみに「京都」では紅葉の入賞作品が
+    11月下旬ごろにピークとなることから、この頃が撮り頃と思われます。」
+    複数撮り頃はそのまま列挙する（行き先のボタンは"次に近い"1つ）。"""
+    if not speaks:
+        return ''
+    return (f"{scope_label}では{subject}の入賞作品が{peaks_text(speaks)}ごろに"
+            f"ピークとなることから、この頃が撮り頃と思われます。")
+
 def haversine(lat1, lng1, lat2, lng2):
     R = 6371.0
     p1, p2 = math.radians(lat1), math.radians(lat2)
@@ -1747,7 +1757,7 @@ def expand_menu_text(lead, options, peak_text=None):
         'time': "期間を広げて探す",
         'area': "地域を広げて探す",
         'both': "両方広げて探す",
-        'peak': (f"撮り頃で探す（{peak_text}ごろ）" if peak_text else "撮り頃で探す"),
+        'peak': (f"撮り頃の作品を見る（{peak_text}ごろ）" if peak_text else "撮り頃の作品を見る"),
         'cancel': "やめる（別の条件で探す）",
     }
     lines = [lead, "どうしますか？"]
@@ -1803,6 +1813,22 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
             lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts)))
+        return
+    # 季節もの×季節外れ: 在庫(別季節の作品)を並べず、根拠つきリード＋「撮り頃の作品を見る」へ誘導
+    if pr['status'] == 'off_season' and subject in SEASONAL_SUBJECTS and speaks:
+        _peak_date, _peak_lbl = next_peak_date(speaks)
+        opts_peak = ['time'] + (['area', 'both'] if can_widen else []) + ['peak', 'cancel']
+        _pend['options'] = opts_peak
+        _pend['peak_months'] = speaks
+        reason = peak_reason_text(f"ちなみに{scope_disp}", subject, speaks)
+        if stage == 'city':
+            lead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
+                    f"{_phr}に撮影された{subjlabel}作品は見つかりませんでした。{reason}")
+        else:
+            lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{reason}"
+        RESULT_PENDING[user_id] = _pend
+        line_bot_api.reply_message(reply_token, TextSendMessage(
+            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl)))
         return
     results = pr['results']
     count = len(results)
@@ -2161,6 +2187,16 @@ def handle_message(event):
                     _ol = pend.get('origin_latlng'); _on = pend.get('origin_name')
                     _sp = pend.get('specified', False); _gr = pend.get('granularity')
                     idx = STAGED_SCOPES.index(stage)
+                    if action == 'peak':
+                        # 撮り頃の作品を見る: 同じスコープのまま、次に近い撮り頃の時期で再表示
+                        _nd, _lbl = next_peak_date(pend.get('peak_months') or [])
+                        if not _nd:
+                            line_bot_api.reply_message(reply_token, TextSendMessage(
+                                text="撮り頃の情報が見つかりませんでした。別の条件でお試しください。"))
+                            return
+                        reply_staged_area(reply_token, user_id, stage, subj, pref, city, _nd, _ol, _on,
+                                          specified=True, granularity='jun')
+                        return
                     if action == 'time':
                         # 同じ範囲のまま期間を広げる
                         reply_staged_area(reply_token, user_id, stage, subj, pref, city, date_, _ol, _on,
@@ -2621,7 +2657,8 @@ def handle_message(event):
                     # 対象時期に該当なし → カルーセルは出さずメニューのみ（季節外の作品はメニューで広げて出す）
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
                     if pr['status'] == 'off_season':
-                        hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
+                        hint = (peak_reason_text(f"ちなみに「{place_disp}」", _subj, speaks)
+                                if (_subj in SEASONAL_SUBJECTS and speaks)
                                 else "別の時期には作品があります。")
                         _lead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
                     else:
@@ -2682,7 +2719,8 @@ def handle_message(event):
             # 対象時期に圏内で該当なし(0件 または 季節外) → メニューのみ（「地域を広げる」で全国を近い順に、季節外は期間を広げて出す）
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts)
             if prn['status'] == 'off_season':
-                hint = (f"{_subj}の撮り頃は{peaks_text(speaks)}ごろです。" if (_subj in SEASONAL_SUBJECTS and speaks)
+                hint = (peak_reason_text("この圏内", _subj, speaks)
+                        if (_subj in SEASONAL_SUBJECTS and speaks)
                         else "別の時期には圏内に作品があります。")
                 _lead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。{hint}"
             else:
