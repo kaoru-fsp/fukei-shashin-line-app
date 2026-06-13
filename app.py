@@ -2014,8 +2014,11 @@ def handle_message(event):
         return
     # 「検索中」表示は実際に検索が走るときだけ出す。メニューで「やめる」や範囲外の番号を
     # 選んだだけのときは検索しないので出さない。新規ワードや検索が走る選択(期間/地域/両方/撮り頃)では出す。
+    _norm_txt = event.message.text.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+    _pure_digit = _norm_txt.isdigit()
+    _in_pending = any(user_id in _d for _d in (RESULT_PENDING, EXPAND_PENDING, AMBIGUOUS_PENDING, SUBJECT_PENDING, ROUTE_PENDING, WARD_PENDING))
     _show_loading = True
-    _mnum = re.match(r'^(\d+)', event.message.text.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+    _mnum = re.match(r'^(\d+)', _norm_txt)
     if _mnum and user_id in RESULT_PENDING:
         _opts = RESULT_PENDING[user_id].get('options') or []
         _empty = RESULT_PENDING[user_id].get('empty_actions') or []
@@ -2023,6 +2026,8 @@ def handle_message(event):
         _act = _opts[_n - 1] if 1 <= _n <= len(_opts) else None
         if _act not in ('time', 'area', 'both', 'peak') or _act in _empty:  # cancel/範囲外/該当なし = 検索なし
             _show_loading = False
+    if _pure_digit and not _in_pending:
+        _show_loading = False  # 保留メニューが無い数字のみ → 検索せず安全網へ
     if _show_loading:
         try:
             line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。ご指定の条件で風景写真データベースを調べています。🔍"))
@@ -2040,6 +2045,12 @@ def handle_message(event):
             from linebot.models import TextSendMessage as TSM
             line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
             line_bot_api.push_message(user_id, [TSM(text=t) for t in usage_guide_messages()])
+
+        # 安全網: どの保留メニューも無い状態で「数字のみ」が届いたとき（メニューが届く前に番号を
+        # 押した等）、検索に流さず、しれっと次の操作を促す。どちらの間違いとも言わない。
+        if _pure_digit and not _in_pending:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="地名や被写体名を入れて送ってください。"))
+            return
 
         # 「@地名」コマンド: @に続く文字を必ず地名として検索する。
         # （辞書に無い地名や、川越・海老名のように地名内の単漢字が被写体に化けるケースの確実な回避策）
