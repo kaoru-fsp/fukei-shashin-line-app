@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction
+from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction, MessageAction
 from linebot.exceptions import InvalidSignatureError
 import unicodedata
 import firebase_admin
@@ -1780,6 +1780,27 @@ def expand_menu_text(lead, options, peak_text=None, empty_actions=None):
     return "\n".join(lines)
 
 
+def expand_menu_quick_reply(options, peak_text=None, empty_actions=None):
+    """統一メニューのクイックリプライ（タップ式ボタン）。タップすると対応する番号テキストを送り、
+    既存の番号ハンドラがそのまま処理する（番号入力との併存）。これによりメニュー到着前に番号を
+    押す事故が起きにくくなる。『今は該当なし』の選択肢はタップ不可とするためボタンを出さない
+    （テキスト側には注記が残る）。LINEのラベル上限に合わせ20字で切る。"""
+    empty_actions = empty_actions or []
+    labels = {
+        'time': "期間を広げて探す",
+        'area': "地域を広げて探す",
+        'both': "両方広げて探す",
+        'peak': (f"撮り頃の作品を見る（{peak_text}ごろ）" if peak_text else "撮り頃の作品を見る"),
+        'cancel': "やめる",
+    }
+    items = []
+    for i, o in enumerate(options, 1):
+        if o in empty_actions:
+            continue
+        items.append(QuickReplyButton(action=MessageAction(label=labels[o][:20], text=str(i))))
+    return QuickReply(items=items) if items else None
+
+
 # 県の略称＝同名市があるケースの「狭→広」段階。市→県→隣県→全国の順に広げる。
 STAGED_SCOPES = ['city', 'pref', 'neighbor', 'nation']
 
@@ -1826,7 +1847,8 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         else:
             lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
         RESULT_PENDING[user_id] = _pend
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts)))
+        line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts),
+                                                                quick_reply=expand_menu_quick_reply(opts)))
         return
     # 季節もの×季節外れ: 在庫(別季節の作品)を並べず、根拠つきリード＋「撮り頃の作品を見る」へ誘導
     if pr['status'] == 'off_season' and subject in SEASONAL_SUBJECTS and speaks:
@@ -1844,7 +1866,8 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         _pend['empty_actions'] = _empty
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(
-            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl, empty_actions=_empty)))
+            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl, empty_actions=_empty),
+            quick_reply=expand_menu_quick_reply(opts_peak, peak_text=_peak_lbl, empty_actions=_empty)))
         return
     results = pr['results']
     count = len(results)
@@ -1863,13 +1886,15 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         mlead = f"{_phr}の{scope_disp}の{subjlabel}作品は{count}件でした。{widen_hint}"
     # 段階探索では常にメニューを添えて段階的に辿れるようにする（上限内・近い順の代表のみ）
     RESULT_PENDING[user_id] = _pend
-    reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts))
+    reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts),
+                        menu_quick_reply=expand_menu_quick_reply(opts))
 
 
-def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None):
+def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None, menu_quick_reply=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
     note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
     menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。
+    menu_quick_reply があれば、そのメニュー(最後のメッセージ)にタップ式ボタンを付ける。
     base_date を渡すと、結果や指定地が開放月外の閉山スポットに該当する場合に注意書きを添える。"""
     bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw')) for e, l, it in results]
     if head_text:
@@ -1886,7 +1911,8 @@ def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地の�
     if _caution:
         msgs.append(TextSendMessage(text=_caution))
     if menu_text:
-        msgs.append(TextSendMessage(text=menu_text))
+        msgs.append(TextSendMessage(text=menu_text, quick_reply=menu_quick_reply) if menu_quick_reply
+                    else TextSendMessage(text=menu_text))
     line_bot_api.reply_message(reply_token, msgs)
 
 
@@ -2712,7 +2738,8 @@ def handle_message(event):
                         _empty = []
                     RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts, empty_actions=_empty)
                     line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note) if _note else "")))
+                        text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note) if _note else ""),
+                        quick_reply=expand_menu_quick_reply(_opts, peak_text=_peak_lbl, empty_actions=_empty)))
                     return
                 results = pr['results']
                 count = len(results)
@@ -2726,6 +2753,7 @@ def handle_message(event):
                     _mlead = f"{period_phrase(_pp)}の「{place_disp}」の{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
                                         menu_text=expand_menu_text(_mlead, _opts, peak_text=_peak_lbl),
+                                        menu_quick_reply=expand_menu_quick_reply(_opts, peak_text=_peak_lbl),
                                         base_date=target_date, region_text=place_disp)
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note,
@@ -2758,6 +2786,7 @@ def handle_message(event):
                     _mlead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で見つかった{_subj}は{count}件でした。もっと広げて探せます。"
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
                                         menu_text=expand_menu_text(_mlead, _opts, peak_text=_peak_lbl),
+                                        menu_quick_reply=expand_menu_quick_reply(_opts, peak_text=_peak_lbl),
                                         base_date=target_date)
                 else:
                     reply_with_carousel(reply_token, shead, results, note_text=_note_subj,
@@ -2777,7 +2806,8 @@ def handle_message(event):
                 _empty = []
             RESULT_PENDING[user_id] = dict(_pend_ctx, options=_opts, empty_actions=_empty)
             line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note_subj) if _note_subj else "")))
+                text=expand_menu_text(_lead, _opts, peak_text=_peak_lbl, empty_actions=_empty) + (("\n\n" + _note_subj) if _note_subj else ""),
+                quick_reply=expand_menu_quick_reply(_opts, peak_text=_peak_lbl, empty_actions=_empty)))
             return
 
         # 同名地名の問い返し
@@ -2900,13 +2930,15 @@ def handle_message(event):
             if count == 0 or not few_results:
                 # 0件 → メニューのみ
                 _lead = f"{period_phrase(_pp)}に「{_disp}」で撮影された作品は見つかりませんでした。"
-                line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(_lead, _opts)))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(_lead, _opts),
+                                                                        quick_reply=expand_menu_quick_reply(_opts)))
             else:
                 # 1〜3件 → 県内の作品をカルーセルで出し、続けてメニュー
                 _shead = f"{period_phrase(_pp)}に「{_disp}」で撮影された作品はこちらです。"
                 _mlead = f"{period_phrase(_pp)}の「{_disp}」の作品は{count}件でした。もっと広げて探せます。"
                 reply_with_carousel(reply_token, _shead, few_results,
                                     menu_text=expand_menu_text(_mlead, _opts),
+                                    menu_quick_reply=expand_menu_quick_reply(_opts),
                                     base_date=target_date, region_text=_disp)
             return
         if not results:
