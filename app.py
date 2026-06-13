@@ -1827,7 +1827,12 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     _phr = period_phrase(date_=date_, specified=specified, granularity=granularity)  # 「今の時期」or「◯月」等
     idx = STAGED_SCOPES.index(stage)
     can_widen = idx < len(STAGED_SCOPES) - 1
-    opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
+    # 期間は使い切り: 一度広げたら(expand_time=True)「期間」「両方」は出さない（同じ結果の空回り防止）。
+    # 地域(area)は市→県→隣県→全国の段階展開なので、行き着くまで(can_widen)残す。
+    if expand_time:
+        opts = (['area'] if can_widen else []) + ['cancel']
+    else:
+        opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
     if stage == 'city':
         scope_disp = f"「{city}」"; widen_hint = "県全体に広げるなら「地域を広げて探す」を選んでください。"
     elif stage == 'pref':
@@ -1838,7 +1843,7 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         scope_disp = "全国"; widen_hint = ""
     _pend = {'kind': 'staged_area', 'stage': stage, 'subject': subject, 'pref': pref,
              'city': city, 'date': date_, 'origin_latlng': ol, 'origin_name': on, 'options': opts,
-             'specified': specified, 'granularity': granularity}
+             'specified': specified, 'granularity': granularity, 'expanded_time': expand_time}
     peaknote = f"（撮り頃は{peaks_text(speaks)}ごろ）" if (subject in SEASONAL_SUBJECTS and speaks) else ""
     if pr['status'] == 'not_found':
         if stage == 'city':
@@ -1853,7 +1858,10 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     # 季節もの×季節外れ: 在庫(別季節の作品)を並べず、根拠つきリード＋「撮り頃の作品を見る」へ誘導
     if pr['status'] == 'off_season' and subject in SEASONAL_SUBJECTS and speaks:
         _peak_date, _peak_lbl = next_peak_date(speaks)
-        opts_peak = ['time'] + (['area', 'both'] if can_widen else []) + ['peak', 'cancel']
+        if expand_time:
+            opts_peak = (['area'] if can_widen else []) + ['peak', 'cancel']
+        else:
+            opts_peak = ['time'] + (['area', 'both'] if can_widen else []) + ['peak', 'cancel']
         _pend['options'] = opts_peak
         _pend['peak_months'] = speaks
         reason = peak_reason_text(f"ちなみに{scope_disp}", subject, speaks)
@@ -2272,10 +2280,11 @@ def handle_message(event):
                         reply_staged_area(reply_token, user_id, stage, subj, pref, city, date_, _ol, _on,
                                           expand_time=True, specified=_sp, granularity=_gr)
                     else:
-                        # 地域を広げる（市→県→隣県→全国）。both は期間も広げる
+                        # 地域を広げる（市→県→隣県→全国）。期間は使い切り状態を引き継ぐ（both/既に使用済みなら維持）
                         nxt = STAGED_SCOPES[min(idx + 1, len(STAGED_SCOPES) - 1)]
+                        _keep_time = (action == 'both') or pend.get('expanded_time', False)
                         reply_staged_area(reply_token, user_id, nxt, subj, pref, city, date_, _ol, _on,
-                                          expand_time=(action == 'both'), specified=_sp, granularity=_gr)
+                                          expand_time=_keep_time, specified=_sp, granularity=_gr)
                     return
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="承知しました。別の条件でお試しください。"))
