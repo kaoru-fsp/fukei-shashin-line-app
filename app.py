@@ -2025,7 +2025,7 @@ def handle_message(event):
             _show_loading = False
     if _show_loading:
         try:
-            line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。今旬の撮影地を探しております。🔍"))
+            line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。ご指定の条件で風景写真データベースを調べています。🔍"))
         except:
             pass
 
