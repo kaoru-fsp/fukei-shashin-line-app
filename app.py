@@ -1762,13 +1762,14 @@ def expand_menu_options(enable_peak=False):
     opts.append('cancel')
     return opts
 
-def expand_menu_text(lead, options, peak_text=None, empty_actions=None):
+def expand_menu_text(lead, options, peak_text=None, empty_actions=None, area_label=None):
     """統一メニューの本文を作る。options は expand_menu_options() の戻り値。
-    empty_actions に含む選択肢には『（今は該当なし）』を付す(時期が近づけば外れる)。"""
+    empty_actions に含む選択肢には『（今は該当なし）』を付す(時期が近づけば外れる)。
+    area_label を渡すと「地域を広げて探す」を、その文言（次にどこまで広げるか）に差し替える。"""
     empty_actions = empty_actions or []
     labels = {
         'time': "期間を広げて探す",
-        'area': "地域を広げて探す",
+        'area': area_label or "地域を広げて探す",
         'both': "両方広げて探す",
         'peak': (f"撮り頃の作品を見る（{peak_text}ごろ）" if peak_text else "撮り頃の作品を見る"),
         'cancel': "やめる（別の条件で探す）",
@@ -1780,15 +1781,16 @@ def expand_menu_text(lead, options, peak_text=None, empty_actions=None):
     return "\n".join(lines)
 
 
-def expand_menu_quick_reply(options, peak_text=None, empty_actions=None):
+def expand_menu_quick_reply(options, peak_text=None, empty_actions=None, area_label=None):
     """統一メニューのクイックリプライ（タップ式ボタン）。タップすると対応する番号テキストを送り、
     既存の番号ハンドラがそのまま処理する（番号入力との併存）。これによりメニュー到着前に番号を
     押す事故が起きにくくなる。『今は該当なし』の選択肢はタップ不可とするためボタンを出さない
-    （テキスト側には注記が残る）。LINEのラベル上限に合わせ20字で切る。"""
+    （テキスト側には注記が残る）。LINEのラベル上限に合わせ20字で切る。
+    area_label を渡すと「地域を広げて探す」を、その文言（次にどこまで広げるか）に差し替える。"""
     empty_actions = empty_actions or []
     labels = {
         'time': "期間を広げて探す",
-        'area': "地域を広げて探す",
+        'area': area_label or "地域を広げて探す",
         'both': "両方広げて探す",
         'peak': (f"撮り頃の作品を見る（{peak_text}ごろ）" if peak_text else "撮り頃の作品を見る"),
         'cancel': "やめる",
@@ -1833,14 +1835,19 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         opts = (['area'] if can_widen else []) + ['cancel']
     else:
         opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
+    # scope_disp=現在の範囲表示、_area_label=「地域を広げる」を押した先の行き先（押す前に分かるように）、
+    # widen_hint=その行き先ラベルを引用した案内（本文とボタンの文言を一致させる）
     if stage == 'city':
-        scope_disp = f"「{city}」"; widen_hint = "県全体に広げるなら「地域を広げて探す」を選んでください。"
+        scope_disp = f"「{city}」"; _area_label = f"{pref}で調べる"
+        widen_hint = f"{pref}全体に広げるなら「{_area_label}」を選んでください。"
     elif stage == 'pref':
-        scope_disp = f"「{pref}」"; widen_hint = "近隣の県も含めるなら「地域を広げて探す」を選んでください。"
+        scope_disp = f"「{pref}」"; _area_label = "隣県まで広げて調べる"
+        widen_hint = f"近隣の県も含めるなら「{_area_label}」を選んでください。"
     elif stage == 'neighbor':
-        scope_disp = f"「{pref}」と近隣の県"; widen_hint = "全国まで広げるなら「地域を広げて探す」を選んでください。"
+        scope_disp = f"「{pref}」と近隣の県"; _area_label = "全国で調べる"
+        widen_hint = f"全国まで広げるなら「{_area_label}」を選んでください。"
     else:
-        scope_disp = "全国"; widen_hint = ""
+        scope_disp = "全国"; _area_label = None; widen_hint = ""
     # 初回か「広げた後」かでリード文を切り替える（初回のみ「お出かけですか？」、広げ後は何を広げたかを述べる）
     _time_widened = expand_time
     _area_widened = (stage != 'city')  # 初回は必ず city。stage が進んでいれば地域を広げた後
@@ -1863,8 +1870,9 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     if pr['status'] == 'not_found':
         lead = f"{_lead_open}{_lead_phr}{subjlabel}作品は見つかりませんでした。{widen_hint}"
         RESULT_PENDING[user_id] = _pend
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts),
-                                                                quick_reply=expand_menu_quick_reply(opts)))
+        line_bot_api.reply_message(reply_token, TextSendMessage(
+            text=expand_menu_text(lead, opts, area_label=_area_label),
+            quick_reply=expand_menu_quick_reply(opts, area_label=_area_label)))
         return
     # 季節もの×季節外れ: 在庫(別季節の作品)を並べず、根拠つきリード＋「撮り頃の作品を見る」へ誘導
     if pr['status'] == 'off_season' and subject in SEASONAL_SUBJECTS and speaks:
@@ -1881,8 +1889,8 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         _pend['empty_actions'] = _empty
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(
-            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl, empty_actions=_empty),
-            quick_reply=expand_menu_quick_reply(opts_peak, peak_text=_peak_lbl, empty_actions=_empty)))
+            text=expand_menu_text(lead, opts_peak, peak_text=_peak_lbl, empty_actions=_empty, area_label=_area_label),
+            quick_reply=expand_menu_quick_reply(opts_peak, peak_text=_peak_lbl, empty_actions=_empty, area_label=_area_label)))
         return
     results = pr['results']
     count = len(results)
@@ -1897,8 +1905,8 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         mlead = f"{_lead_open}{_lead_phr}{subjlabel}作品は{count}件でした。{widen_hint}"
     # 段階探索では常にメニューを添えて段階的に辿れるようにする（上限内・近い順の代表のみ）
     RESULT_PENDING[user_id] = _pend
-    reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts),
-                        menu_quick_reply=expand_menu_quick_reply(opts))
+    reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts, area_label=_area_label),
+                        menu_quick_reply=expand_menu_quick_reply(opts, area_label=_area_label))
 
 
 def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None, menu_quick_reply=None):
