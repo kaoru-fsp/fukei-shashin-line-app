@@ -1841,16 +1841,27 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         scope_disp = f"「{pref}」と近隣の県"; widen_hint = "全国まで広げるなら「地域を広げて探す」を選んでください。"
     else:
         scope_disp = "全国"; widen_hint = ""
+    # 初回か「広げた後」かでリード文を切り替える（初回のみ「お出かけですか？」、広げ後は何を広げたかを述べる）
+    _time_widened = expand_time
+    _area_widened = (stage != 'city')  # 初回は必ず city。stage が進んでいれば地域を広げた後
+    _widened = _time_widened or _area_widened
+    if _time_widened and _area_widened:
+        _wv = "期間と地域を広げて"
+    elif _time_widened:
+        _wv = "期間を広げて"
+    else:
+        _wv = "地域を広げて"
+    if _widened:
+        _lead_open = f"{_wv}調べたところ、{scope_disp}で"
+    else:
+        _lead_open = f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
+    _lead_phr = "" if _time_widened else f"{_phr}に撮影された"  # 期間を広げた後は「今の時期に」を言わない
     _pend = {'kind': 'staged_area', 'stage': stage, 'subject': subject, 'pref': pref,
              'city': city, 'date': date_, 'origin_latlng': ol, 'origin_name': on, 'options': opts,
              'specified': specified, 'granularity': granularity, 'expanded_time': expand_time}
     peaknote = f"（撮り頃は{peaks_text(speaks)}ごろ）" if (subject in SEASONAL_SUBJECTS and speaks) else ""
     if pr['status'] == 'not_found':
-        if stage == 'city':
-            lead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
-                    f"{_phr}に撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}")
-        else:
-            lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{widen_hint}"
+        lead = f"{_lead_open}{_lead_phr}{subjlabel}作品は見つかりませんでした。{widen_hint}"
         RESULT_PENDING[user_id] = _pend
         line_bot_api.reply_message(reply_token, TextSendMessage(text=expand_menu_text(lead, opts),
                                                                 quick_reply=expand_menu_quick_reply(opts)))
@@ -1865,11 +1876,7 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         _pend['options'] = opts_peak
         _pend['peak_months'] = speaks
         reason = peak_reason_text(f"ちなみに{scope_disp}", subject, speaks)
-        if stage == 'city':
-            lead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
-                    f"{_phr}に撮影された{subjlabel}作品は見つかりませんでした。{reason}")
-        else:
-            lead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品は見つかりませんでした。{reason}"
+        lead = f"{_lead_open}{_lead_phr}{subjlabel}作品は見つかりませんでした。{reason}"
         _empty = time_widen_empty_actions(terms, date_, ol, on, subject, center_latlng=center, radius_km=3000)
         _pend['empty_actions'] = _empty
         RESULT_PENDING[user_id] = _pend
@@ -1879,19 +1886,15 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         return
     results = pr['results']
     count = len(results)
-    if stage == 'city':
-        shead = f"まず{scope_disp}で、{_phr}に撮影された{subjlabel}作品はこちらです{peaknote}。"
-        mlead = (f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
-                 f"{_phr}に撮影された{subjlabel}作品は{count}件でした。{widen_hint}")
-    elif stage == 'nation':
+    if stage == 'nation':
         shead = f"全国の{subjlabel}作品を、近い順にご紹介します{peaknote}。"
-        mlead = f"全国の{subjlabel}作品を近い順にご紹介しました。"
-    elif stage == 'neighbor':
-        shead = f"{scope_disp}で、{_phr}に撮影された{subjlabel}作品を近い順にご紹介します{peaknote}。"
-        mlead = f"{_phr}の{scope_disp}の{subjlabel}作品です。{widen_hint}"
-    else:  # pref
-        shead = f"{_phr}に{scope_disp}で撮影された{subjlabel}作品はこちらです{peaknote}。"
-        mlead = f"{_phr}の{scope_disp}の{subjlabel}作品は{count}件でした。{widen_hint}"
+        mlead = f"{_wv}調べたところ、全国の{subjlabel}作品を近い順にご紹介しました。"
+    elif _widened:
+        shead = f"{_wv}調べたところ、{scope_disp}の{subjlabel}作品です{peaknote}。"
+        mlead = f"{_lead_open}{_lead_phr}{subjlabel}作品は{count}件でした。{widen_hint}"
+    else:  # 初回（city）
+        shead = f"まず{scope_disp}で、{_phr}に撮影された{subjlabel}作品はこちらです{peaknote}。"
+        mlead = f"{_lead_open}{_lead_phr}{subjlabel}作品は{count}件でした。{widen_hint}"
     # 段階探索では常にメニューを添えて段階的に辿れるようにする（上限内・近い順の代表のみ）
     RESULT_PENDING[user_id] = _pend
     reply_with_carousel(reply_token, shead, results, menu_text=expand_menu_text(mlead, opts),
