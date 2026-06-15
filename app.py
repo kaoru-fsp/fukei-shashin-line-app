@@ -1755,8 +1755,9 @@ def build_info_bubble(text):
 
 
 def expand_menu_options(enable_peak=False):
-    """統一メニューの選択肢リスト(順序が番号に対応)。撮り頃が明確で時期外れのときだけ peak を含める。"""
-    opts = ['time', 'area', 'both']
+    """統一メニューの選択肢リスト(順序が番号に対応)。撮り頃が明確で時期外れのときだけ peak を含める。
+    「両方広げる」は廃止（期間→地域と順に押せば同じ状態に到達でき、選択肢を絞って分かりやすくする）。"""
+    opts = ['time', 'area']
     if enable_peak:
         opts.append('peak')
     opts.append('cancel')
@@ -1829,12 +1830,13 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     _phr = period_phrase(date_=date_, specified=specified, granularity=granularity)  # 「今の時期」or「◯月」等
     idx = STAGED_SCOPES.index(stage)
     can_widen = idx < len(STAGED_SCOPES) - 1
-    # 期間は使い切り: 一度広げたら(expand_time=True)「期間」「両方」は出さない（同じ結果の空回り防止）。
+    # 期間は使い切り: 一度広げたら(expand_time=True)「期間」は出さない（同じ結果の空回り防止）。
     # 地域(area)は市→県→隣県→全国の段階展開なので、行き着くまで(can_widen)残す。
+    # 「両方広げる」は廃止（期間→地域と順に押せば同じ状態に到達できるため、選択肢を絞る）。
     if expand_time:
         opts = (['area'] if can_widen else []) + ['cancel']
     else:
-        opts = ['time'] + (['area', 'both'] if can_widen else []) + ['cancel']
+        opts = ['time'] + (['area'] if can_widen else []) + ['cancel']
     # scope_disp=現在の範囲表示、_area_label=「地域を広げる」を押した先の行き先（押す前に分かるように）、
     # widen_hint=その行き先ラベルを引用した案内（本文とボタンの文言を一致させる）
     if stage == 'city':
@@ -1851,15 +1853,14 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     # 初回か「広げた後」かでリード文を切り替える（初回のみ「お出かけですか？」、広げ後は何を広げたかを述べる）
     _time_widened = expand_time
     _area_widened = (stage != 'city')  # 初回は必ず city。stage が進んでいれば地域を広げた後
-    _widened = _time_widened or _area_widened
-    if _time_widened and _area_widened:
-        _wv = "期間と地域を広げて"
-    elif _time_widened:
-        _wv = "期間を広げて"
-    else:
-        _wv = "地域を広げて"
-    if _widened:
-        _lead_open = f"{_wv}調べたところ、{scope_disp}で"
+    # リード冒頭の出し分け:
+    #  ・初回: 「お出かけですか？まず〇〇で調べたところ、」
+    #  ・期間を広げた: 「期間を広げて調べたところ、〇〇で」（場所は変わらないので、何をしたかを述べる）
+    #  ・地域だけ広げた: 「〇〇で調べたところ、」（今いる場所を端的に。地域を広げる選択肢は既に行き先表示済み）
+    if _time_widened:
+        _lead_open = f"期間を広げて調べたところ、{scope_disp}で"
+    elif _area_widened:
+        _lead_open = f"{scope_disp}で調べたところ、"
     else:
         _lead_open = f"{sname}に{subjlabel}撮影にお出かけですか？まず{scope_disp}で調べたところ、"
     _lead_phr = "" if _time_widened else f"{_phr}に撮影された"  # 期間を広げた後は「今の時期に」を言わない
@@ -1880,7 +1881,7 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
         if expand_time:
             opts_peak = (['area'] if can_widen else []) + ['peak', 'cancel']
         else:
-            opts_peak = ['time'] + (['area', 'both'] if can_widen else []) + ['peak', 'cancel']
+            opts_peak = ['time'] + (['area'] if can_widen else []) + ['peak', 'cancel']
         _pend['options'] = opts_peak
         _pend['peak_months'] = speaks
         reason = peak_reason_text(f"ちなみに{scope_disp}", subject, speaks)
@@ -1896,9 +1897,15 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
     count = len(results)
     if stage == 'nation':
         shead = f"全国の{subjlabel}作品を、近い順にご紹介します{peaknote}。"
-        mlead = f"{_wv}調べたところ、全国の{subjlabel}作品を近い順にご紹介しました。"
-    elif _widened:
-        shead = f"{_wv}調べたところ、{scope_disp}の{subjlabel}作品です{peaknote}。"
+        if _time_widened:
+            mlead = f"期間を広げて調べたところ、全国の{subjlabel}作品を近い順にご紹介しました。"
+        else:
+            mlead = f"全国の{subjlabel}作品を近い順にご紹介しました。"
+    elif _time_widened:
+        shead = f"期間を広げて調べたところ、{scope_disp}の{subjlabel}作品です{peaknote}。"
+        mlead = f"{_lead_open}{_lead_phr}{subjlabel}作品は{count}件でした。{widen_hint}"
+    elif _area_widened:
+        shead = f"{scope_disp}で、{_phr}に撮影された{subjlabel}作品はこちらです{peaknote}。"
         mlead = f"{_lead_open}{_lead_phr}{subjlabel}作品は{count}件でした。{widen_hint}"
     else:  # 初回（city）
         shead = f"まず{scope_disp}で、{_phr}に撮影された{subjlabel}作品はこちらです{peaknote}。"
@@ -2163,7 +2170,7 @@ def handle_message(event):
             if not m:
                 del RESULT_PENDING[user_id]  # 番号以外は新規クエリとして続行
             else:
-                opts = pend.get('options', ['time', 'area', 'both', 'cancel'])
+                opts = pend.get('options', ['time', 'area', 'cancel'])
                 idx = int(m.group(1)) - 1
                 if idx < 0 or idx >= len(opts):
                     line_bot_api.reply_message(reply_token, TextSendMessage(
