@@ -1646,6 +1646,9 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
 
     from urllib.parse import quote
     map_uri = f"https://maps.google.com/maps?q={quote(area)}" if area else "https://maps.google.com/"
+    ref_base = "https://fukeishashin-web-site-renewal-2026-529174988876.us-west1.run.app/reference"
+    ref_location = place if place else area
+    ref_uri = f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base
 
     bubble = {
         "type": "bubble",
@@ -1705,18 +1708,35 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
         },
         "footer": {
             "type": "box",
-            "layout": "horizontal",
+            "layout": "vertical",
             "spacing": "sm",
             "contents": [
                 {
-                    "type": "button",
-                    "style": "primary",
-                    "height": "sm",
-                    "action": {
-                        "type": "postback",
-                        "label": "詳細情報",
-                        "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
-                    }
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "height": "sm",
+                            "action": {
+                                "type": "postback",
+                                "label": "詳細情報",
+                                "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
+                            }
+                        },
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "height": "sm",
+                            "action": {
+                                "type": "uri",
+                                "label": "マップ",
+                                "uri": map_uri
+                            }
+                        }
+                    ]
                 },
                 {
                     "type": "button",
@@ -1724,8 +1744,8 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "マップ",
-                        "uri": map_uri
+                        "label": "📍 現地情報をチェック",
+                        "uri": ref_uri
                     }
                 }
             ]
@@ -2162,7 +2182,9 @@ def handle_message(event):
                                 base_date=target_date, region_text=place_q)
             return
 
-        # 件数分岐の統一メニューへの応答（1.期間 2.地域 3.両方 [4.撮り頃] 最後=やめる）
+        # 統一メニューへの番号応答。番号はpendの options（該当なし含む全選択肢）の位置で決まり、
+        # テキスト表示・ボタン送出・この変換の三者が同じ位置基準で一致する（番号は詰めない）。
+        # 該当なし(empty_actions)の番号は検索せず「今は選べません」と返す。
         if user_id in RESULT_PENDING:
             pend = RESULT_PENDING[user_id]
             ch = user_message.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
