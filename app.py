@@ -1646,7 +1646,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
 
     from urllib.parse import quote
     map_uri = f"https://maps.google.com/maps?q={quote(area)}" if area else "https://maps.google.com/"
-    ref_base = "https://fukeishashin-web-site-renewal-2026-529174988876.us-west1.run.app/reference"
+    ref_base = "https://reference.fukei-shashin.co.jp/reference"
     ref_location = place if place else area
     ref_uri = f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base
 
