@@ -921,7 +921,7 @@ def parse_target_area(text):
         if pref == "北海道":
             short = "北海道"
         else:
-            short = pref.replace("都","").replace("府","").replace("県","")
+            short = re.sub(r'[都府県]$', '', pref)
         if pref in text or short in text:
             return pref, PREF_LATLNG[pref], pref  # 県のみ指定 → 表示も検索キーも県名（県庁所在地名にしない）
     for city, pref in CITY_PREF.items():
@@ -2660,7 +2660,7 @@ def handle_message(event):
                 resolved_pref = prefs[1]
             else:
                 for p in prefs:
-                    short = p.replace("県", "").replace("都", "").replace("府", "").replace("道", "")
+                    short = re.sub(r'[都府県道]$', '', p)
                     if p in user_message or short in user_message:
                         resolved_pref = p
                         break
@@ -2694,7 +2694,7 @@ def handle_message(event):
             if isinstance(_rm, str) and _rm not in ('', 'AMBIGUOUS', '現在地'):
                 _msg_for_subj = _msg_for_subj.replace(_rm, " ")
         if area_name in PREF_NEIGHBORS:
-            _short = area_name if area_name == "北海道" else area_name.replace("都", "").replace("府", "").replace("県", "")
+            _short = area_name if area_name == "北海道" else re.sub(r'[都府県]$', '', area_name)
             _msg_for_subj = _msg_for_subj.replace(_short, " ")
         _subj = None
         for _canon, _vars in KEYWORD_NORMALIZE.items():
@@ -2727,7 +2727,7 @@ def handle_message(event):
         _short_city = None
         if not _amb_keyword:
             for _pf, _ct in PREF_SAME_NAME_CITY.items():
-                _sh = _pf.replace('県', '').replace('府', '').replace('都', '')
+                _sh = re.sub(r'[都府県]$', '', _pf)  # 末尾の都/府/県のみ除去（「京都府」→「京都」、「東京都」を誤って「京」にしない）
                 if _sh in user_message and _pf not in user_message and _ct not in user_message:
                     _short_pref, _short_city = _pf, _ct
                     break
