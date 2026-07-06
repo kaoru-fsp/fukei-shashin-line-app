@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>風景写真コンシェルジュ｜株式会社風景写真出版</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;600&family=Noto+Serif+JP:wght@300;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #1a1a2e;
+    --mist: #f5f3ee;
+    --stone: #8a8070;
+    --gold: #b8975a;
+    --line: #d8d0c4;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--mist);
+    color: var(--ink);
+    font-family: 'Noto Sans JP', sans-serif;
+    font-weight: 300;
+    line-height: 1.9;
+  }
+  header {
+    background: var(--ink);
+    color: white;
+    padding: 60px 40px 50px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  header::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(135deg, #1a1a2e 0%, #2d3561 50%, #1a1a2e 100%);
+    opacity: 0.9;
+  }
+  header * { position: relative; z-index: 1; }
+  header h1 {
+    font-family: 'Noto Serif JP', serif;
+    font-weight: 300;
+    font-size: 1.6rem;
+    letter-spacing: 0.15em;
+    margin-bottom: 8px;
+  }
+  header .catch {
+    color: rgba(255,255,255,0.75);
+    font-size: 0.92rem;
+    letter-spacing: 0.05em;
+    margin-top: 18px;
+    line-height: 1.8;
+  }
+  header p.company {
+    color: rgba(255,255,255,0.5);
+    font-size: 0.8rem;
+    letter-spacing: 0.1em;
+  }
+  .gold-line {
+    width: 40px;
+    height: 1px;
+    background: var(--gold);
+    margin: 20px auto;
+  }
+  main {
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 60px 40px 100px;
+  }
+  h2 {
+    font-family: 'Noto Serif JP', serif;
+    font-weight: 600;
+    font-size: 1.15rem;
+    letter-spacing: 0.05em;
+    margin: 50px 0 18px;
+    padding-left: 14px;
+    border-left: 2px solid var(--gold);
+    color: var(--ink);
+  }
+  h2:first-of-type { margin-top: 0; }
+  p {
+    font-size: 0.92rem;
+    color: #3a3a4a;
+    margin-bottom: 16px;
+  }
+  ul {
+    list-style: none;
+    margin-bottom: 16px;
+  }
+  ul li {
+    font-size: 0.92rem;
+    color: #3a3a4a;
+    padding: 6px 0 6px 18px;
+    position: relative;
+  }
+  ul li::before {
+    content: '–';
+    position: absolute;
+    left: 0;
+    color: var(--gold);
+  }
+  .steps {
+    counter-reset: step;
+    list-style: none;
+    margin-bottom: 16px;
+  }
+  .steps li {
+    font-size: 0.92rem;
+    color: #3a3a4a;
+    padding: 8px 0 8px 40px;
+    position: relative;
+    margin-bottom: 4px;
+  }
+  .steps li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 8px;
+    width: 24px;
+    height: 24px;
+    background: var(--gold);
+    color: white;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 24px;
+    font-size: 0.8rem;
+  }
+  .friend-box {
+    background: white;
+    border: 1px solid var(--line);
+    padding: 40px;
+    margin: 30px 0;
+    border-radius: 2px;
+    text-align: center;
+  }
+  .friend-box img {
+    width: 180px;
+    height: 180px;
+    margin-bottom: 24px;
+  }
+  .friend-btn {
+    display: inline-block;
+    background: #06c755;
+    color: white;
+    text-decoration: none;
+    padding: 14px 40px;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    letter-spacing: 0.05em;
+  }
+  .friend-box .note {
+    color: var(--stone);
+    font-size: 0.82rem;
+    margin-top: 20px;
+    margin-bottom: 0;
+  }
+  .info-box {
+    background: white;
+    border: 1px solid var(--line);
+    padding: 28px 32px;
+    margin-top: 40px;
+    border-radius: 2px;
+  }
+  .info-box p { margin: 0 0 8px; font-size: 0.88rem; }
+  .info-box p:last-child { margin-bottom: 0; }
+  .info-box a { color: var(--gold); text-decoration: none; }
+  .links {
+    margin-top: 30px;
+    text-align: center;
+  }
+  .links a {
+    color: var(--gold);
+    text-decoration: none;
+    font-size: 0.85rem;
+    margin: 0 12px;
+  }
+  footer {
+    text-align: center;
+    padding: 40px;
+    color: var(--stone);
+    font-size: 0.78rem;
+    letter-spacing: 0.05em;
+    border-top: 1px solid var(--line);
+  }
+  @media (max-width: 600px) {
+    main { padding: 40px 24px 80px; }
+    header { padding: 40px 24px 36px; }
+    header h1 { font-size: 1.3rem; }
+    .friend-box { padding: 30px 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>風景写真コンシェルジュ</h1>
+  <div class="gold-line"></div>
+  <p class="company">株式会社風景写真出版</p>
+  <p class="catch">あなたの風景写真ライフを楽しく豊かにする、<br>LINEで使える風景撮影支援サービス</p>
+</header>
+
+<main>
+
+  <h2>風景写真コンシェルジュとは</h2>
+  <p>「風景写真コンシェルジュ」は、風景写真専門誌『風景写真』を発行する株式会社風景写真出版が運営する、LINEで使える風景撮影支援サービスです。</p>
+  <p>風景写真において「どこで、何を撮るか」は、作品を左右するとても大切な要素です。風景写真コンシェルジュは、LINEで気軽に話しかけるだけで、あなたの撮影のヒントとなる撮影地や被写体をご提案します。</p>
+
+  <h2>できること</h2>
+  <ul>
+    <li>地名やキーワードを送ると、その地域のおすすめ撮影地をご提案します</li>
+    <li>位置情報を送ると、現在地周辺の撮影スポットをご案内します</li>
+    <li>季節の被写体や、風景写真ならではの撮影地の情報をお届けします</li>
+    <li>ご提案へのご感想（フィードバック）もお気軽にお寄せいただけます</li>
+  </ul>
+
+  <h2>撮影リファレンスとの連携</h2>
+  <p>撮影に必要な情報は、撮影地だけではありません。天候、光の差す方向、時間帯など、さまざまな条件をあらかじめ知っておくことが、良い作品への近道です。</p>
+  <p>風景写真コンシェルジュと連携する「撮影リファレンス」では、コンシェルジュで調べた撮影地や被写体に、撮影に必要な気象・天文・季節の情報を重ねてご覧いただけます。さらに、季節ごとの被写体情報（旬撮ニュース・アーカイブ）から、これからの撮影計画を立てることもできます。</p>
+  <p>気になる時期や地域を入れて調べてみるだけでも、次の撮影に向かうモチベーションが高まる——そんなサービスを目指しています。</p>
+
+  <h2>使い方</h2>
+  <ol class="steps">
+    <li>下のQRコード、または「友だち追加」ボタンから、風景写真コンシェルジュを友だち追加します</li>
+    <li>撮りたい地域の地名やキーワードを送るか、位置情報を送ります</li>
+    <li>おすすめの撮影地や被写体のご提案が届きます</li>
+  </ol>
+
+  <div class="friend-box">
+    <img src="https://qr-official.line.me/gs/M_428qozzk_GW.png?oat_content=qr" alt="風景写真コンシェルジュ 友だち追加QRコード">
+    <div>
+      <a class="friend-btn" href="https://line.me/R/ti/p/@428qozzk">友だち追加</a>
+    </div>
+    <p class="note">スマートフォンでご覧の方は「友だち追加」ボタンから、<br>パソコンでご覧の方はQRコードを読み取ってご登録ください。</p>
+  </div>
+
+  <h2>運営者情報</h2>
+  <div class="info-box">
+    <p>株式会社風景写真出版</p>
+    <p>代表取締役社長　石川 薫</p>
+    <p>〒102-0093　東京都千代田区平河町1-8-3　ブティック社ビル別館5階</p>
+  </div>
+
+  <div class="links">
+    <a href="./legal.html">利用規約</a>
+    <a href="./legal.html#privacy">プライバシーポリシー</a>
+  </div>
+
+</main>
+
+<footer>
+  © 2026 株式会社風景写真出版　All Rights Reserved.
+</footer>
+
+</body>
+</html>
