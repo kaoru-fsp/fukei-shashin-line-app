@@ -337,6 +337,14 @@ function show(id, el) {
   el.classList.add('active');
   return false;
 }
+
+// URLに #privacy が付いていたら、最初からプライバシーポリシーを表示
+if (window.location.hash === '#privacy') {
+  document.querySelectorAll('section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('privacy').classList.add('active');
+  document.querySelectorAll('nav a')[1].classList.add('active');
+}
 </script>
 
 
