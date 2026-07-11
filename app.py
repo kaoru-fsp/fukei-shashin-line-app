@@ -432,11 +432,23 @@ def filter_broken_images(results, max_workers=8):
     except Exception:
         return results  # 判定処理自体が失敗したら従来どおり全件表示
 
-def subject_matches(variants, title='', place='', area='', subject_field=''):
+def subject_matches(variants, title='', place='', area='', subject_field='', exclude=None):
     """被写体語が作品に該当するか判定。
     Subject/タイトル一致は確実。地名・エリアでは複合地名(瀧谷・滝沢・滝川など)の
-    誤ヒットを避けるため、被写体語の直後がCJK文字でない(=地名の途中でない)場合のみ採用。"""
+    誤ヒットを避けるため、被写体語の直後がCJK文字でない(=地名の途中でない)場合のみ採用。
+    exclude を渡すと、その語を各フィールドから先に除去してから判定する。
+    例: 鳥カテゴリで exclude=['鳥居','鳥海山'] とすると、Subjectの「鳥居」由来の"鳥"を
+    誤ヒットさせない（「桜 鳥居」→「桜   」となり鳥は残らない。「白鳥 鳥居」→「白鳥   」で
+    白鳥は別variantで拾える）。"""
     title = str(title or ''); place = str(place or ''); area = str(area or ''); subject_field = str(subject_field or '')
+    if exclude:
+        for ex in exclude:
+            if not ex:
+                continue
+            subject_field = subject_field.replace(ex, ' ')
+            title = title.replace(ex, ' ')
+            place = place.replace(ex, ' ')
+            area = area.replace(ex, ' ')
     for v in variants:
         if v and (v in subject_field or v in title):
             return True
@@ -721,7 +733,8 @@ KEYWORD_NORMALIZE = {
     '紅葉': ['紅葉', 'もみじ', 'モミジ', '紅葉狩り'],
     '雪': ['雪', 'ゆき', '積雪', '雪景色', '吹雪'],
     '富士': ['富士', '富士山', 'ふじさん', 'Mt.Fuji'],
-    '棚田': ['棚田', 'たなだ'],
+    '棚田': ['棚田', 'たなだ', '千枚田'],
+    '水田': ['水田', '田んぼ', '田園', '稲穂', '稲田', '青田', '田面'],
     '海': ['海', '海岸', '海辺', 'うみ', '波'],
     '湖': ['湖', 'みずうみ', '池', '沼'],
     '川': ['川', '河川', '渓流', '河原'],
@@ -730,7 +743,8 @@ KEYWORD_NORMALIZE = {
     '夕焼け': ['夕焼け', '夕焼', '夕日', '日没', 'サンセット'],
     '星': ['星', '星空', '天体', '星景'],
     '天の川': ['天の川', '天の川', '銀河'],
-    '霧': ['霧', '霞', '雲海', 'きり'],
+    '霧': ['霧', '霞', '靄', 'きり', '朝霧', '朝靄', '川霧', '海霧'],
+    '雲海': ['雲海', '滝雲'],
     '氷': ['氷', '霜', '結氷', '氷点', 'つらら'],
     'ひまわり': ['ひまわり', 'ヒマワリ', '向日葵'],
     'コスモス': ['コスモス', 'こすもす', '秋桜'],
@@ -747,8 +761,20 @@ KEYWORD_NORMALIZE = {
     '寺': ['寺', 'お寺', '寺院', '仏閣'],
     '白鳥': ['白鳥', 'はくちょう', 'スワン'],
     'タンチョウ': ['タンチョウ', 'たんちょう', '丹頂', '鶴'],
+    '鳥': ['鳥', '野鳥', '水鳥', '海鳥', '小鳥', 'サギ', 'シラサギ', 'アオサギ', 'ダイサギ', 'コサギ', '白鷺', 'カモ', '鴨', 'カモメ', '雁', '鷺'],
     'ツツジ': ['ツツジ', 'つつじ', '躑躅', 'ミヤマキリシマ', 'アケボノツツジ', 'イワツツジ', 'シャクナゲ', 'しゃくなげ'],
 }
+
+# カテゴリ別の除外語。作品データのSubject/Title等で、被写体variantを部分文字列として含むが
+# その被写体ではない語を、判定前に各フィールドから除去する（subject_matchesのexclude引数へ渡す）。
+# 例: 「鳥」は「鳥居」(神社)「鳥海山」「鳥甲山」(山名)の一部として現れるため、鳥の野鳥判定から外す。
+SUBJECT_EXCLUDE = {
+    '鳥': ['鳥居', '鳥海山', '鳥甲山', '害鳥'],
+}
+
+def subject_exclude_for(canon):
+    """正規キーに対応する除外語リストを返す（無ければ空リスト）。"""
+    return SUBJECT_EXCLUDE.get(canon, [])
 
 def detect_subject_longest(text):
     """text に含まれる被写体variantのうち最長一致の正規名を返す（該当なしはNone）。
@@ -1086,7 +1112,8 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             if keyword:
                 kw_variants = KEYWORD_NORMALIZE.get(keyword, [keyword])
                 if not subject_matches(kw_variants, title=d.get('Title', ''), place=d.get('Place', ''),
-                                       area=d.get('Area', ''), subject_field=d.get('Subject', '')):
+                                       area=d.get('Area', ''), subject_field=d.get('Subject', ''),
+                                       exclude=subject_exclude_for(keyword)):
                     continue
                 _blob = d.get('Subject', '') + d.get('Title', '') + d.get('Place', '') + d.get('Area', '')
                 matched_kw = next((v for v in kw_variants if v in _blob), keyword)
@@ -1356,6 +1383,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     in_season, all_time = [], []
     bin_counter = Counter()  # マッチした公開作品の旬分布(見頃クラスタ算出用)
     subject_variants = KEYWORD_NORMALIZE.get(subject, [subject]) if subject else None
+    subject_exclude = subject_exclude_for(subject) if subject else []
     place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
     place_terms = [t for t in place_terms if t]
     try:
@@ -1366,7 +1394,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             title = d.get('Title', '') or ''
             if place_terms and not any(t in place or t in area or t in title for t in place_terms):
                 continue
-            if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', '')):
+            if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', ''), exclude=subject_exclude):
                 continue
             if d.get('Winner') in excl_authors:
                 continue
@@ -1493,7 +1521,7 @@ def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
             bi = bin_index(mo, d.get('Day'))
             sfield = d.get('Subject', '')
             for canon, variants in KEYWORD_NORMALIZE.items():
-                if subject_matches(variants, title=title, place=place, area=area, subject_field=sfield):
+                if subject_matches(variants, title=title, place=place, area=area, subject_field=sfield, exclude=subject_exclude_for(canon)):
                     bins[canon][bi] += 1
     except Exception:
         import traceback
