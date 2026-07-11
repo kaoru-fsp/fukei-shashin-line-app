@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
-風景写真コンシェルジュ 完全版 v2
-仕様書に完全準拠。3分類選定×乱数×除外2系統×LINE Flex カルーセル×postback
+風景写真コンシェルジュ
+LINE Bot（Flask / Firestore）。『風景写真』入賞作品データから、
+地域・被写体・時期に応じて撮影地を提案する。
+被写体検索は KEYWORD_NORMALIZE 辞書＋最長一致。継続開発中。
 """
 import os
 import json
