@@ -2824,7 +2824,7 @@ def handle_message(event):
                     if pr['status'] == 'off_season':
                         hint = (peak_reason_text(f"ちなみに「{place_disp}」", _subj, speaks)
                                 if (_subj in SEASONAL_SUBJECTS and speaks)
-                                else "別の時期には作品があります。")
+                                else "期間を広げると作品が見つかります。")
                         _lead = f"{period_phrase(_pp)}に「{place_disp}」で撮影された{_subj}の作品は見つかりませんでした。{hint}"
                         _empty = (time_widen_empty_actions(pterms, target_date, _ol, _on, _subj)
                                   if (_subj in SEASONAL_SUBJECTS and speaks) else [])
@@ -2892,7 +2892,7 @@ def handle_message(event):
             if prn['status'] == 'off_season':
                 hint = (peak_reason_text("この圏内", _subj, speaks)
                         if (_subj in SEASONAL_SUBJECTS and speaks)
-                        else "別の時期には圏内に作品があります。")
+                        else "期間を広げると圏内に作品が見つかります。")
                 _lead = f"{period_phrase(_pp)}に{near_name}から半径{RADIUS_SUBJ}km圏内で撮影された{_subj}の作品は見つかりませんでした。{hint}"
                 _empty = (time_widen_empty_actions(None, target_date, _ol, _on, _subj, center_latlng=center, radius_km=RADIUS_SUBJ)
                           if (_subj in SEASONAL_SUBJECTS and speaks) else [])
