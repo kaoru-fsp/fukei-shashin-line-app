@@ -750,6 +750,32 @@ KEYWORD_NORMALIZE = {
     'ツツジ': ['ツツジ', 'つつじ', '躑躅', 'ミヤマキリシマ', 'アケボノツツジ', 'イワツツジ', 'シャクナゲ', 'しゃくなげ'],
 }
 
+def detect_subject_longest(text):
+    """text に含まれる被写体variantのうち最長一致の正規名を返す（該当なしはNone）。
+    辞書の定義順ではなく一致した語の長さで決めるため、「雲海」が「海」(1字)ではなく
+    「雲海」(2字→霧)として、「天の川」が「川」ではなく「天の川」として正しく解決される。
+    同長で複数一致した場合は辞書の定義順（先勝ち）を保つ。"""
+    if not text:
+        return None
+    best_canon, best_len = None, 0
+    for canon, variants in KEYWORD_NORMALIZE.items():
+        for v in variants:
+            if v and v in text and len(v) > best_len:
+                best_canon, best_len = canon, len(v)
+    return best_canon
+
+def detect_subject_longest_variant(text):
+    """detect_subject_longest と同じ最長一致で、(正規名, 一致した実variant) を返す。
+    実variantは呼び出し側で text から除去する用途（extract_subject）に使う。該当なしは (None, None)。"""
+    if not text:
+        return None, None
+    best_canon, best_var, best_len = None, None, 0
+    for canon, variants in KEYWORD_NORMALIZE.items():
+        for v in variants:
+            if v and v in text and len(v) > best_len:
+                best_canon, best_var, best_len = canon, v, len(v)
+    return best_canon, best_var
+
 WIDE_PREFS = {"北海道", "長野県", "岩手県", "新潟県"}
 PREF_CITY = {
     "北海道":"札幌","青森県":"青森市","岩手県":"盛岡市","宮城県":"仙台市",
@@ -1502,10 +1528,9 @@ def extract_subject(text):
                     cs = canon
                     break
             return cs, before
-    for canon, variants in KEYWORD_NORMALIZE.items():
-        for v in variants:
-            if v in t:
-                return canon, t.replace(v, ' ', 1)
+    canon, var = detect_subject_longest_variant(t)
+    if canon:
+        return canon, t.replace(var, ' ', 1)
     return None, t
 
 
@@ -2696,11 +2721,7 @@ def handle_message(event):
         if area_name in PREF_NEIGHBORS:
             _short = area_name if area_name == "北海道" else re.sub(r'[都府県]$', '', area_name)
             _msg_for_subj = _msg_for_subj.replace(_short, " ")
-        _subj = None
-        for _canon, _vars in KEYWORD_NORMALIZE.items():
-            if any(v in _msg_for_subj for v in _vars):
-                _subj = _canon
-                break
+        _subj = detect_subject_longest(_msg_for_subj)
         if _amb_keyword:
             # 同名地名で「被写体として」を選んだ場合は、その被写体で確定（入力番号から再判定しない）
             _subj = _amb_keyword
@@ -2717,10 +2738,7 @@ def handle_message(event):
         # キーワード抽出（被写体があればそれを採用。無い場合のみ全文から検出）
         search_keyword = _subj
         if not search_keyword and not (area_name and area_name not in [None, 'AMBIGUOUS']):
-            for canonical, variants in KEYWORD_NORMALIZE.items():
-                if any(v in user_message for v in variants):
-                    search_keyword = canonical
-                    break
+            search_keyword = detect_subject_longest(user_message)
         # 県の略称と同名の市があるケース（静岡・山梨など）。県/府も市も付けず単独略称で送られたら、
         # まず市(狭い)で答え、メニューの「地域を広げる」で市→県→隣県→全国と段階的に広げる（狭→広）。
         _short_pref = None
