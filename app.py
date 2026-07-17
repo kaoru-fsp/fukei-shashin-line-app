@@ -1778,7 +1778,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
                             "height": "sm",
                             "action": {
                                 "type": "postback",
-                                "label": "詳細情報",
+                                "label": "作品情報",
                                 "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
                             }
                         },
@@ -3154,7 +3154,7 @@ def handle_postback(event):
                     break
 
             if not photo_data:
-                line_bot_api.reply_message(reply_token, TextSendMessage(text="詳細情報が見つかりませんでした。"))
+                line_bot_api.reply_message(reply_token, TextSendMessage(text="作品情報が見つかりませんでした。"))
             else:
                 # Location masterから地域情報を取得
                 loc_data = None
