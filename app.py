@@ -1705,6 +1705,20 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     ref_base = "https://reference.fukei-shashin.co.jp/reference"
     ref_location = place if place else area
     ref_uri = f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base
+    # 撮影プランナーURL
+    planner_base = "https://reference.fukei-shashin.co.jp/planner"
+    planner_params = []
+    if area:
+        planner_params.append(f"area={quote(area)}")
+    if place:
+        planner_params.append(f"place={quote(place)}")
+    if item.get('title'):
+        planner_params.append(f"title={quote(item['title'])}")
+    if item.get('period'):
+        planner_params.append(f"period={quote(item['period'])}")
+    if item.get('pub'):
+        planner_params.append(f"pub={quote(str(item['pub']))}")
+    planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
 
     bubble = {
         "type": "bubble",
@@ -1802,6 +1816,17 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
                         "type": "uri",
                         "label": "📍 現地情報をチェック",
                         "uri": ref_uri
+                    }
+                },
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "height": "sm",
+                    "color": "#1DB446",
+                    "action": {
+                        "type": "uri",
+                        "label": "📋 撮影プランナー",
+                        "uri": planner_uri
                     }
                 }
             ]
