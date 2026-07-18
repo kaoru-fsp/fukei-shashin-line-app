@@ -11,6 +11,7 @@ import sys
 import re
 import math
 import random
+import secrets
 import urllib.parse
 from datetime import date, timedelta
 from collections import defaultdict, Counter
@@ -1668,7 +1669,7 @@ def expand_pref_name(s):
             return full
     return s
 
-def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
+def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan_id=None, idx=0):
     place = item.get('place', '')
     area = item.get('area', '')
     location_contents = []
@@ -1707,24 +1708,29 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
     ref_uri = f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base
     # 撮影プランナーURL
     planner_base = "https://reference.fukei-shashin.co.jp/planner"
-    planner_params = []
-    if area:
-        planner_params.append(f"area={quote(area)}")
-    if place:
-        planner_params.append(f"place={quote(place)}")
-    if item.get('title'):
-        planner_params.append(f"title={quote(item['title'])}")
-    if item.get('period'):
-        planner_params.append(f"period={quote(item['period'])}")
-    if item.get('pub'):
-        planner_params.append(f"pub={quote(str(item['pub']))}")
-    if item.get('url'):
-        planner_params.append(f"img={quote(item['url'])}")
-    if item.get('winner'):
-        planner_params.append(f"winner={quote(item['winner'])}")
-    if item.get('award'):
-        planner_params.append(f"award={quote(item['award'])}")
-    planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
+    if plan_id:
+        # PlanSession方式: 全候補をFirestoreに保存済み、IDとインデックスだけ渡す
+        planner_uri = f"{planner_base}?planId={quote(plan_id)}&idx={idx}"
+    else:
+        # フォールバック: 単品パラメータ方式（候補が1件のとき）
+        planner_params = []
+        if area:
+            planner_params.append(f"area={quote(area)}")
+        if place:
+            planner_params.append(f"place={quote(place)}")
+        if item.get('title'):
+            planner_params.append(f"title={quote(item['title'])}")
+        if item.get('period'):
+            planner_params.append(f"period={quote(item['period'])}")
+        if item.get('pub'):
+            planner_params.append(f"pub={quote(str(item['pub']))}")
+        if item.get('url'):
+            planner_params.append(f"img={quote(item['url'])}")
+        if item.get('winner'):
+            planner_params.append(f"winner={quote(item['winner'])}")
+        if item.get('award'):
+            planner_params.append(f"award={quote(item['award'])}")
+        planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
 
     bubble = {
         "type": "bubble",
@@ -2023,13 +2029,45 @@ def reply_staged_area(reply_token, user_id, stage, subject, pref, city, date_, o
                         menu_quick_reply=expand_menu_quick_reply(opts, area_label=_area_label))
 
 
+def save_plan_session(results):
+    """カルーセル候補一覧を Firestore PlanSessions に保存し、planId を返す。
+    プランナーページで複数候補を比較表示するために使用。"""
+    if not db or not results:
+        return None
+    try:
+        plan_id = secrets.token_urlsafe(9)  # 12文字のURL安全なID
+        from datetime import datetime, timezone
+        items = []
+        for _emoji, _label, it in results:
+            items.append({
+                "area": it.get('area', ''),
+                "place": it.get('place', ''),
+                "title": it.get('title', ''),
+                "period": it.get('period', ''),
+                "pub": str(it.get('pub', '')),
+                "img": it.get('url', ''),
+                "winner": it.get('winner', ''),
+                "award": it.get('award', ''),
+            })
+        db.collection('PlanSessions').document(plan_id).set({
+            "items": items,
+            "created": firestore.SERVER_TIMESTAMP,
+            "expires": datetime.now(timezone.utc) + timedelta(days=30),
+        })
+        return plan_id
+    except Exception as e:
+        print(f"[save_plan_session] error: {e}", file=sys.stderr)
+        return None
+
+
 def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None, menu_quick_reply=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
     note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
     menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。
     menu_quick_reply があれば、そのメニュー(最後のメッセージ)にタップ式ボタンを付ける。
     base_date を渡すと、結果や指定地が開放月外の閉山スポットに該当する場合に注意書きを添える。"""
-    bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw')) for e, l, it in results]
+    plan_id = save_plan_session(results) if len(results) > 1 else None
+    bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw'), plan_id=plan_id, idx=i) for i, (e, l, it) in enumerate(results)]
     if head_text:
         bubbles = [build_info_bubble(head_text)] + bubbles
     carousel = FlexSendMessage(
