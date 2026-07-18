@@ -1718,6 +1718,12 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
         planner_params.append(f"period={quote(item['period'])}")
     if item.get('pub'):
         planner_params.append(f"pub={quote(str(item['pub']))}")
+    if item.get('url'):
+        planner_params.append(f"img={quote(item['url'])}")
+    if item.get('winner'):
+        planner_params.append(f"winner={quote(item['winner'])}")
+    if item.get('award'):
+        planner_params.append(f"award={quote(item['award'])}")
     planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
 
     bubble = {
@@ -1814,7 +1820,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None):
                     "height": "sm",
                     "action": {
                         "type": "uri",
-                        "label": "📍 現地情報をチェック",
+                        "label": "📍 リファレンスをチェック",
                         "uri": ref_uri
                     }
                 },
