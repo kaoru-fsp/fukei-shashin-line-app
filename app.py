@@ -2193,9 +2193,22 @@ def handle_message(event):
     user_id = event.source.user_id
     # Firestoreに保存済みのユーザー情報(位置・初回フラグ)をメモリへ復元
     hydrate_user(user_id)
-    # 「使い方」「ヘルプ」でいつでも案内を表示
+    # 「使い方」「ヘルプ」でいつでも案内を表示（初回のみ全文、2回目以降は要約）
     if event.message.text.strip() in ("使い方", "つかいかた", "ヘルプ", "help", "Help"):
-        line_bot_api.reply_message(reply_token, [TextSendMessage(text=t) for t in usage_guide_messages()])
+        if user_id not in USER_SEEN:
+            # 初回: 歓迎メッセージ＋全文ガイド
+            mark_user_seen(user_id)
+            line_bot_api.reply_message(reply_token, [
+                TextSendMessage(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"),
+                *[TextSendMessage(text=t) for t in usage_guide_messages()]
+            ])
+        else:
+            # 2回目以降: 短い案内のみ
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text="地名（栃木県、美瑛）や被写体（滝、桜）を送ると撮影地をご提案します。\n"
+                     "日付を添えることもできます（週末 京都、明日 滝）。\n\n"
+                     "詳しい使い方は「コマンド」と送ってください。"
+            ))
         return
     # 「コマンド」でコマンド一覧と用例を表示
     if event.message.text.strip() in ("コマンド", "こまんど", "コマンド一覧", "command"):
@@ -2236,12 +2249,15 @@ def handle_message(event):
         user_message = event.message.text.strip()
         # 利用状況の観察用に記録(制限はかけない)
         record_search(user_id, user_message)
-        # 初回メッセージ時に歓迎＋使い方を案内
+        # 初回メッセージ時に短い歓迎を案内（全文ガイドは「使い方」コマンドに集約）
         if user_id not in USER_SEEN:
             mark_user_seen(user_id)
             from linebot.models import TextSendMessage as TSM
-            line_bot_api.push_message(user_id, TSM(text="ようこそ風景写真コンシェルジュの部屋へ。ここでは『風景写真』の誌面を飾った数々の傑作とその生まれた場所へと皆さんをご案内します。"))
-            line_bot_api.push_message(user_id, [TSM(text=t) for t in usage_guide_messages()])
+            line_bot_api.push_message(user_id, TSM(
+                text="ようこそ風景写真コンシェルジュの部屋へ。\n"
+                     "地名や被写体を送ると、『風景写真』の傑作が撮られた撮影地をご案内します。\n\n"
+                     "使い方の詳細は「使い方」と送ってください。"
+            ))
 
         # 安全網: どの保留メニューも無い状態で「数字のみ」が届いたとき（メニューが届く前に番号を
         # 押した等）、検索に流さず、しれっと次の操作を促す。どちらの間違いとも言わない。
