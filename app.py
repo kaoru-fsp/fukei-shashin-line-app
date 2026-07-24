@@ -3206,6 +3206,14 @@ def handle_postback(event):
                     text="選択の有効期限が切れたようです。もう一度コマンドを送ってください。"))
             return
 
+        if action == 'menu_concierge':
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text="撮りたい被写体名や撮りに行きたい地域名を入力してください。\n\n"
+                     "例：滝／桜／美瑛／栃木県 紅葉\n\n"
+                     "📖 使い方の詳細は「使い方」と送ってください。"
+            ))
+            return
+
         if action == 'feedback':
             rating = params.get('rating', '')
             user_id = event.source.user_id
