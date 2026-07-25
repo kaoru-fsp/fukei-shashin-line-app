@@ -2208,8 +2208,8 @@ def handle_message(event):
                 text="地名（栃木県、美瑛）や被写体（滝、桜）を送ると撮影地をご提案します。\n"
                      "日付を添えることもできます（週末 京都、明日 滝）。\n\n"
                      "詳しい使い方は「コマンド」と送ってください。\n\n"
-                     "📖 使い方ガイド\nhttps://reference.fukei-shashin.co.jp/guide\n\n"
-                     "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual"
+                     "📖 使い方ガイド\nhttps://reference.fukei-shashin.co.jp/guide?openExternalBrowser=1\n\n"
+                     "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual?openExternalBrowser=1"
             ))
         return
     # 「コマンド」でコマンド一覧と用例を表示
