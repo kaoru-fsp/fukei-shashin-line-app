@@ -1668,8 +1668,44 @@ def expand_pref_name(s):
         if s == full or s == short:
             return full
     return s
-
+def safe_uri(u, fallback=None):
+    """LINEの uri アクションに渡せる形に整える。
+    LINEは未エンコードの空白・非ASCIIを含むURIを400『Invalid action URI』で弾き、
+    その1件のためにメッセージ全体が送信されなくなる。ここで確実に通る形に正規化する。
+    ・空/None、http(s)以外、ホスト無し → fallback
+    ・パス/クエリの空白・非ASCIIを percent-encode
+    ・1000文字超（LINEの上限）→ fallback
+    """
+    s = str(u or '').strip()
+    if not s:
+        return fallback
+    try:
+        from urllib.parse import urlsplit, urlunsplit, quote as _q
+        p = urlsplit(s)
+        if p.scheme not in ('http', 'https') or not p.netloc:
+            return fallback
+        out = urlunsplit((
+            p.scheme,
+            p.netloc,
+            _q(p.path, safe="/%"),
+            _q(p.query, safe="=&%+"),
+            _q(p.fragment, safe="%"),
+        ))
+        return out if len(out) <= 1000 else fallback
+    except Exception:
+        return fallback
 def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan_id=None, idx=0):
+    """カルーセルの1バブルを組み立てる。
+    画像URIが不正な場合は None を返す（呼び出し側で除外する）。1件の不正データで
+    メッセージ全体が送れなくなるのを防ぐため、URIはすべて safe_uri を通す。"""
+    from urllib.parse import quote
+
+    img_url = safe_uri(item.get('url'))
+    if not img_url:
+        print(f"[WARN] bubble skipped (bad image url): pic={item.get('pic')!r} "
+              f"pub={item.get('pub')!r} url={item.get('url')!r}", flush=True)
+        return None
+
     place = item.get('place', '')
     area = item.get('area', '')
     location_contents = []
@@ -1701,16 +1737,20 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
                 "color": "#111111"
             })
 
-    from urllib.parse import quote
-    map_uri = f"https://maps.google.com/maps?q={quote(area)}" if area else "https://maps.google.com/"
+    map_uri = safe_uri(
+        f"https://maps.google.com/maps?q={quote(area)}" if area else "https://maps.google.com/",
+        fallback="https://maps.google.com/")
     ref_base = "https://reference.fukei-shashin.co.jp/reference"
     ref_location = place if place else area
-    ref_uri = f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base
+    ref_uri = safe_uri(
+        f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base,
+        fallback=ref_base)
+
     # 撮影プランナーURL
     planner_base = "https://reference.fukei-shashin.co.jp/planner"
     if plan_id:
         # PlanSession方式: 全候補をFirestoreに保存済み、IDとインデックスだけ渡す
-        planner_uri = f"{planner_base}?planId={quote(plan_id)}&idx={idx}"
+        planner_uri = f"{planner_base}?planId={quote(str(plan_id))}&idx={idx}"
     else:
         # フォールバック: 単品パラメータ方式（候補が1件のとき）
         planner_params = []
@@ -1731,18 +1771,70 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
         if item.get('award'):
             planner_params.append(f"award={quote(item['award'])}")
         planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
+    planner_uri = safe_uri(planner_uri, fallback=planner_base)
+
+    footer_buttons = [
+        {
+            "type": "box",
+            "layout": "horizontal",
+            "spacing": "sm",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "height": "sm",
+                    "action": {
+                        "type": "postback",
+                        "label": "作品情報",
+                        "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
+                    }
+                },
+                {
+                    "type": "button",
+                    "style": "secondary",
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "マップ",
+                        "uri": map_uri
+                    }
+                }
+            ]
+        },
+        {
+            "type": "button",
+            "style": "secondary",
+            "height": "sm",
+            "action": {
+                "type": "uri",
+                "label": "📍 リファレンスをチェック",
+                "uri": ref_uri
+            }
+        },
+        {
+            "type": "button",
+            "style": "primary",
+            "height": "sm",
+            "color": "#1DB446",
+            "action": {
+                "type": "uri",
+                "label": "📋 撮影プランナー",
+                "uri": planner_uri
+            }
+        }
+    ]
 
     bubble = {
         "type": "bubble",
         "hero": {
             "type": "image",
-            "url": item['url'],
+            "url": img_url,
             "size": "full",
             "aspectRatio": "20:13",
             "aspectMode": "cover",
             "action": {
                 "type": "uri",
-                "uri": item['url']
+                "uri": img_url
             }
         },
         "body": {
@@ -1792,56 +1884,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
             "type": "box",
             "layout": "vertical",
             "spacing": "sm",
-            "contents": [
-                {
-                    "type": "box",
-                    "layout": "horizontal",
-                    "spacing": "sm",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "style": "primary",
-                            "height": "sm",
-                            "action": {
-                                "type": "postback",
-                                "label": "作品情報",
-                                "data": f"action=detail&pic={item['pic']}&dnumb={item.get('dnumb', '')}"
-                            }
-                        },
-                        {
-                            "type": "button",
-                            "style": "secondary",
-                            "height": "sm",
-                            "action": {
-                                "type": "uri",
-                                "label": "マップ",
-                                "uri": map_uri
-                            }
-                        }
-                    ]
-                },
-                {
-                    "type": "button",
-                    "style": "secondary",
-                    "height": "sm",
-                    "action": {
-                        "type": "uri",
-                        "label": "📍 リファレンスをチェック",
-                        "uri": ref_uri
-                    }
-                },
-                {
-                    "type": "button",
-                    "style": "primary",
-                    "height": "sm",
-                    "color": "#1DB446",
-                    "action": {
-                        "type": "uri",
-                        "label": "📋 撮影プランナー",
-                        "uri": planner_uri
-                    }
-                }
-            ]
+            "contents": footer_buttons
         }
     }
     return bubble
@@ -2059,15 +2102,32 @@ def save_plan_session(results):
         print(f"[save_plan_session] error: {e}", file=sys.stderr)
         return None
 
-
 def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地のご提案", note_text=None, menu_text=None, base_date=None, region_text=None, menu_quick_reply=None):
     """説明文をカルーセルの先頭バブルに入れて返信する(テキストが画面外に流れて見落とされるのを防ぐ)。
     note_text があれば、カルーセルの後に参考情報のテキストメッセージを続けて送る。
     menu_text があれば、さらにその後に「もっと広げますか?」等のメニューを続けて送る。
     menu_quick_reply があれば、そのメニュー(最後のメッセージ)にタップ式ボタンを付ける。
-    base_date を渡すと、結果や指定地が開放月外の閉山スポットに該当する場合に注意書きを添える。"""
+    base_date を渡すと、結果や指定地が開放月外の閉山スポットに該当する場合に注意書きを添える。
+
+    送信は必ず例外を捕まえる。LINEに1件でも不正なバブルがあると400で全通が届かず、
+    利用者からは『無反応』にしか見えないため、失敗時は平文で代替の返信を出す。"""
     plan_id = save_plan_session(results) if len(results) > 1 else None
-    bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw'), plan_id=plan_id, idx=i) for i, (e, l, it) in enumerate(results)]
+    bubbles = [build_carousel_bubble(it, e, l, matched_kw=it.get('matched_kw'), plan_id=plan_id, idx=i)
+               for i, (e, l, it) in enumerate(results)]
+    _skipped = sum(1 for b in bubbles if b is None)
+    bubbles = [b for b in bubbles if b]          # 不正データのバブルは落とす(全体は生かす)
+    if _skipped:
+        print(f"[WARN] {_skipped} bubble(s) skipped due to invalid uri", flush=True)
+    if not bubbles:
+        # 全滅した場合だけ、カルーセルを諦めて文章で返す
+        print("[ERROR] all bubbles invalid; falling back to text", flush=True)
+        _t = (head_text or "撮影地の候補が見つかりましたが、画像の表示に問題があり一覧を出せませんでした。")
+        try:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=_t))
+        except Exception:
+            import traceback
+            print(f"[ERROR] fallback reply failed: {traceback.format_exc()}", flush=True)
+        return
     if head_text:
         bubbles = [build_info_bubble(head_text)] + bubbles
     carousel = FlexSendMessage(
@@ -2084,8 +2144,24 @@ def reply_with_carousel(reply_token, head_text, results, alt_text="撮影地の�
     if menu_text:
         msgs.append(TextSendMessage(text=menu_text, quick_reply=menu_quick_reply) if menu_quick_reply
                     else TextSendMessage(text=menu_text))
-    line_bot_api.reply_message(reply_token, msgs)
-
+    try:
+        line_bot_api.reply_message(reply_token, msgs)
+    except Exception:
+        import traceback
+        print(f"[ERROR] reply_with_carousel send failed: {traceback.format_exc()}", flush=True)
+        # 何が弾かれたのかを後から特定できるよう、送ろうとした中身を残す
+        try:
+            print("[DEBUG] payload: " + json.dumps(
+                [m.as_json_dict() for m in msgs], ensure_ascii=False)[:4000], flush=True)
+        except Exception:
+            pass
+        # カルーセルを諦め、文章だけでも届ける（無反応にしない）
+        try:
+            _parts = [p for p in (head_text, note_text, menu_text) if p]
+            _t = "\n\n".join(_parts) if _parts else "検索結果の表示に失敗しました。もう一度お試しください。"
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=_t[:4900]))
+        except Exception:
+            print(f"[ERROR] fallback reply failed: {traceback.format_exc()}", flush=True)
 
 def format_published(pub):
     if not pub:
