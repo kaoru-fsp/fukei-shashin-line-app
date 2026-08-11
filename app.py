@@ -757,6 +757,7 @@ KEYWORD_NORMALIZE = {
     '芝桜': ['芝桜', 'しばざくら'],
     '藤': ['藤', 'ふじ', '藤の花'],
     'ラベンダー': ['ラベンダー', 'らべんだー'],
+    'ネモフィラ': ['ネモフィラ', 'ねもふぃら'],
     '鉄道': ['鉄道', '列車', '電車', '汽車', 'SL', '蒸気機関車', 'ローカル線'],
     '灯台': ['灯台', 'とうだい'],
     '城': ['城', 'お城', '城郭'],
@@ -768,7 +769,97 @@ KEYWORD_NORMALIZE = {
     '鳥': ['鳥', '野鳥', '水鳥', '海鳥', '小鳥', 'サギ', 'シラサギ', 'アオサギ', 'ダイサギ', 'コサギ', '白鷺', 'カモ', '鴨', 'カモメ', '雁', '鷺'],
     'ツツジ': ['ツツジ', 'つつじ', '躑躅', 'ミヤマキリシマ', 'アケボノツツジ', 'イワツツジ', 'シャクナゲ', 'しゃくなげ'],
 }
+# 被写体の上位カテゴリ。「花」のように、それ自体は被写体名でないが写真家が実際に使う括り。
+# 撮影者は「今どんな花が撮れるか」という単位で考えるが、KEYWORD_NORMALIZE は個々の被写体名しか
+# 持たないため、その差を埋める層。値は KEYWORD_NORMALIZE の正規キーであること。
+SUBJECT_CATEGORIES = {
+    '花': ['桜', '芝桜', '菜の花', '藤', 'ツツジ', '紫陽花', 'ひまわり',
+           'コスモス', 'ラベンダー', 'ネモフィラ', 'ススキ'],
+}
 
+# カテゴリ語として受け付ける表記のゆれ。→ SUBJECT_CATEGORIES のキー
+CATEGORY_ALIASES = {
+    '花': '花', 'はな': '花', 'ハナ': '花', '花々': '花', 'お花': '花',
+}
+
+
+def detect_category(text):
+    """text がカテゴリ語そのもの（前後の助詞・空白を除く）なら正規キーを返す。該当なしは None。
+    部分一致にしないのは、「花火」「菜の花」等を巻き込まないため。"""
+    t = re.sub(r'[\s　、,。.・]+', '', str(text or '')).strip()
+    t = re.sub(r'^[のはをがでとへもに]+|[のはをがでとへもに]+$', '', t)
+    return CATEGORY_ALIASES.get(t)
+
+
+def category_members_in_peak(canon_list, center_latlng, radius_km, base_date=None):
+    """カテゴリ内の被写体のうち、いま撮り頃のものを (被写体, 撮り頃ラベル, 件数) で返す。
+    subjects_in_peak_near の結果をカテゴリで絞り込むだけなので、判定基準は既存と同じ。"""
+    if not center_latlng:
+        return []
+    allow = set(canon_list or [])
+    return [row for row in subjects_in_peak_near(center_latlng, radius_km, base_date)
+            if row[0] in allow]
+
+
+def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, limit=3):
+    """カテゴリ内で『次に近い撮り頃』の被写体を返す。撮り頃の花が一つも無い季節（冬など）に、
+    無いものは無いと言った上で次の見込みを案内するために使う。
+    戻り値: [(被写体, 撮り頃ラベル, date), ...] を日付の近い順で最大limit件。"""
+    if not db or not center_latlng:
+        return []
+    base = base_date or date.today()
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    allow = set(canon_list or [])
+    bins = defaultdict(Counter)
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict()
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            if d.get('Winner') in excl_authors:
+                continue
+            area = d.get('Area', '') or ''
+            place = d.get('Place', '') or ''
+            title = d.get('Title', '') or ''
+            if is_area_blocked(place, area, blocked_areas):
+                continue
+            pref = extract_pref(area)
+            wll = work_latlng(area, pref) or (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
+            if not wll or haversine(center_latlng[0], center_latlng[1], wll[0], wll[1]) > radius_km:
+                continue
+            try:
+                mo = int(d.get('Month'))
+            except Exception:
+                continue
+            if not (1 <= mo <= 12):
+                continue
+            bi = bin_index(mo, d.get('Day'))
+            sfield = d.get('Subject', '')
+            for canon in allow:
+                variants = KEYWORD_NORMALIZE.get(canon, [canon])
+                if subject_matches(variants, title=title, place=place, area=area,
+                                   subject_field=sfield, exclude=subject_exclude_for(canon)):
+                    bins[canon][bi] += 1
+    except Exception:
+        import traceback
+        print(f"[ERROR] category_next_peaks: {traceback.format_exc()}", flush=True)
+        return []
+    out = []
+    for canon, bc in bins.items():
+        peaks = compute_peaks(bc)
+        if not peaks:
+            continue
+        nd, lbl = next_peak_date(peaks, base)
+        if nd:
+            out.append((canon, lbl, nd))
+    out.sort(key=lambda x: x[2])
+    return out[:limit]
 # カテゴリ別の除外語。作品データのSubject/Title等で、被写体variantを部分文字列として含むが
 # その被写体ではない語を、判定前に各フィールドから除去する（subject_matchesのexclude引数へ渡す）。
 # 例: 「鳥」は「鳥居」(神社)「鳥海山」「鳥甲山」(山名)の一部として現れるため、鳥の野鳥判定から外す。
