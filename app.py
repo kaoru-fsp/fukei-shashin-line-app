@@ -3027,7 +3027,12 @@ def handle_message(event):
             search_keyword = detect_subject_longest(user_message)
         # カテゴリ語（「花」など）の問い返し。被写体名ではなく上位カテゴリで来たとき、
         # いま撮り頃のものだけを選択肢にして返す。「今どんな花が撮れるか」という問いへの答え。
-        _cat = detect_category(user_message) if not _amb_keyword else None
+        # カテゴリ判定の前に日付表現を落とす（「1月 花」「週末 花」等でもカテゴリとして拾うため）。
+        # 日付は _pp で解析済みなので、ここで除いても情報は失われない。
+        _msg_for_cat = re.sub(
+            r'\d{1,2}月(?:\d{1,2}日)?|\d+日後|上旬|中旬|下旬|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末',
+            ' ', user_message)
+        _cat = detect_category(_msg_for_cat) if not _amb_keyword else None
         if _cat and not _subj:
             _u = USER_LOCATION.get(user_id)
             _ol = (_u["lat"], _u["lng"]) if _u else None
