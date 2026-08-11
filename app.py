@@ -534,6 +534,7 @@ SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
 RESULT_PENDING = {}  # 件数分岐の統一メニュー待ち  # user_id -> {kind, options, subject, place_terms, ...}
 ROUTE_PENDING = {}  # tコマンドで目的地が未確定のときの入力待ち  # user_id -> {center,center_nm,subject,radius}
 WARD_PENDING = {}  # 同名の区(中央区など)の選択待ち  # user_id -> {cands,mode,center,...}
+CATEGORY_PENDING = {}  # カテゴリ(「花」など)の候補選択待ち  # user_id -> {names:[...]}
 USER_LOCATION = {}  # user_id -> {"lat": 35.xxx, "lng": 139.xxx}
 USER_HOME = {}  # user_id -> {"lat":.., "lng":.., "name": "..."}  自宅(帰路の基準点)
 USER_SEEN = set()  # 初回メッセージ済みuser_id
@@ -3024,6 +3025,71 @@ def handle_message(event):
         search_keyword = _subj
         if not search_keyword and not (area_name and area_name not in [None, 'AMBIGUOUS']):
             search_keyword = detect_subject_longest(user_message)
+        # カテゴリ語（「花」など）の問い返し。被写体名ではなく上位カテゴリで来たとき、
+        # いま撮り頃のものだけを選択肢にして返す。「今どんな花が撮れるか」という問いへの答え。
+        _cat = detect_category(user_message) if not _amb_keyword else None
+        if _cat and not _subj:
+            _u = USER_LOCATION.get(user_id)
+            _ol = (_u["lat"], _u["lng"]) if _u else None
+            _on = (_u.get("city") or "現在地") if _u else DEFAULT_ORIGIN_NAME
+            _ccent = _ol or SHINJUKU
+            _cnear = _on if _ol else "東京"
+            RADIUS_CAT = 300   # カテゴリ一覧は広めに見る（被写体一つに絞る前の段階のため）
+            _members = SUBJECT_CATEGORIES.get(_cat, [])
+            _inpeak = category_members_in_peak(_members, _ccent, RADIUS_CAT, target_date)
+            if _inpeak:
+                _picks = _inpeak[:8]
+                _lines = [f"{i+1}．{s}（撮り頃 {pk}・{n}件）" for i, (s, pk, n) in enumerate(_picks)]
+                _qr = QuickReply(items=[
+                    QuickReplyButton(action=MessageAction(label=s[:20], text=s))
+                    for s, _pk, _n in _picks])
+                CATEGORY_PENDING[user_id] = {'names': [s for s, _p, _n in _picks]}
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=(f"「{_cat}」で探します。{_cnear}から半径{RADIUS_CAT}km圏内で、"
+                          f"いま撮り頃なのはこちらです。\n" + "\n".join(_lines) +
+                          "\n\n番号か名前を送ると、その撮影地をご案内します。"),
+                    quick_reply=_qr))
+                return
+            # 撮り頃が一つも無い季節（冬など）→ 無いものは無いと言った上で、次に近い撮り頃を示す
+            _nexts = category_next_peaks(_members, _ccent, RADIUS_CAT, target_date)
+            if _nexts:
+                _picks = _nexts[:3]
+                _lines = [f"{i+1}．{s}（{lbl}ごろ）" for i, (s, lbl, _d) in enumerate(_picks)]
+                _qr = QuickReply(items=[
+                    QuickReplyButton(action=MessageAction(label=s[:20], text=s))
+                    for s, _l, _d in _picks])
+                CATEGORY_PENDING[user_id] = {'names': [s for s, _l, _d in _picks]}
+                line_bot_api.reply_message(reply_token, TextSendMessage(
+                    text=(f"{_cnear}の周辺では、いま撮り頃の{_cat}は見つかりませんでした。\n"
+                          f"次に近い撮り頃はこちらです。\n" + "\n".join(_lines) +
+                          "\n\n番号か名前を送ると、その撮影地をご案内します。"),
+                    quick_reply=_qr))
+                return
+            line_bot_api.reply_message(reply_token, TextSendMessage(
+                text=(f"{_cnear}の周辺では、{_cat}の作品が見つかりませんでした。"
+                      f"「桜」「ひまわり」のように具体的な名前でもお試しください。")))
+            return
+
+        # カテゴリの問い返しへの番号応答（名前で直接送られた場合は通常の被写体検索に流れる）
+        if user_id in CATEGORY_PENDING:
+            _cp = CATEGORY_PENDING[user_id]
+            _mnum2 = re.match(r'^\s*(\d{1,2})\s*$',
+                              user_message.translate(str.maketrans("０１２３４５６７８９", "0123456789")))
+            if _mnum2:
+                _i = int(_mnum2.group(1)) - 1
+                _names = _cp.get('names') or []
+                if 0 <= _i < len(_names):
+                    del CATEGORY_PENDING[user_id]
+                    _subj = _names[_i]
+                    search_keyword = _subj
+                    area_name, area_latlng, area_display = None, None, None
+                else:
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"1〜{len(_names)}の番号でお選びください。"))
+                    return
+            else:
+                del CATEGORY_PENDING[user_id]  # 番号以外は新規クエリとして続行
+                
         # 県の略称と同名の市があるケース（静岡・山梨など）。県/府も市も付けず単独略称で送られたら、
         # まず市(狭い)で答え、メニューの「地域を広げる」で市→県→隣県→全国と段階的に広げる（狭→広）。
         _short_pref = None
