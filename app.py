@@ -15,7 +15,7 @@ import secrets
 import urllib.parse
 from datetime import date, timedelta
 from collections import defaultdict, Counter
-from flask import Flask, request, abort
+from flask import Flask, request, abort, jsonify, make_response
 from linebot import LineBotApi, WebhookHandler
 from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction, MessageAction
 from linebot.exceptions import InvalidSignatureError
@@ -3560,6 +3560,54 @@ def handle_postback(event):
             text="処理中にエラーが発生しました。"
         )
         line_bot_api.reply_message(reply_token, msg)
+@app.route("/api/peak-subjects", methods=["GET", "OPTIONS"])
+def api_peak_subjects():
+    """撮り頃の被写体を返す。風景撮ろうよ！（/enjoy）から呼ばれる。
+    別ドメイン（reference.fukei-shashin.co.jp）からの呼び出しなのでCORSを許可する。"""
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    try:
+        lat = float(request.args.get("lat", ""))
+        lng = float(request.args.get("lng", ""))
+    except ValueError:
+        return jsonify({"error": "lat/lng required"}), 400
+
+    try:
+        radius = int(request.args.get("radius", "150"))
+    except ValueError:
+        radius = 150
+    radius = max(10, min(500, radius))
+
+    base = None
+    ds = request.args.get("date", "")
+    if ds:
+        try:
+            y, m, d = [int(x) for x in ds.split("-")]
+            base = date(y, m, d)
+        except Exception:
+            base = None
+
+    try:
+        rows = subjects_in_peak_near((lat, lng), radius, base_date=base)
+    except Exception:
+        import traceback
+        print(f"[ERROR] api_peak_subjects: {traceback.format_exc()}", flush=True)
+        rows = []
+
+    subjects = [
+        {"subject": r[0], "peak": r[1], "count": r[2]}
+        for r in rows[:12]
+    ]
+
+    resp = jsonify({"subjects": subjects})
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
