@@ -1576,6 +1576,109 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     peaks = compute_peaks(bin_counter)
     return {'status': status, 'results': results, 'peaks': peaks}
 
+def normalize_name_query(s):
+    """人名を照合用の形にそろえる(空白・区切り記号を落とす)。
+    Master_Photos の Winner4Search / Judge4Search と同じ形になる。"""
+    return re.sub(r'[\s　,、.。・･／/｜|]+', '', str(s or '')).strip()
+
+def search_by_person(name_query, origin_latlng=None, origin_name=None):
+    """作者名での検索。地名でも被写体でも見つからなかったときの、最後の照合。
+
+    Master_Photos には検索用に空白を除いた氏名が入っている(Winner4Search /
+    Judge4Search)ので、そこを完全一致で引く。全件走査ではなく該当行だけを読む。
+
+    返り値:
+      {'status':'author', 'results':[...], 'display':氏名, 'total':件数}
+          … 案内できる作品がある方
+      {'status':'judge', 'display':氏名}
+          … 本誌フォトコンテストの審査員としてご登場の方
+      {'status':'listed_only', 'display':氏名}
+          … 誌面に掲載はあるが、案内の対象にしていない作品だけの方
+      {'status':'not_found'}
+    """
+    q = normalize_name_query(name_query)
+    if not db or len(q) < 2:
+        return {'status': 'not_found'}
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    origin = origin_latlng if origin_latlng else SHINJUKU
+    base_name = origin_name or DEFAULT_ORIGIN_NAME
+    items = []
+    listed = 0          # 氏名は一致したが、案内の対象にしていない作品の数
+    display = str(name_query or '').strip()
+    try:
+        for doc in db.collection('Master_Photos').where('Winner4Search', '==', q).stream():
+            d = doc.to_dict()
+            listed += 1
+            if d.get('Winner'):
+                display = str(d.get('Winner')).strip()
+            if d.get('Winner') in excl_authors:
+                continue
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):      # 風景写真祭作品は検索対象外
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
+                continue
+            area = d.get('Area', '') or ''
+            pref = extract_pref(area)
+            wll = work_latlng(area, pref)
+            if wll:
+                dist = haversine(origin[0], origin[1], wll[0], wll[1])
+            elif pref and pref in PREF_LATLNG:
+                dist = haversine(origin[0], origin[1], PREF_LATLNG[pref][0], PREF_LATLNG[pref][1])
+            else:
+                dist = 0
+            try:
+                year = int(d.get('Year'))
+            except Exception:
+                year = 0
+            items.append({
+                'dist': dist, 'pref': pref or '', 'area': area, 'place': d.get('Place', '') or '',
+                'cdist': 0, 'detour': 0,
+                'title': d.get('Title', '') or '', 'period': format_period(d.get('Month'), d.get('Day')),
+                'winner': d.get('Winner', ''), 'winner_area': d.get('WinnerArea', ''),
+                'award': d.get('AwardRank', ''), 'ascore': calc_award_score(d.get('AwardRank')),
+                'pic': d.get('PicFileName', ''), 'pub': pub,
+                'url': view_image_url(pub, d.get('PicFileName', '')),
+                'base_name': base_name, 'maplink': d.get('MapLink', ''),
+                'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
+            })
+    except Exception:
+        import traceback
+        print(f"[ERROR] search_by_person failed: {traceback.format_exc()}", flush=True)
+        return {'status': 'not_found'}
+
+    if items:
+        items.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
+        results, used = [], set()
+        for p in items:
+            if len(results) >= 7:
+                break
+            if p['pic'] in used:
+                continue
+            results.append(('🎯', 'ベストマッチ', p))
+            used.add(p['pic'])
+        results = filter_broken_images(results)
+        if results:
+            return {'status': 'author', 'results': results,
+                    'display': display, 'total': len(items)}
+
+    # 作者として案内できる作品が無いときは、審査員として登場していないかを見る
+    try:
+        for doc in db.collection('Master_Photos').where('Judge4Search', '==', q).limit(1).stream():
+            jname = str(doc.to_dict().get('Judge') or '').strip()
+            return {'status': 'judge', 'display': jname or display}
+    except Exception:
+        pass
+
+    if listed:
+        return {'status': 'listed_only', 'display': display}
+    return {'status': 'not_found'}
+
 def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
     """中心から半径内の公開作品を被写体別に集計し、現在(base_date)が見頃にあたる被写体を返す。
     戻り値: [(subject, peaks_text, count), ...] を件数の多い順で。"""
@@ -3279,6 +3382,29 @@ def handle_message(event):
             pr = search_by_place(place_query, base_date=target_date, origin_latlng=origin_latlng, origin_name=origin_name)
             _note = famous_spots_note(region_text=place_query, origin_latlng=origin_latlng, base_date=target_date)
             if pr['status'] == 'not_found':
+                # 地名でも被写体でも見つからないとき、最後に作者名として照合する。
+                # ここまで来た語は既存の検索がすべて空振りしているので、既存の経路に影響しない。
+                _per = search_by_person(place_query, origin_latlng=origin_latlng, origin_name=origin_name)
+                if _per['status'] == 'author':
+                    _n = _per['total']
+                    _more = f"（本誌掲載は全{_n}点）" if _n > len(_per['results']) else ""
+                    _head = (f"{_per['display']}さんの入選作をご紹介します。{_more}\n"
+                             f"それぞれの撮影地もあわせてご覧ください。")
+                    reply_with_carousel(reply_token, _head, _per['results'], base_date=target_date)
+                    return
+                if _per['status'] == 'judge':
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"{_per['display']}さんは、本誌フォトコンテストの審査員としてご登場の方です。\n\n"
+                             f"コンシェルジュがご案内しているのは応募作品の撮影地ですので、"
+                             f"審査員やプロの方の作品は対象にしておりません。\n"
+                             f"地名や被写体（滝・桜・紅葉など）でお探しください。"))
+                    return
+                if _per['status'] == 'listed_only':
+                    line_bot_api.reply_message(reply_token, TextSendMessage(
+                        text=f"{_per['display']}さんの作品は本誌に掲載がありますが、"
+                             f"撮影地のご案内の対象にはしておりません。\n"
+                             f"地名や被写体（滝・桜・紅葉など）でお探しください。"))
+                    return
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text=f"「{place_query}」に合う撮影地は見つかりませんでした。\n地域名(県名・市町村名)や被写体(滝・桜・紅葉・星空など)でもお試しください。"
                          + (("\n\n" + _note) if _note else "")))
