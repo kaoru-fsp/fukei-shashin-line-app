@@ -12,6 +12,7 @@ import re
 import math
 import random
 import secrets
+import time
 import urllib.parse
 from datetime import date, timedelta
 from collections import defaultdict, Counter
@@ -1679,6 +1680,75 @@ def search_by_person(name_query, origin_latlng=None, origin_name=None):
         return {'status': 'listed_only', 'display': display}
     return {'status': 'not_found'}
 
+# ──────────────── 撮り頃の集計用インデックス ────────────────
+# 「風景撮ろうよ！」(/enjoy)の撮り頃カードは、以前は呼ばれるたびに
+# Master_Photos を全件(約14,700件)読み、1件ごとに被写体カテゴリ37種類と
+# 照合していた。1回の応答に13秒前後かかり、Firestoreの読み取りも
+# 1回あたり約14,700。無料枠(1日5万)なら3回で使い切ってしまう。
+#
+# 集計に要るのは「座標・旬・その作品が該当する被写体」の3つだけで、
+# これは誌面データを入れ替えたときしか変わらない。そこで一度だけ作って
+# メモリに置き、一定時間そのまま使い回す。
+# 除外設定(作者・地域)は日付で変わりうるので、索引には入れず毎回適用する。
+_PEAK_INDEX = None          # [(lat, lng, bin, (被写体,...), 作者名, 地名+地域), ...]
+_PEAK_INDEX_AT = 0.0        # 索引を作った時刻
+_PEAK_INDEX_TTL = 6 * 3600  # 6時間で作り直す
+
+def build_peak_index():
+    """Master_Photos を一度だけ読んで、撮り頃の集計に必要なぶんだけ取り出す。
+    失敗したら None を返す(その場合は古い索引を使い続ける)。"""
+    if not db:
+        return None
+    idx = []
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict()
+            pub = d.get('Published', '')
+            if pub and pub.endswith('N'):      # 風景写真祭作品は対象外
+                continue
+            if not has_valid_image(d.get('PicFileName')):
+                continue
+            try:
+                mo = int(d.get('Month'))
+            except Exception:
+                continue
+            if not (1 <= mo <= 12):
+                continue
+            area = d.get('Area', '') or ''
+            place = d.get('Place', '') or ''
+            title = d.get('Title', '') or ''
+            pref = extract_pref(area)
+            wll = work_latlng(area, pref) or (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
+            if not wll:
+                continue
+            sfield = d.get('Subject', '')
+            subs = tuple(
+                canon for canon, variants in KEYWORD_NORMALIZE.items()
+                if subject_matches(variants, title=title, place=place, area=area,
+                                   subject_field=sfield, exclude=subject_exclude_for(canon))
+            )
+            if not subs:                        # どの被写体にも当たらない作品は集計に使わない
+                continue
+            idx.append((wll[0], wll[1], bin_index(mo, d.get('Day')), subs,
+                        d.get('Winner', ''), place + ' ' + area))
+    except Exception:
+        import traceback
+        print(f"[ERROR] build_peak_index: {traceback.format_exc()}", flush=True)
+        return None
+    print(f"[INFO] peak index built: {len(idx)} 件", flush=True)
+    return idx
+
+def get_peak_index():
+    """索引を返す。無ければ作る。期限が切れていれば作り直す。"""
+    global _PEAK_INDEX, _PEAK_INDEX_AT
+    now = time.time()
+    if _PEAK_INDEX is not None and (now - _PEAK_INDEX_AT) < _PEAK_INDEX_TTL:
+        return _PEAK_INDEX
+    built = build_peak_index()
+    if built is not None:
+        _PEAK_INDEX, _PEAK_INDEX_AT = built, now
+    return _PEAK_INDEX if _PEAK_INDEX is not None else []
+
 def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
     """中心から半径内の公開作品を被写体別に集計し、現在(base_date)が見頃にあたる被写体を返す。
     戻り値: [(subject, peaks_text, count), ...] を件数の多い順で。"""
@@ -1692,40 +1762,16 @@ def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
         excl_authors, blocked_areas = set(), []
     from collections import defaultdict
     bins = defaultdict(Counter)
-    try:
-        for doc in db.collection('Master_Photos').stream():
-            d = doc.to_dict()
-            pub = d.get('Published', '')
-            if pub and pub.endswith('N'):
-                continue
-            if not has_valid_image(d.get('PicFileName')):
-                continue
-            if d.get('Winner') in excl_authors:
-                continue
-            area = d.get('Area', '') or ''
-            place = d.get('Place', '') or ''
-            title = d.get('Title', '') or ''
-            if is_area_blocked(place, area, blocked_areas):
-                continue
-            pref = extract_pref(area)
-            wll = work_latlng(area, pref) or (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
-            if not wll or haversine(center_latlng[0], center_latlng[1], wll[0], wll[1]) > radius_km:
-                continue
-            try:
-                mo = int(d.get('Month'))
-            except Exception:
-                continue
-            if not (1 <= mo <= 12):
-                continue
-            bi = bin_index(mo, d.get('Day'))
-            sfield = d.get('Subject', '')
-            for canon, variants in KEYWORD_NORMALIZE.items():
-                if subject_matches(variants, title=title, place=place, area=area, subject_field=sfield, exclude=subject_exclude_for(canon)):
-                    bins[canon][bi] += 1
-    except Exception:
-        import traceback
-        print(f"[ERROR] subjects_in_peak_near: {traceback.format_exc()}", flush=True)
-        return []
+    clat, clng = center_latlng[0], center_latlng[1]
+    for lat, lng, bi, subs, winner, pa in get_peak_index():
+        if haversine(clat, clng, lat, lng) > radius_km:
+            continue
+        if winner and winner in excl_authors:
+            continue
+        if blocked_areas and any(b and b in pa for b in blocked_areas):
+            continue
+        for canon in subs:
+            bins[canon][bi] += 1
     out = []
     for canon, bc in bins.items():
         peaks = compute_peaks(bc)
