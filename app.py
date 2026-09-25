@@ -1483,11 +1483,8 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     subject_exclude = subject_exclude_for(subject) if subject else []
     place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
     place_terms = [t for t in place_terms if t]
-    def _collect(doc_iter, season_only):
-        """作品を1件ずつ見て、条件に合うものを集める。
-        season_only=True のときは「今の時期」のぶんだけを集め、
-        これまでの作品(all_time)と旬分布(bin_counter)は作らない。"""
-        for doc in doc_iter:
+    try:
+        for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict()
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
@@ -1540,28 +1537,15 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                 'base_name': base_name, 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
             }
-            if not season_only:
-                all_time.append(item)
+            all_time.append(item)
             try:
                 _mo = int(d.get('Month'))
-                if 1 <= _mo <= 12 and not season_only:
+                if 1 <= _mo <= 12:
                     bin_counter[bin_index(_mo, d.get('Day'))] += 1
                 if (_mo, junkun(d.get('Day'))) in window:
                     in_season.append(item)
             except Exception:
                 pass
-
-    # コンシェルジュが案内するのは「いま撮れるもの」なので、まず今の時期の月だけを読む。
-    # 判定窓は前後3週間(期間を広げても前後1.5か月)なので、対象は2〜4か月ぶん。
-    # Firestoreの where で先に絞れば、読み取りは全件の数分の一で済む。
-    # 今の時期の作品が無かったときだけ、これまでの作品と撮り頃を出すために全件を読む。
-    season_months = sorted({str(m) for m, _k in window})
-    try:
-        if season_months and len(season_months) <= 10:   # where('in') は10個までなので念のため
-            _collect(db.collection('Master_Photos')
-                       .where('Month', 'in', season_months).stream(), True)
-        if not in_season:
-            _collect(db.collection('Master_Photos').stream(), False)
     except Exception:
         import traceback
         print(f"[ERROR] search_by_place failed: {traceback.format_exc()}", flush=True)
@@ -3796,6 +3780,119 @@ def api_peak_subjects():
     resp = jsonify({"subjects": subjects})
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
+
+
+# ──────────────── 改修前後の答え合わせ用（確認専用） ────────────────
+# 検索の内部を作り直すとき、答えが変わっていないことを1件ずつ突き合わせるための入口。
+# 読むだけで、何も書き換えない。
+#
+# Renderの環境変数 CHECK_KEY を設定したときだけ有効になる。設定していなければ
+# 404を返し、存在しないのと同じ扱いになる。用が済んだら環境変数を消せば閉じる。
+
+def _check_items(results):
+    """カルーセルに渡る中身を、比較しやすい形に並べ直す。"""
+    out = []
+    for emoji, label, it in results:
+        out.append({
+            "dnumb": it.get("dnumb", ""),
+            "pic": it.get("pic", ""),
+            "title": it.get("title", ""),
+            "area": it.get("area", ""),
+            "place": it.get("place", ""),
+            "winner": it.get("winner", ""),
+            "award": it.get("award", ""),
+            "period": it.get("period", ""),
+            "dist": round(float(it.get("dist", 0) or 0), 1),
+            "label": label,
+        })
+    return out
+
+
+def _check_latlng(a, b):
+    try:
+        return (float(request.args.get(a)), float(request.args.get(b)))
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route("/api/_check", methods=["GET"])
+def api_check():
+    key = os.environ.get("CHECK_KEY", "")
+    if not key or request.args.get("key", "") != key:
+        abort(404)
+
+    mode = request.args.get("mode", "place")
+
+    base = None
+    ds = request.args.get("date", "")
+    if ds:
+        try:
+            y, m, d = [int(x) for x in ds.split("-")]
+            base = date(y, m, d)
+        except Exception:
+            base = None
+
+    origin = _check_latlng("lat", "lng")
+    center = _check_latlng("clat", "clng")
+    home = _check_latlng("hlat", "hlng")
+    origin_name = request.args.get("origin_name") or DEFAULT_ORIGIN_NAME
+    subject = request.args.get("subject") or None
+    expand = request.args.get("expand", "") in ("1", "true", "yes")
+    try:
+        radius = float(request.args.get("radius")) if request.args.get("radius") else None
+    except ValueError:
+        radius = None
+    terms = [t for t in (request.args.get("place") or "").split(",") if t.strip()]
+    terms = [t.strip() for t in terms]
+
+    try:
+        if mode == "place":
+            r = search_by_place(terms, base_date=base, origin_latlng=origin,
+                                origin_name=origin_name, subject=subject,
+                                center_latlng=center, radius_km=radius,
+                                home_latlng=home, expand_time=expand)
+            return jsonify({"mode": mode, "status": r.get("status"),
+                            "peaks": r.get("peaks", []),
+                            "count": len(r.get("results", [])),
+                            "items": _check_items(r.get("results", []))})
+
+        if mode == "person":
+            r = search_by_person(request.args.get("q", ""),
+                                 origin_latlng=origin, origin_name=origin_name)
+            return jsonify({"mode": mode, "status": r.get("status"),
+                            "display": r.get("display", ""),
+                            "total": r.get("total", 0),
+                            "count": len(r.get("results", [])),
+                            "items": _check_items(r.get("results", []))})
+
+        if mode == "three":
+            r = select_three_points(base_date=base, base_latlng=center or origin,
+                                    radius=radius, place_name=request.args.get("place_name") or None,
+                                    keyword=subject, expand_time=expand,
+                                    target_city=request.args.get("city") or None,
+                                    origin_latlng=origin, origin_name=origin_name)
+            if not r or isinstance(r, tuple):
+                return jsonify({"mode": mode, "status": "none",
+                                "raw": str(r)[:200], "count": 0, "items": []})
+            return jsonify({"mode": mode, "status": "ok",
+                            "count": len(r), "items": _check_items(r)})
+
+        if mode == "catpeaks":
+            canon = [c for c in (request.args.get("subjects") or "").split(",") if c.strip()]
+            rows = category_next_peaks([c.strip() for c in canon],
+                                       center or origin, radius or 150, base_date=base)
+            return jsonify({"mode": mode, "rows": rows})
+
+        if mode == "peaks":
+            rows = subjects_in_peak_near(center or origin, radius or 150, base_date=base)
+            return jsonify({"mode": mode, "rows": rows})
+
+        return jsonify({"error": "unknown mode"}), 400
+
+    except Exception:
+        import traceback
+        return jsonify({"error": "exception", "trace": traceback.format_exc()[-1500:]}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
