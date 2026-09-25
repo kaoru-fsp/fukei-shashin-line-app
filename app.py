@@ -493,6 +493,57 @@ def load_exclusions():
         pass
     return authors, [b for b in blocked if b]
 
+# ──────────────── 作品データの共有キャッシュ ────────────────
+# Master_Photos(約14,700件)は、誌面データを入れ替えたときしか変わらない。
+# それを検索のたびにFirestoreから読んでいたため、1回の検索で約14,700件の
+# 読み取りが発生し、応答にも10数秒かかっていた(無料枠は1日5万件なので、
+# 1日3〜4回の検索で使い切ってしまう)。
+#
+# 検索に使う17列だけを取り出してメモリに置き、以後はそれを使い回す。
+# 同じ文字列は1つにまとめているので、消費はおよそ14MB。
+# 中身は変えていないので、検索の答えは従来とまったく同じになる。
+_PHOTO_FIELDS = ("Place", "Area", "Title", "Subject", "Winner", "Winner4Search",
+                 "WinnerArea", "AwardRank", "PicFileName", "Published", "Month",
+                 "Day", "Year", "dNumb", "MapLink", "Judge", "Judge4Search")
+_PHOTOS = None
+_PHOTOS_AT = 0.0
+_PHOTOS_TTL = 6 * 3600     # 6時間で読み直す
+
+def build_photo_cache():
+    """Master_Photos を一度だけ読んで、検索に使う列だけを手元に置く。
+    失敗したら None を返す(その場合は前のものを使い続ける)。"""
+    if not db:
+        return None
+    pool = {}
+    def share(v):
+        # 同じ文字(地域名・作者名など)は1つにまとめて、memoryを節約する
+        if isinstance(v, str):
+            return pool.setdefault(v, v)
+        return v
+    rows = []
+    try:
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            rows.append({f: share(d.get(f, '')) for f in _PHOTO_FIELDS})
+    except Exception:
+        import traceback
+        print(f"[ERROR] build_photo_cache: {traceback.format_exc()}", flush=True)
+        return None
+    print(f"[INFO] photo cache built: {len(rows)}件 / 文字列 {len(pool)}種類", flush=True)
+    return rows
+
+def get_photos():
+    """作品データを返す。無ければ作る。期限が切れていれば作り直す。
+    返るリストは共有物なので、並べ替えるときは list() で写しを取ること。"""
+    global _PHOTOS, _PHOTOS_AT
+    now = time.time()
+    if _PHOTOS is not None and (now - _PHOTOS_AT) < _PHOTOS_TTL:
+        return _PHOTOS
+    built = build_photo_cache()
+    if built is not None:
+        _PHOTOS, _PHOTOS_AT = built, now
+    return _PHOTOS if _PHOTOS is not None else []
+
 def is_area_blocked(place, area, blocked_list):
     if not blocked_list:
         return False
@@ -817,8 +868,7 @@ def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, li
     allow = set(canon_list or [])
     bins = defaultdict(Counter)
     try:
-        for doc in db.collection('Master_Photos').stream():
-            d = doc.to_dict()
+        for d in get_photos():
             pub = d.get('Published', '')
             if pub and pub.endswith('N'):
                 continue
@@ -1155,10 +1205,10 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         if base_latlng:
             target_pref = min(PREF_LATLNG.keys(), key=lambda k: haversine(base_latlng[0], base_latlng[1], PREF_LATLNG[k][0], PREF_LATLNG[k][1]))
 
-        target_months = list(set(str(m) for m, k in junkun_window))
-        query = db.collection('Master_Photos').where('Month', 'in', target_months)
-        for doc in query.stream():
-            d = doc.to_dict()
+        target_months = set(str(m) for m, k in junkun_window)
+        for d in get_photos():
+            if d.get('Month') not in target_months:   # 以前は Firestore の where で絞っていた箇所
+                continue
 
             try:
                 mo = int(d.get('Month'))
@@ -1252,10 +1302,10 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             for delta in range(-30, 31):
                 d2 = tomorrow + timedelta(days=delta)
                 wider_window.add((d2.month, junkun(d2.day)))
-            wider_months = list(set(str(m) for m, k in wider_window))
-            wider_query = db.collection('Master_Photos').where('Month', 'in', wider_months)
-            for doc in wider_query.stream():
-                d = doc.to_dict()
+            wider_months = set(str(m) for m, k in wider_window)
+            for d in get_photos():
+                if d.get('Month') not in wider_months:   # 以前は Firestore の where で絞っていた箇所
+                    continue
                 try:
                     mo = int(d.get('Month'))
                 except:
@@ -1402,15 +1452,14 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         # 🎲 気まぐれチョイス（地域・キーワード未指定の時のみ、最大2枚）
         show_gamble = not base_latlng and not keyword
         if show_gamble:
-            all_docs = list(db.collection('Master_Photos').stream())
+            all_docs = list(get_photos())   # 共有物を並べ替えないよう、写しを取る
         else:
             all_docs = []
         random.shuffle(all_docs)
         gamble_count = 0
-        for doc in all_docs:
+        for d in all_docs:
             if gamble_count >= 2:
                 break
-            d = doc.to_dict()
             if d.get('PicFileName') in used_pics:
                 continue
             if not has_valid_image(d.get('PicFileName')):
@@ -1484,8 +1533,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
     place_terms = [t for t in place_terms if t]
     try:
-        for doc in db.collection('Master_Photos').stream():
-            d = doc.to_dict()
+        for d in get_photos():
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
@@ -1610,8 +1658,9 @@ def search_by_person(name_query, origin_latlng=None, origin_name=None):
     listed = 0          # 氏名は一致したが、案内の対象にしていない作品の数
     display = str(name_query or '').strip()
     try:
-        for doc in db.collection('Master_Photos').where('Winner4Search', '==', q).stream():
-            d = doc.to_dict()
+        for d in get_photos():
+            if d.get('Winner4Search') != q:      # 以前は Firestore の完全一致で絞っていた箇所
+                continue
             listed += 1
             if d.get('Winner'):
                 display = str(d.get('Winner')).strip()
@@ -1670,8 +1719,10 @@ def search_by_person(name_query, origin_latlng=None, origin_name=None):
 
     # 作者として案内できる作品が無いときは、審査員として登場していないかを見る
     try:
-        for doc in db.collection('Master_Photos').where('Judge4Search', '==', q).limit(1).stream():
-            jname = str(doc.to_dict().get('Judge') or '').strip()
+        for d in get_photos():
+            if d.get('Judge4Search') != q:       # 以前は Firestore の完全一致＋1件で絞っていた箇所
+                continue
+            jname = str(d.get('Judge') or '').strip()
             return {'status': 'judge', 'display': jname or display}
     except Exception:
         pass
@@ -1701,8 +1752,7 @@ def build_peak_index():
         return None
     idx = []
     try:
-        for doc in db.collection('Master_Photos').stream():
-            d = doc.to_dict()
+        for d in get_photos():
             pub = d.get('Published', '')
             if pub and pub.endswith('N'):      # 風景写真祭作品は対象外
                 continue
@@ -2448,8 +2498,8 @@ def build_city_to_pref():
         import re as _re
         from collections import defaultdict as _dd
         pref_map = _dd(set)
-        for doc in db.collection('Master_Photos').stream():
-            area = doc.to_dict().get('Area', '')
+        for d in get_photos():
+            area = d.get('Area', '')
             pref = extract_pref(area)
             if not pref or not area:
                 continue
@@ -3650,12 +3700,15 @@ def handle_postback(event):
             photo_data = None
             if db:
                 dnumb = params.get('dnumb', '')
-                if dnumb:
-                    docs = db.collection('Master_Photos').where('dNumb', '==', dnumb).limit(1).stream()
-                else:
-                    docs = db.collection('Master_Photos').where('PicFileName', '==', pic_filename).limit(1).stream()
-                for doc in docs:
-                    photo_data = doc.to_dict()
+                # 以前は Firestore の完全一致＋1件で引いていた箇所。いまは手元の作品データから探す。
+                for d in get_photos():
+                    if dnumb:
+                        if str(d.get('dNumb', '')) != str(dnumb):
+                            continue
+                    else:
+                        if d.get('PicFileName', '') != pic_filename:
+                            continue
+                    photo_data = d
                     break
 
             if not photo_data:
