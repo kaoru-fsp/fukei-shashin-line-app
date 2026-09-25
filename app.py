@@ -1483,8 +1483,11 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     subject_exclude = subject_exclude_for(subject) if subject else []
     place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
     place_terms = [t for t in place_terms if t]
-    try:
-        for doc in db.collection('Master_Photos').stream():
+    def _collect(doc_iter, season_only):
+        """作品を1件ずつ見て、条件に合うものを集める。
+        season_only=True のときは「今の時期」のぶんだけを集め、
+        これまでの作品(all_time)と旬分布(bin_counter)は作らない。"""
+        for doc in doc_iter:
             d = doc.to_dict()
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
@@ -1537,15 +1540,28 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                 'base_name': base_name, 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
             }
-            all_time.append(item)
+            if not season_only:
+                all_time.append(item)
             try:
                 _mo = int(d.get('Month'))
-                if 1 <= _mo <= 12:
+                if 1 <= _mo <= 12 and not season_only:
                     bin_counter[bin_index(_mo, d.get('Day'))] += 1
                 if (_mo, junkun(d.get('Day'))) in window:
                     in_season.append(item)
             except Exception:
                 pass
+
+    # コンシェルジュが案内するのは「いま撮れるもの」なので、まず今の時期の月だけを読む。
+    # 判定窓は前後3週間(期間を広げても前後1.5か月)なので、対象は2〜4か月ぶん。
+    # Firestoreの where で先に絞れば、読み取りは全件の数分の一で済む。
+    # 今の時期の作品が無かったときだけ、これまでの作品と撮り頃を出すために全件を読む。
+    season_months = sorted({str(m) for m, _k in window})
+    try:
+        if season_months and len(season_months) <= 10:   # where('in') は10個までなので念のため
+            _collect(db.collection('Master_Photos')
+                       .where('Month', 'in', season_months).stream(), True)
+        if not in_season:
+            _collect(db.collection('Master_Photos').stream(), False)
     except Exception:
         import traceback
         print(f"[ERROR] search_by_place failed: {traceback.format_exc()}", flush=True)
