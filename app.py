@@ -3785,6 +3785,96 @@ def handle_postback(event):
             text="処理中にエラーが発生しました。"
         )
         line_bot_api.reply_message(reply_token, msg)
+# ──────────────── 道の駅 ────────────────
+# 全国約1,200駅。誌面データと同じく、めったに変わらないのでメモリに置いて使い回す。
+# 出典：駅名・所在地は国土交通省ウェブサイト「道の駅」一覧（公共データ利用規約PDL1.0）、
+#       緯度経度は Wikidata（CC0）。
+_EKI = None
+_EKI_AT = 0.0
+_EKI_TTL = 24 * 3600     # 1日で読み直す（新規登録は年に数回なので長めでよい）
+
+def get_michinoeki():
+    """道の駅の一覧を返す。無ければ読む。期限が切れていれば読み直す。"""
+    global _EKI, _EKI_AT
+    now = time.time()
+    if _EKI is not None and (now - _EKI_AT) < _EKI_TTL:
+        return _EKI
+    if not db:
+        return _EKI or []
+    rows = []
+    try:
+        for doc in db.collection('michinoeki').stream():
+            d = doc.to_dict() or {}
+            try:
+                rows.append({'name': d.get('name', ''), 'pref': d.get('pref', ''),
+                             'city': d.get('city', ''), 'site': d.get('site', ''),
+                             'lat': float(d['lat']), 'lng': float(d['lng'])})
+            except (KeyError, TypeError, ValueError):
+                continue
+    except Exception:
+        import traceback
+        print(f"[ERROR] get_michinoeki: {traceback.format_exc()}", flush=True)
+        return _EKI or []
+    print(f"[INFO] michinoeki loaded: {len(rows)}件", flush=True)
+    _EKI, _EKI_AT = rows, now
+    return _EKI
+
+@app.route("/api/michinoeki", methods=["GET", "OPTIONS"])
+def api_michinoeki():
+    """指定した地点の近くの道の駅を、近い順に返す。
+    撮影プランナー（リファレンス側）から呼ばれるのでCORSを許可する。
+
+    lat, lng   中心の緯度経度（必須）
+    radius     何km以内を探すか（既定50、上限300）
+    limit      最大何件返すか（既定5、上限20）
+    """
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    try:
+        lat = float(request.args.get("lat", ""))
+        lng = float(request.args.get("lng", ""))
+    except ValueError:
+        return jsonify({"error": "lat/lng required"}), 400
+    try:
+        radius = float(request.args.get("radius", "50"))
+    except ValueError:
+        radius = 50.0
+    radius = max(1.0, min(300.0, radius))
+    try:
+        limit = int(request.args.get("limit", "5"))
+    except ValueError:
+        limit = 5
+    limit = max(1, min(20, limit))
+
+    near = []
+    for e in get_michinoeki():
+        d = haversine(lat, lng, e['lat'], e['lng'])
+        if d <= radius:
+            near.append((d, e))
+    near.sort(key=lambda x: x[0])
+
+    stations = [{
+        "name": e['name'], "pref": e['pref'], "city": e['city'],
+        "lat": e['lat'], "lng": e['lng'], "site": e['site'],
+        "distance_km": round(d, 1),
+    } for d, e in near[:limit]]
+
+    resp = jsonify({
+        "stations": stations,
+        "total_in_radius": len(near),
+        "notice": "道の駅は施設により営業時間や利用のルールが異なります。"
+                  "ご利用の際は事前に各施設のWEBサイトなどでご確認ください。",
+        "source": "出典：国土交通省ウェブサイト「道の駅」一覧、Wikidata",
+    })
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
 @app.route("/api/peak-subjects", methods=["GET", "OPTIONS"])
 def api_peak_subjects():
     """撮り頃の被写体を返す。風景撮ろうよ！（/enjoy）から呼ばれる。
