@@ -7,6 +7,7 @@ LINE Bot（Flask / Firestore）。『風景写真』入賞作品データから�
 """
 import os
 import json
+import gzip
 import sys
 import re
 import math
@@ -532,6 +533,151 @@ def build_photo_cache():
     print(f"[INFO] photo cache built: {len(rows)}件 / 文字列 {len(pool)}種類", flush=True)
     return rows
 
+# ──────────────── 索引の保存(起き抜けの全件読みを避ける) ────────────────
+# Renderの無料プランはアクセスが途切れるとサービスが寝てしまい、起きるたびに
+# 上のキャッシュを作り直すため、そのたびに約14,700件の読み取りが発生する。
+# 1日に数回寝起きするだけで無料枠(1日5万件)に届いてしまう。
+#
+# そこで、作ったものをgzipで固めてFirestoreの photo_index に置いておく。
+# 次に起きたインスタンスは、そこから数件の読み取りだけで復元できる。
+# 24時間経ったら Master_Photos を読み直して置き換えるので、誌面データを
+# 入れ替えても遅くとも翌日には反映される(すぐ反映したいときは /api/_reindex)。
+_SNAP_COLL  = 'photo_index'   # 索引の置き場(専用コレクション)
+_SNAP_CHUNK = 500_000         # 1件あたりの上限(Firestoreの1MB制限に対して余裕を取る)
+_SNAP_TTL   = 24 * 3600       # 保存した索引を信用する時間
+_SNAP_VER   = 1               # 形式を変えたらここを上げる(古い索引は自動で捨てられる)
+
+def _snapshot_pack(rows):
+    """索引をgzipで固めて返す。JSONにできない値が混じっていたら None を返す。"""
+    table = []
+    for r in rows:
+        row = []
+        for f in _PHOTO_FIELDS:
+            v = r.get(f, '')
+            if v is not None and not isinstance(v, (str, int, float, bool)):
+                print(f"[WARN] 索引の保存を見送ります: {f} に {type(v).__name__} が入っています", flush=True)
+                return None
+            row.append(v)
+        table.append(row)
+    body = json.dumps({"fields": list(_PHOTO_FIELDS), "rows": table},
+                      ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return gzip.compress(body, 6)
+
+def _snapshot_unpack(blob):
+    """固めた索引を元の形(辞書のリスト)に戻す。列が今と違えば None。
+    memoryの山を低くするため、読み終えた行はその場で手放しながら進める。"""
+    obj = json.loads(gzip.decompress(blob))
+    if obj.get("fields") != list(_PHOTO_FIELDS):
+        print("[INFO] 保存してある索引の列が今と違うので作り直します", flush=True)
+        return None
+    table = obj.get("rows") or []
+    obj = None
+    pool = {}
+    rows = []
+    for i in range(len(table)):
+        row = table[i]
+        table[i] = None               # 済んだ行はすぐ手放す(順番は変えない)
+        if len(row) != len(_PHOTO_FIELDS):
+            return None
+        rows.append({f: (pool.setdefault(v, v) if isinstance(v, str) else v)
+                     for f, v in zip(_PHOTO_FIELDS, row)})
+    return rows
+
+def save_photo_snapshot(rows):
+    """索引をFirestoreに保存する。何が起きたかを dict で返す(確認用)。"""
+    if not db:
+        return {"saved": False, "reason": "Firestoreに繋がっていません"}
+    if not rows or len(rows) < 1000:
+        # 読み取りが途中で落ちたときの不完全な索引を保存してしまわないための歯止め
+        return {"saved": False, "reason": f"件数が少なすぎます({len(rows or [])}件)"}
+    blob = _snapshot_pack(rows)
+    if blob is None:
+        return {"saved": False, "reason": "JSONにできない値が混じっています"}
+    parts = [blob[i:i + _SNAP_CHUNK] for i in range(0, len(blob), _SNAP_CHUNK)]
+    stamp = int(time.time())
+    try:
+        col = db.collection(_SNAP_COLL)
+        batch = db.batch()
+        for i, p in enumerate(parts):
+            batch.set(col.document(f"part{i}"),
+                      {"ver": _SNAP_VER, "i": i, "n": len(parts),
+                       "count": len(rows), "built_at": stamp, "data": p})
+        batch.commit()
+    except Exception:
+        import traceback
+        print(f"[ERROR] save_photo_snapshot: {traceback.format_exc()}", flush=True)
+        return {"saved": False, "reason": "書き込みに失敗しました"}
+
+    # ここから先の後片付けが失敗しても、保存そのものは成立している
+    removed = 0
+    try:
+        keep = {f"part{i}" for i in range(len(parts))}
+        for ref in col.list_documents():
+            if ref.id.startswith("part") and ref.id not in keep:
+                ref.delete()          # 分割数が減ったときに古い断片を残さない
+                removed += 1
+    except Exception:
+        import traceback
+        print(f"[WARN] 古い断片の後片付けに失敗: {traceback.format_exc()}", flush=True)
+        removed = -1
+    print(f"[INFO] 索引を保存: {len(rows)}件 / {len(blob):,}バイト / {len(parts)}分割", flush=True)
+    return {"saved": True, "count": len(rows), "bytes": len(blob),
+            "parts": len(parts), "removed": removed, "built_at": stamp}
+
+def load_photo_snapshot(max_age=None):
+    """保存してある索引を読み出す。無い・形式が古い・壊れているときは None。
+    読み取りは保存件数(いまのところ2〜3件)だけで済む。
+    max_age(秒)を渡すと、それより古い索引は展開する前に見送る。"""
+    if not db:
+        return None
+    try:
+        docs = list(db.collection(_SNAP_COLL).stream())
+    except Exception:
+        import traceback
+        print(f"[ERROR] load_photo_snapshot: {traceback.format_exc()}", flush=True)
+        return None
+    if not docs:
+        return None
+    parts, n, count, stamp = {}, None, None, 0
+    for doc in docs:
+        d = doc.to_dict() or {}
+        if d.get("ver") != _SNAP_VER:
+            print("[INFO] 保存してある索引の形式が古いので作り直します", flush=True)
+            return None
+        blob = d.get("data")
+        if isinstance(blob, bytearray):
+            blob = bytes(blob)
+        if not isinstance(blob, bytes):
+            return None
+        try:
+            parts[int(d.get("i"))] = blob
+        except (TypeError, ValueError):
+            return None
+        n = d.get("n")
+        count = d.get("count")
+        stamp = max(stamp, int(d.get("built_at") or 0))
+    if not isinstance(n, int) or sorted(parts.keys()) != list(range(n)):
+        print(f"[WARN] 索引の断片が揃っていません({len(parts)}/{n})。作り直します", flush=True)
+        return None
+    age = (time.time() - stamp) / 3600 if stamp else -1
+    if max_age is not None and (not stamp or (time.time() - stamp) >= max_age):
+        # 古いものは展開せずに見送る(展開はそれなりに手間がかかるため)
+        print(f"[INFO] 保存してある索引は作成から{age:.1f}時間で古いため、読み直します", flush=True)
+        return None
+    try:
+        rows = _snapshot_unpack(b"".join(parts[i] for i in range(n)))
+    except Exception:
+        import traceback
+        print(f"[ERROR] 索引の復元に失敗: {traceback.format_exc()}", flush=True)
+        return None
+    if rows is None:
+        return None
+    if isinstance(count, int) and len(rows) != count:
+        print(f"[WARN] 索引の件数が合いません({len(rows)}≠{count})。作り直します", flush=True)
+        return None
+    print(f"[INFO] 索引を復元: {len(rows)}件 / 読み取り{len(docs)}件 / 作成から{age:.1f}時間", flush=True)
+    return {"rows": rows, "built_at": stamp, "reads": len(docs)}
+
 def get_photos():
     """作品データを返す。無ければ作る。期限が切れていれば作り直す。
     返るリストは共有物なので、並べ替えるときは list() で写しを取ること。"""
@@ -539,9 +685,25 @@ def get_photos():
     now = time.time()
     if _PHOTOS is not None and (now - _PHOTOS_AT) < _PHOTOS_TTL:
         return _PHOTOS
+
+    # ① 保存してある索引が新しければ、そこから復元する(読み取りは数件)
+    snap = load_photo_snapshot(max_age=_SNAP_TTL)
+    if snap:
+        _PHOTOS, _PHOTOS_AT = snap["rows"], now
+        return _PHOTOS
+
+    # ② 無い・古いときだけ Master_Photos を全件読み、読めたら保存しておく
     built = build_photo_cache()
     if built is not None:
         _PHOTOS, _PHOTOS_AT = built, now
+        save_photo_snapshot(built)
+        return _PHOTOS
+
+    # ③ 全件読みに失敗したときは、古くても保存してある索引で凌ぐ
+    old = load_photo_snapshot()
+    if old:
+        print("[WARN] Master_Photos が読めないので、古い索引で凌ぎます", flush=True)
+        _PHOTOS, _PHOTOS_AT = old["rows"], now
     return _PHOTOS if _PHOTOS is not None else []
 
 def is_area_blocked(place, area, blocked_list):
@@ -4030,6 +4192,17 @@ def api_check():
             rows = subjects_in_peak_near(center or origin, radius or 150, base_date=base)
             return jsonify({"mode": mode, "rows": rows})
 
+        if mode == "snapshot":
+            # 保存してある索引の状態だけを見る(全件読みは起こさない)
+            snap = load_photo_snapshot()
+            if not snap:
+                return jsonify({"mode": mode, "exists": False})
+            age = (time.time() - snap["built_at"]) / 3600
+            return jsonify({"mode": mode, "exists": True,
+                            "count": len(snap["rows"]), "reads": snap["reads"],
+                            "age_hours": round(age, 2),
+                            "fresh": (age * 3600) < _SNAP_TTL})
+
         return jsonify({"error": "unknown mode"}), 400
 
     except Exception:
@@ -4037,6 +4210,25 @@ def api_check():
         return jsonify({"error": "exception", "trace": traceback.format_exc()[-1500:]}), 500
 
 
+@app.route("/api/_reindex", methods=["GET"])
+def api_reindex():
+    """誌面データを入れ替えたあとに、索引をすぐ作り直すための入口。
+    CHECK_KEY を知っている人だけが使える。ここだけは全件読みが起きる。"""
+    key = os.environ.get("CHECK_KEY", "")
+    if not key or request.args.get("key", "") != key:
+        abort(404)
+    global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT
+    t0 = time.time()
+    built = build_photo_cache()
+    if built is None:
+        return jsonify({"ok": False, "reason": "Master_Photos が読めませんでした"}), 500
+    _PHOTOS, _PHOTOS_AT = built, time.time()
+    _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0      # 撮り頃索引も作り直させる
+    saved = save_photo_snapshot(built)
+    return jsonify({"ok": True, "read": len(built),
+                    "seconds": round(time.time() - t0, 1), "snapshot": saved})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)　
