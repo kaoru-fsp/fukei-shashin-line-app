@@ -505,7 +505,8 @@ def load_exclusions():
 # 中身は変えていないので、検索の答えは従来とまったく同じになる。
 _PHOTO_FIELDS = ("Place", "Area", "Title", "Subject", "Winner", "Winner4Search",
                  "WinnerArea", "AwardRank", "PicFileName", "Published", "Month",
-                 "Day", "Year", "dNumb", "MapLink", "Judge", "Judge4Search")
+                 "Day", "Year", "dNumb", "MapLink", "Judge", "Judge4Search",
+                 "Hour", "Weather")
 _PHOTOS = None
 _PHOTOS_AT = 0.0
 _PHOTOS_TTL = 6 * 3600     # 6時間で読み直す
@@ -545,7 +546,8 @@ def build_photo_cache():
 _SNAP_COLL  = 'photo_index'   # 索引の置き場(専用コレクション)
 _SNAP_CHUNK = 500_000         # 1件あたりの上限(Firestoreの1MB制限に対して余裕を取る)
 _SNAP_TTL   = 24 * 3600       # 保存した索引を信用する時間
-_SNAP_VER   = 1               # 形式を変えたらここを上げる(古い索引は自動で捨てられる)
+_SNAP_VER   = 2               # 形式を変えたらここを上げる(古い索引は自動で捨てられる)
+                              # 2: 撮影計画のために Hour・Weather を加えた
 
 def _snapshot_pack(rows):
     """索引をgzipで固めて返す。JSONにできない値が混じっていたら None を返す。"""
@@ -1903,7 +1905,111 @@ def search_by_person(name_query, origin_latlng=None, origin_name=None):
 # これは誌面データを入れ替えたときしか変わらない。そこで一度だけ作って
 # メモリに置き、一定時間そのまま使い回す。
 # 除外設定(作者・地域)は日付で変わりうるので、索引には入れず毎回適用する。
-_PEAK_INDEX = None          # [(lat, lng, bin, (被写体,...), 作者名, 地名+地域), ...]
+# ──────────────── 撮影計画のための道具 ────────────────
+# 天候の表記ゆれをそろえる。誌面データには「晴」「晴れ」「快晴」が混在し、
+# さらに文字化けが70件ある(UTF-8のバイト列をShift_JISとして読んでしまったもの。
+# 置換文字が入って元のバイトが失われているため、壊れていない先頭で判別する)。
+_WEATHER_VARIANTS = (
+    ('晴れ', ('快晴', '日本晴れ', '日本晴', '晴れ', '晴')),
+    ('曇り', ('薄曇り', '薄曇', 'うす曇り', 'くもり', '曇り', '曇')),
+    ('雨',   ('霧雨', '小雨', '大雨', '雨')),
+    ('雪',   ('吹雪', '小雪', '大雪', '雪')),
+    ('霧',   ('濃霧', '朝霧', '霧')),
+)
+_WEATHER_BROKEN = (('譎エ', '晴れ'), ('譖', '曇り'))
+
+def normalize_weather(value):
+    """天候の記載を『晴れ・曇り・雨・雪・霧』のどれかにそろえる。
+    当てはまらなければ None。『晴れ時々曇り』のような複合は、先に出るほうを採る。"""
+    s = str(value or '').strip()
+    if not s:
+        return None
+    for head, canon in _WEATHER_BROKEN:          # 文字化けは先頭で見分ける
+        if s.startswith(head):
+            return canon
+    best = None                                   # (位置, 長さの負値, 正式名)
+    for canon, variants in _WEATHER_VARIANTS:
+        for v in variants:
+            i = s.find(v)
+            if i >= 0:
+                cand = (i, -len(v), canon)
+                if best is None or cand < best:
+                    best = cand
+    return best[2] if best else None
+
+def photo_hour(value):
+    """Hour列を0〜23の整数にする。255(不明を表す印)や空、範囲外は None。"""
+    s = str(value or '').strip()
+    if not s:
+        return None
+    try:
+        h = int(float(s))
+    except (TypeError, ValueError):
+        return None
+    if h == 255 or not (0 <= h <= 23):
+        return None
+    return h
+
+# 移動時間の見積り。直線距離では実際の道のりに足りないので1.3倍し、
+# 時速45kmで走るものとする(実質 約35km/h)。地図の吹き出しと同じ式にそろえること。
+ROAD_FACTOR = 1.3
+DRIVE_KMH = 45.0
+
+def drive_minutes(km):
+    """直線距離(km)から、車での移動時間(分)を見積もる。"""
+    try:
+        return int(round(float(km) * ROAD_FACTOR / DRIVE_KMH * 60))
+    except (TypeError, ValueError):
+        return 0
+
+_DIR_NAMES = ('北', '北東', '東', '南東', '南', '南西', '西', '北西')
+
+def bearing(lat1, lng1, lat2, lng2):
+    """1点目から2点目を見た方位角(北=0度、東=90度)を返す。"""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lng2 - lng1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+def bearing_label(deg):
+    """方位角を『北』『北西』などの8方位の名前にする。"""
+    return _DIR_NAMES[int((float(deg) + 22.5) % 360.0 // 45.0)]
+
+def sun_times(lat, lng, d, tz_hours=9.0):
+    """その土地・その日の日の出と日の入りを、0時からの分で返す。
+    白夜・極夜で太陽が昇らない(沈まない)ときは None を返す。
+    NOAAの略算式による。数分の誤差は撮影計画には差し支えない。"""
+    try:
+        doy = d.timetuple().tm_yday
+        g = 2.0 * math.pi / 365.0 * (doy - 1 + 0.5)          # 年内の位置(ラジアン)
+        eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g)
+                           - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+        decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g)
+                - 0.006758 * math.cos(2 * g) + 0.000907 * math.sin(2 * g)
+                - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+        p = math.radians(lat)
+        cos_ha = (math.cos(math.radians(90.833)) / (math.cos(p) * math.cos(decl))
+                  - math.tan(p) * math.tan(decl))
+        if cos_ha > 1 or cos_ha < -1:                         # 昇らない/沈まない
+            return (None, None)
+        ha = math.degrees(math.acos(cos_ha))
+        rise = 720.0 - 4.0 * (lng + ha) - eqtime + tz_hours * 60.0
+        sets = 720.0 - 4.0 * (lng - ha) - eqtime + tz_hours * 60.0
+        return (int(round(rise)) % 1440, int(round(sets)) % 1440)
+    except Exception:
+        return (None, None)
+
+def hhmm(minutes):
+    """0時からの分を『5:30』の形にする。"""
+    if minutes is None:
+        return ''
+    m = int(round(minutes))
+    return f"{(m // 60) % 24}:{m % 60:02d}"
+
+
+_PEAK_INDEX = None          # [(lat, lng, bin, (被写体,...), 作者名, 地名+地域,
+                            #   時刻, 天候, 地域, 県, 地名), ...]
 _PEAK_INDEX_AT = 0.0        # 索引を作った時刻
 _PEAK_INDEX_TTL = 6 * 3600  # 6時間で作り直す
 
@@ -1942,7 +2048,9 @@ def build_peak_index():
             if not subs:                        # どの被写体にも当たらない作品は集計に使わない
                 continue
             idx.append((wll[0], wll[1], bin_index(mo, d.get('Day')), subs,
-                        d.get('Winner', ''), place + ' ' + area))
+                        d.get('Winner', ''), place + ' ' + area,
+                        photo_hour(d.get('Hour')), normalize_weather(d.get('Weather')),
+                        area, pref, place))
     except Exception:
         import traceback
         print(f"[ERROR] build_peak_index: {traceback.format_exc()}", flush=True)
@@ -1975,7 +2083,7 @@ def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
     from collections import defaultdict
     bins = defaultdict(Counter)
     clat, clng = center_latlng[0], center_latlng[1]
-    for lat, lng, bi, subs, winner, pa in get_peak_index():
+    for lat, lng, bi, subs, winner, pa, *_rest in get_peak_index():
         if haversine(clat, clng, lat, lng) > radius_km:
             continue
         if winner and winner in excl_authors:
@@ -3981,6 +4089,239 @@ def get_michinoeki():
     _EKI, _EKI_AT = rows, now
     return _EKI
 
+# ──────────────── 撮影計画の組み立て ────────────────
+# 「今日(または指定の日)、どこへ何を撮りに行くか」の行程を、方角ちがいで3案作る。
+# 案を分ける主軸は方角。同じ方角の中で、帰着時刻に収まる1本を組む。
+#
+# 座標は市区町村までしか分からない(誌面データのMapLinkに緯度経度が無いため)。
+# 同じ市内の複数地点は同じ座標になるので、移動時間はあくまで見込みである。
+_PLAN_STAY_MIN = 60        # 1か所あたりの滞在時間(分)
+_PLAN_MAX_STOPS = 4        # 1案に入れる撮影地の上限
+_PLAN_MIN_WORKS = 2        # 実績が1件だけの地域は計画に載せない
+_PLAN_EARLY_MIN = 60       # 撮られている時間帯より、これ以上早く着けば「早い」とする(分)
+_PLAN_LATE_MIN = 90        # 同じく、これ以上遅れれば「遅い」とする(分)
+
+def _window_bins(base_date, expand=False):
+    """その日の前後(およそ-7〜+13日)にあたる旬の番号の集まりを返す。"""
+    offs = {'上旬': 0, '中旬': 1, '下旬': 2}
+    return {(m - 1) * 3 + offs.get(j, 1) for m, j in half_month_window(base_date, expand)}
+
+def short_area(area, pref=None):
+    """『埼玉県秩父市』から『秩父市』のように、県名を落とした呼び名にする。"""
+    a = str(area or '')
+    p = str(pref or '')
+    return a[len(p):] if p and a.startswith(p) else a
+
+def plan_spots(base_date, subject=None, expand=False):
+    """その日が撮り頃の撮影地を、地域(Area)ごとにまとめて返す。"""
+    want = _window_bins(base_date, expand)
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    spots = {}
+    for row in get_peak_index():
+        if len(row) < 11:                      # 索引が古い形のときは何もしない
+            return []
+        lat, lng, bi, subs, winner, pa, hour, weather, area, pref, place = row
+        if bi not in want:
+            continue
+        if winner and winner in excl_authors:
+            continue
+        if blocked_areas and any(b and b in pa for b in blocked_areas):
+            continue
+        if subject and subject not in subs:
+            continue
+        s = spots.get(area)
+        if s is None:
+            s = spots[area] = {'area': area, 'pref': pref, 'lat': lat, 'lng': lng,
+                               'n': 0, 'subjects': Counter(), 'hours': Counter(),
+                               'weather': Counter(), 'places': Counter()}
+        s['n'] += 1
+        for canon in subs:
+            s['subjects'][canon] += 1
+        if hour is not None:
+            s['hours'][hour] += 1
+        if weather:
+            s['weather'][weather] += 1
+        if place:
+            s['places'][place] += 1
+    return [s for s in spots.values() if s['n'] >= _PLAN_MIN_WORKS]
+
+def _spot_view(s, subject=None):
+    """1つの撮影地を、表示に使う形に整える。"""
+    hour = s['hours'].most_common(1)[0][0] if s['hours'] else None
+    subj = (subject if subject and subject in s['subjects']
+            else (s['subjects'].most_common(1)[0][0] if s['subjects'] else ''))
+    wx = s['weather'].most_common(2)
+    place = s['places'].most_common(1)[0][0] if s['places'] else ''
+    return {'area': s['area'], 'name': short_area(s['area'], s['pref']),
+            'place': place, 'lat': s['lat'], 'lng': s['lng'],
+            'subject': subj, 'n': s['n'], 'best_hour': hour,
+            'subjects': [c for c, _ in s['subjects'].most_common(3)],
+            'weather': [{'name': w, 'n': k} for w, k in wx]}
+
+def _timing(arrive, best_hour):
+    """到着が、その地点で撮られている時間帯に対して早いか遅いかを言葉にする。"""
+    if best_hour is None:
+        return ''
+    diff = arrive - best_hour * 60
+    if diff < -_PLAN_EARLY_MIN:
+        return '早い'
+    if diff > _PLAN_LATE_MIN:
+        return '遅い'
+    return 'ちょうど'
+
+# 行程の良し悪しを測る重み。実績の数に、時間帯の合い具合を掛けて足し、
+# 走っている時間を引く。ちょうどの時間に着ける地点を厚く評価する。
+_TIMING_WEIGHT = {'ちょうど': 1.0, '早い': 0.85, '遅い': 0.35, '': 0.7}
+
+def _route_score(route):
+    """行程の良し悪しを数にする。大きいほど良い。"""
+    got = sum(st['n'] * _TIMING_WEIGHT.get(st.get('timing', ''), 0.7)
+              for st in route['stops'])
+    return got - route['total_min'] / 60.0
+
+def _route(origin, spots, leave_min, return_min, subject=None,
+           stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
+           sun_rise=None, sun_set=None, order='hour', drop_late=False):
+    """撮影地の集まりから、時刻のついた行程を1本組む。
+    必ず落とすのは『帰り着けない』『日が暮れている』地点だけ。
+    撮られている時間帯からのずれは『早い・遅い』として添える。
+    drop_late=True のときは、間に合わない地点を捨てた組み方を試す。"""
+    if order == 'works':
+        ordered = sorted(spots, key=lambda s: -s['n'])
+    else:
+        ordered = sorted(spots, key=lambda s: ((s['hours'].most_common(1)[0][0]
+                                                if s['hours'] else 12), -s['n']))
+    now, cur = leave_min, origin
+    stops, used = [], 0
+    for s in ordered:
+        if used >= max_stops:
+            break
+        move = drive_minutes(haversine(cur[0], cur[1], s['lat'], s['lng']))
+        arrive = now + move
+        home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
+        if arrive + stay_min + home > return_min:      # 帰り着けない
+            continue
+        if sun_set is not None and arrive > sun_set:   # 着いたときには日が暮れている
+            continue
+        v = _spot_view(s, subject)
+        tm = _timing(arrive, v['best_hour'])
+        if drop_late and tm == '遅い':
+            continue
+        v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
+                  'drive_min': move, 'stay_min': stay_min, 'timing': tm})
+        stops.append(v)
+        now, cur, used = arrive + stay_min, (s['lat'], s['lng']), used + 1
+    if not stops:
+        return None
+    home = drive_minutes(haversine(cur[0], cur[1], origin[0], origin[1]))
+    out = {'stops': stops, 'back': hhmm(now + home),
+           'total_min': (now + home) - leave_min}
+
+    # 1か所目が『遅い』なら、何時に出れば間に合うかを添える。
+    # ただし希望より4時間以上早い出発になる場合は、助言として現実的でないので言わない。
+    first = stops[0]
+    if first['timing'] == '遅い' and first['best_hour'] is not None:
+        want = first['best_hour'] * 60 - first['drive_min']
+        if 0 <= want < leave_min and (leave_min - want) <= 4 * 60:
+            out['suggest_leave'] = hhmm(want)
+    return out
+
+def _best_route(origin, group, leave_min, return_min, subject,
+                stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
+                sun_rise=None, sun_set=None):
+    """同じ方角の中で、組み方を何通りか試して、いちばん良い行程を選ぶ。"""
+    best = None
+    for order, drop in (('hour', False), ('hour', True), ('works', False)):
+        r = _route(origin, group, leave_min, return_min, subject,
+                   stay_min=stay_min, max_stops=max_stops,
+                   sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop)
+        if r and (best is None or _route_score(r) > _route_score(best)):
+            best = r
+    return best
+
+def _label(direction, stops, total_min):
+    """『北西へ — 秩父市・長瀞町方面／往復約4時間』のような見出しを作る。"""
+    names, seen = [], set()
+    for s in stops:
+        n = s['name']
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+        if len(names) >= 2:
+            break
+    h, m = divmod(int(total_min), 60)
+    span = f"{h}時間{m}分" if m else f"{h}時間"
+    return f"{direction}へ — {'・'.join(names)}方面／往復約{span}"
+
+def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
+                subject=None, max_plans=3):
+    """撮影計画を方角ちがいで最大3案つくる。"""
+    origin = (float(origin_latlng[0]), float(origin_latlng[1]))
+    spots = plan_spots(base_date, subject)
+    if not spots:
+        spots = plan_spots(base_date, subject, expand=True)   # 時期を広げて拾い直す
+
+    usable = []
+    for s in spots:
+        km = haversine(origin[0], origin[1], s['lat'], s['lng'])
+        move = drive_minutes(km)
+        if leave_min + move * 2 + 30 > return_min:     # 往復と最低限の滞在が入らない
+            continue
+        s['km'], s['drive'] = km, move
+        s['dir'] = bearing_label(bearing(origin[0], origin[1], s['lat'], s['lng']))
+        usable.append(s)
+
+    rise, sets = sun_times(origin[0], origin[1], base_date)
+
+    by_dir = defaultdict(list)
+    for s in usable:
+        by_dir[s['dir']].append(s)
+    ranked = sorted(by_dir.items(), key=lambda kv: (-sum(x['n'] for x in kv[1]), kv[0]))
+
+    plans = []
+    for dname, group in ranked:
+        if len(plans) >= max_plans:
+            break
+        r = _best_route(origin, group, leave_min, return_min, subject,
+                        sun_rise=rise, sun_set=sets)
+        if r:
+            r.update({'direction': dname, 'kind': '方角',
+                      'label': _label(dname, r['stops'], r['total_min'])})
+            plans.append(r)
+
+    # 方角が3つ取れない日は、いちばん濃い方角の中で性格を変えた案で埋める
+    if plans and len(plans) < max_plans and ranked:
+        dname, group = ranked[0]
+        for kind, stay, cap in (('滞在重視', 120, 2), ('地点数重視', 45, 4)):
+            if len(plans) >= max_plans:
+                break
+            r = _best_route(origin, group, leave_min, return_min, subject,
+                            stay_min=stay, max_stops=cap, sun_rise=rise, sun_set=sets)
+            if not r:
+                continue
+            if any(p['stops'] == r['stops'] for p in plans):   # 同じ行程は入れない
+                continue
+            r.update({'direction': dname, 'kind': kind,
+                      'label': _label(dname, r['stops'], r['total_min']) + f"（{kind}）"})
+            plans.append(r)
+
+    return {
+        'date': base_date.isoformat(),
+        'origin': {'name': origin_name or DEFAULT_ORIGIN_NAME,
+                   'lat': origin[0], 'lng': origin[1]},
+        'leave': hhmm(leave_min), 'return': hhmm(return_min),
+        'subject': subject or '',
+        'sun': {'rise': hhmm(rise), 'set': hhmm(sets)},
+        'spots_considered': len(usable),
+        'plans': plans,
+        'notice': ('移動時間は直線距離の1.3倍を時速45kmで走った見込みです。'
+                   '撮影地の座標は市区町村までのため、実際の道のりとは前後します。'),
+    }
+
+
 @app.route("/api/michinoeki", methods=["GET", "OPTIONS"])
 def api_michinoeki():
     """指定した地点の近くの道の駅を、近い順に返す。
@@ -4087,6 +4428,73 @@ def api_peak_subjects():
     return resp
 
 
+def _hhmm_to_min(s, default):
+    """『5:30』や『530』『5』を、0時からの分にする。読めなければ default。"""
+    t = str(s or '').strip()
+    if not t:
+        return default
+    m = re.match(r'^(\d{1,2})\s*[:：]\s*(\d{1,2})$', t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+    elif t.isdigit() and len(t) in (3, 4):
+        h, mi = int(t[:-2]), int(t[-2:])
+    elif t.isdigit():
+        h, mi = int(t), 0
+    else:
+        return default
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return default
+    return h * 60 + mi
+
+
+@app.route("/api/plan", methods=["GET", "OPTIONS"])
+def api_plan():
+    """撮影計画を方角ちがいで最大3案返す。プランナー(リファレンス)から呼ばれる。"""
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    try:
+        lat = float(request.args.get("lat", ""))
+        lng = float(request.args.get("lng", ""))
+    except ValueError:
+        return jsonify({"error": "lat/lng required"}), 400
+
+    base = date.today()
+    ds = request.args.get("date", "")
+    if ds:
+        try:
+            y, m, d = [int(x) for x in ds.split("-")]
+            base = date(y, m, d)
+        except Exception:
+            pass
+
+    leave = _hhmm_to_min(request.args.get("leave"), 5 * 60)
+    back = _hhmm_to_min(request.args.get("return"), 20 * 60)
+    if back <= leave:
+        back = leave + 60                      # 逆転していたら最低1時間は確保する
+
+    subject = (request.args.get("subject") or "").strip() or None
+    if subject and subject not in KEYWORD_NORMALIZE:
+        subject = None                         # 知らない被写体なら指定なし扱い
+
+    try:
+        out = build_plans((lat, lng), request.args.get("origin_name") or None,
+                          base, leave, back, subject=subject)
+    except Exception:
+        import traceback
+        print(f"[ERROR] api_plan: {traceback.format_exc()}", flush=True)
+        out = {"plans": [], "error": "計画を組み立てられませんでした"}
+
+    resp = jsonify(out)
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
+
 # ──────────────── 改修前後の答え合わせ用（確認専用） ────────────────
 # 検索の内部を作り直すとき、答えが変わっていないことを1件ずつ突き合わせるための入口。
 # 読むだけで、何も書き換えない。
@@ -4120,10 +4528,20 @@ def _check_latlng(a, b):
         return None
 
 
+def _check_key_ok():
+    """確認用の入口を開けてよいかを判める。
+    鍵は X-Check-Key ヘッダーで受け取る。URLに載せるとRenderのアクセスログに
+    平文で残ってしまうため、問い合わせ文字列では受け付けない。"""
+    key = os.environ.get("CHECK_KEY", "")
+    if not key:
+        return False
+    given = request.headers.get("X-Check-Key", "")
+    return bool(given) and given == key
+
+
 @app.route("/api/_check", methods=["GET"])
 def api_check():
-    key = os.environ.get("CHECK_KEY", "")
-    if not key or request.args.get("key", "") != key:
+    if not _check_key_ok():
         abort(404)
 
     mode = request.args.get("mode", "place")
@@ -4213,9 +4631,9 @@ def api_check():
 @app.route("/api/_reindex", methods=["GET"])
 def api_reindex():
     """誌面データを入れ替えたあとに、索引をすぐ作り直すための入口。
-    CHECK_KEY を知っている人だけが使える。ここだけは全件読みが起きる。"""
-    key = os.environ.get("CHECK_KEY", "")
-    if not key or request.args.get("key", "") != key:
+    CHECK_KEY を X-Check-Key ヘッダーで送れる人だけが使える。
+    ここだけは全件読みが起きる。"""
+    if not _check_key_ok():
         abort(404)
     global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT
     t0 = time.time()
