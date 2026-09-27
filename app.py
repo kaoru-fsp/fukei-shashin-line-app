@@ -4192,10 +4192,13 @@ def _timing(arrive, best_hour):
 _TIMING_WEIGHT = {'ちょうど': 1.0, '早い': 0.85, '遅い': 0.35, '': 0.7}
 
 def _route_score(route):
-    """行程の良し悪しを数にする。大きいほど良い。"""
+    """行程の良し悪しを数にする。大きいほど良い。
+    かかる時間はそのまま引き、走っている時間はさらに少し重く見る。
+    同じ帰着時刻なら、現地で待つほうがハンドルを握り続けるより楽なため。"""
     got = sum(st['n'] * _TIMING_WEIGHT.get(st.get('timing', ''), 0.7)
               for st in route['stops'])
-    return got - route['total_min'] / 60.0
+    return (got - route['total_min'] / 60.0
+            - route.get('drive_total_min', 0) / 60.0 * 0.3)
 
 def _route(origin, spots, leave_min, return_min, subject=None,
            stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
@@ -4227,23 +4230,35 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     now, cur = leave_min, origin
     stops, used, drove = [], 0, 0
 
-    if order == 'greedy':
-        # 近さと時間帯の合い具合の両方を見て、1か所ずつ選んでいく。
-        # 時間帯順に並べるだけだと、地理を無視した行き来が起きるため。
+    if order in ('greedy', 'value'):
+        # 1か所ずつ選んでいく。時間帯順に並べるだけだと地理を無視した行き来が起きるため。
+        #   greedy … 近くて、遅れず、待ちの少ない地点を順に採る
+        #   value  … その地点を足す値打ちが、余計にかかる時間に見合うかで決める。
+        #            帰り道が延びる分も数えるので、遠くまで行って戻る形を避けられる
         rest = list(spots)
         while rest and used < max_stops:
             pick = None
+            home_now = drive_minutes(haversine(cur[0], cur[1], origin[0], origin[1]))
             for s in rest:
                 f = fits(s, cur, now)
                 if not f:
                     continue
                 move, arrive, wait = f
                 bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
-                late = max(0, arrive - bh * 60) if bh is not None else 0
-                # 近くて、遅れず、待ち時間も少ない地点を先に
-                cost = (move + late + wait * 0.5, -s['n'])
-                if pick is None or cost < pick[0]:
-                    pick = (cost, s, move, arrive, wait)
+                if order == 'value':
+                    home_new = drive_minutes(haversine(s['lat'], s['lng'],
+                                                       origin[0], origin[1]))
+                    extra = move + wait + (home_new - home_now)   # 余計にかかる時間
+                    gain = s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bh), 0.7)
+                    worth = gain - extra / 60.0
+                    if worth <= 0:                 # 足しても割に合わない
+                        continue
+                    key = (-worth, move)
+                else:
+                    late = max(0, arrive - bh * 60) if bh is not None else 0
+                    key = (move + late + wait * 0.5, -s['n'])
+                if pick is None or key < pick[0]:
+                    pick = (key, s, move, arrive, wait)
             if pick is None:
                 break
             _, s, move, arrive, wait = pick
@@ -4306,7 +4321,8 @@ def _best_route(origin, group, leave_min, return_min, subject,
                 sun_rise=None, sun_set=None):
     """同じ方角の中で、組み方を何通りか試して、いちばん良い行程を選ぶ。"""
     best = None
-    for order, drop in (('greedy', False), ('hour', False), ('hour', True), ('works', False)):
+    for order, drop in (('value', False), ('greedy', False), ('hour', False),
+                        ('hour', True), ('works', False)):
         r = _route(origin, group, leave_min, return_min, subject,
                    stay_min=stay_min, max_stops=max_stops,
                    sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop)
@@ -4400,7 +4416,9 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                             stay_min=stay, max_stops=cap, sun_rise=rise, sun_set=sets)
             if not r:
                 continue
-            if any(p['stops'] == r['stops'] for p in plans):   # 同じ行程は入れない
+            # 回る場所と順番が同じなら、滞在時間が違うだけの重複なので入れない
+            seq = tuple(s['area'] for s in r['stops'])
+            if any(tuple(s['area'] for s in p['stops']) == seq for p in plans):
                 continue
             r.update({'direction': dname, 'kind': kind,
                       'label': _label(dname, r['stops'], r['total_min']) + f"（{kind}）"})
