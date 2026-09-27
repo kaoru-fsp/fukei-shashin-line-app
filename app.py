@@ -4202,7 +4202,8 @@ def _route_score(route):
 
 def _route(origin, spots, leave_min, return_min, subject=None,
            stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
-           sun_rise=None, sun_set=None, order='hour', drop_late=False):
+           sun_rise=None, sun_set=None, order='hour', drop_late=False,
+           max_leg=_PLAN_MAX_LEG_MIN, must=None):
     """撮影地の集まりから、時刻のついた行程を1本組む。
     必ず落とすのは『帰り着けない』『日が暮れている』地点だけ。
     撮られている時間帯からのずれは『早い・遅い』として添える。
@@ -4212,7 +4213,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
         着くのが早すぎるときは、その地点で撮られている時間帯に合わせて待つ。
         夕景の場所に朝着いても仕方がないため。"""
         move = drive_minutes(haversine(cur[0], cur[1], s['lat'], s['lng']))
-        if move > _PLAN_MAX_LEG_MIN:                   # 1区間が長すぎる
+        if move > max_leg and s.get('area') != must:   # 1区間が長すぎる
             return None
         arrive = now + move
         bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
@@ -4250,8 +4251,10 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                                                        origin[0], origin[1]))
                     extra = move + wait + (home_new - home_now)   # 余計にかかる時間
                     gain = s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bh), 0.7)
-                    worth = gain - extra / 60.0
-                    if worth <= 0:                 # 足しても割に合わない
+                    # 走る時間は採点と同じ重み(1.3倍)で見る。ここだけ等倍にしていると、
+                    # 採点では割に合わない寄り道を、選ぶ段階で拾ってしまう
+                    worth = gain - extra / 60.0 * 1.3
+                    if worth <= 0 and s.get('area') != must:   # 足しても割に合わない
                         continue
                     key = (-worth, move)
                 else:
@@ -4295,6 +4298,8 @@ def _route(origin, spots, leave_min, return_min, subject=None,
 
     if not stops:
         return None
+    if must and not any(s['area'] == must for s in stops):
+        return None                      # 必ず寄る地点が入らなかった組み方は捨てる
     home = drive_minutes(haversine(cur[0], cur[1], origin[0], origin[1]))
     # 1か所目で待つことになるなら、その分だけ遅く出ればよい。
     # 出発してから現地で10時間待つ、という案は計画として意味をなさない。
@@ -4318,17 +4323,24 @@ def _route(origin, spots, leave_min, return_min, subject=None,
 
 def _best_route(origin, group, leave_min, return_min, subject,
                 stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
-                sun_rise=None, sun_set=None):
+                sun_rise=None, sun_set=None,
+                max_leg=_PLAN_MAX_LEG_MIN, must=None):
     """同じ方角の中で、組み方を何通りか試して、いちばん良い行程を選ぶ。"""
     best = None
     for order, drop in (('value', False), ('greedy', False), ('hour', False),
                         ('hour', True), ('works', False)):
         r = _route(origin, group, leave_min, return_min, subject,
                    stay_min=stay_min, max_stops=max_stops,
-                   sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop)
+                   sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop,
+                   max_leg=max_leg, must=must)
         if r and (best is None or _route_score(r) > _route_score(best)):
             best = r
     return best
+
+def _span(total_min):
+    """分を『4時間30分』の形にする。"""
+    h, m = divmod(int(total_min or 0), 60)
+    return f"{h}時間{m}分" if m else f"{h}時間"
 
 def _label(direction, stops, total_min):
     """『北西へ — 秩父市・長瀞町方面／往復約4時間』のような見出しを作る。"""
@@ -4340,32 +4352,49 @@ def _label(direction, stops, total_min):
             names.append(n)
         if len(names) >= 2:
             break
-    h, m = divmod(int(total_min), 60)
-    span = f"{h}時間{m}分" if m else f"{h}時間"
-    return f"{direction}へ — {'・'.join(names)}方面／往復約{span}"
+    return f"{direction}へ — {'・'.join(names)}方面／往復約{_span(total_min)}"
 
 def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
-                subject=None, max_plans=3):
-    """撮影計画を方角ちがいで最大3案つくる。"""
+                subject=None, max_plans=3, must_latlng=None, must_name=None,
+                easy=False):
+    """撮影計画を最大3案つくる。
+    ふだんは方角ちがいの3案。行きたい撮影地(must_latlng)が指定されたときは、
+    行き先が定まっているので方角では分けず、組み立て方を変えた3案にする。
+    easy=True は『手軽に』(片道90分以内・寄るのは1〜2か所)。"""
     origin = (float(origin_latlng[0]), float(origin_latlng[1]))
+    max_leg = 90 if easy else _PLAN_MAX_LEG_MIN
+    cap = 2 if easy else _PLAN_MAX_STOPS
     spots = plan_spots(base_date, subject)
     if not spots:
         spots = plan_spots(base_date, subject, expand=True)   # 時期を広げて拾い直す
 
     rise, sets = sun_times(origin[0], origin[1], base_date)
 
+    # 行きたい撮影地が指定されていれば、いちばん近い撮影地をそれとみなす。
+    # 座標は市区町村までなので、少し離れていても同じ場所として扱う。
+    anchor = None
+    if must_latlng:
+        try:
+            ml = (float(must_latlng[0]), float(must_latlng[1]))
+            near = [(haversine(ml[0], ml[1], s['lat'], s['lng']), s) for s in spots]
+            near = [x for x in near if x[0] <= 15]
+            if near:
+                anchor = min(near, key=lambda x: (x[0], -x[1]['n']))[1]
+        except (TypeError, ValueError):
+            anchor = None
+
     usable, night = [], []
     for s in spots:
         km = haversine(origin[0], origin[1], s['lat'], s['lng'])
         move = drive_minutes(km)
-        if move > _PLAN_MAX_LEG_MIN:                   # 片道が遠すぎる
+        if move > max_leg and s is not anchor:         # 片道が遠すぎる
             continue
         if leave_min + move * 2 + 30 > return_min:     # 往復と最低限の滞在が入らない
             continue
         s['km'], s['drive'] = km, move
         s['dir'] = bearing_label(bearing(origin[0], origin[1], s['lat'], s['lng']))
         bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
-        if is_night_hour(bh, rise, sets):
+        if is_night_hour(bh, rise, sets) and s is not anchor:
             night.append(s)                            # 夜が本番の被写体は昼の行程に入れない
         else:
             usable.append(s)
@@ -4380,7 +4409,7 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         out = []
         for s in sorted((x for x in night if x['dir'] == dname), key=lambda x: -x['n']):
             move = drive_minutes(haversine(last['lat'], last['lng'], s['lat'], s['lng']))
-            if move > _PLAN_MAX_LEG_MIN:
+            if move > max_leg:
                 continue
             v = _spot_view(s, subject)
             home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
@@ -4395,35 +4424,73 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         return out
 
     plans = []
-    for dname, group in ranked:
-        if len(plans) >= max_plans:
-            break
-        r = _best_route(origin, group, leave_min, return_min, subject,
-                        sun_rise=rise, sun_set=sets)
-        if r:
-            r.update({'direction': dname, 'kind': '方角',
-                      'label': _label(dname, r['stops'], r['total_min'])})
-            r['night_options'] = night_near(dname, r['last'], r['last_end'])
-            plans.append(r)
 
-    # 方角が3つ取れない日は、いちばん濃い方角の中で性格を変えた案で埋める
-    if plans and len(plans) < max_plans and ranked:
-        dname, group = ranked[0]
-        for kind, stay, cap in (('滞在重視', 120, 2), ('地点数重視', 45, 4)):
+    def add(r, dname, kind, label):
+        """組めた行程を、重複していなければ加える。"""
+        if not r:
+            return False
+        seq = tuple(s['area'] for s in r['stops'])
+        if any(tuple(s['area'] for s in p['stops']) == seq for p in plans):
+            return False
+        r.update({'direction': dname, 'kind': kind, 'label': label})
+        r['night_options'] = night_near(dname, r['last'], r['last_end'])
+        plans.append(r)
+        return True
+
+    if anchor is not None:
+        # 行き先が定まっているので、方角ではなく組み立て方で分ける
+        must = anchor['area']
+        others = [s for s in usable if s is not anchor]
+        base_leg = drive_minutes(haversine(origin[0], origin[1],
+                                           anchor['lat'], anchor['lng']))
+        onway = []
+        for s in others:                      # 本命への道のりから大きく外れない地点
+            a = drive_minutes(haversine(origin[0], origin[1], s['lat'], s['lng']))
+            b = drive_minutes(haversine(s['lat'], s['lng'], anchor['lat'], anchor['lng']))
+            if a + b - base_leg <= 45:
+                onway.append(s)
+        same_dir = [s for s in others if s['dir'] == anchor['dir']]
+        aname = must_name or _spot_view(anchor, subject)['name']
+
+        for stay in (240, 180, 120, _PLAN_STAY_MIN):
+            r = _best_route(origin, [anchor], leave_min, return_min, subject,
+                            stay_min=stay, max_stops=1, sun_rise=rise, sun_set=sets,
+                            max_leg=max_leg, must=must)
+            if r and add(r, anchor['dir'], 'じっくり',
+                         f"{aname}をじっくり — 滞在{stay // 60}時間"
+                         f"{'半' if stay % 60 else ''}／往復約{_span(r['total_min'])}"):
+                break
+
+        for kind, group in (('行きがけに寄る', [anchor] + onway),
+                            ('前後に足す', [anchor] + same_dir)):
             if len(plans) >= max_plans:
                 break
             r = _best_route(origin, group, leave_min, return_min, subject,
-                            stay_min=stay, max_stops=cap, sun_rise=rise, sun_set=sets)
-            if not r:
-                continue
-            # 回る場所と順番が同じなら、滞在時間が違うだけの重複なので入れない
-            seq = tuple(s['area'] for s in r['stops'])
-            if any(tuple(s['area'] for s in p['stops']) == seq for p in plans):
-                continue
-            r.update({'direction': dname, 'kind': kind,
-                      'label': _label(dname, r['stops'], r['total_min']) + f"（{kind}）"})
-            r['night_options'] = night_near(dname, r['last'], r['last_end'])
-            plans.append(r)
+                            max_stops=cap if easy else 3, sun_rise=rise, sun_set=sets,
+                            max_leg=max_leg, must=must)
+            add(r, anchor['dir'], kind,
+                f"{aname}を軸に — {kind}／往復約{_span(r['total_min'])}" if r else '')
+    else:
+        for dname, group in ranked:
+            if len(plans) >= max_plans:
+                break
+            r = _best_route(origin, group, leave_min, return_min, subject,
+                            max_stops=cap, sun_rise=rise, sun_set=sets, max_leg=max_leg)
+            if r:
+                add(r, dname, '方角', _label(dname, r['stops'], r['total_min']))
+
+        # 方角が3つ取れない日は、いちばん濃い方角の中で性格を変えた案で埋める
+        if plans and len(plans) < max_plans and ranked:
+            dname, group = ranked[0]
+            for kind, stay, cap2 in (('滞在重視', 120, 2), ('地点数重視', 45, 4)):
+                if len(plans) >= max_plans:
+                    break
+                r = _best_route(origin, group, leave_min, return_min, subject,
+                                stay_min=stay, max_stops=min(cap2, cap),
+                                sun_rise=rise, sun_set=sets, max_leg=max_leg)
+                if r:
+                    add(r, dname, kind,
+                        _label(dname, r['stops'], r['total_min']) + f"（{kind}）")
 
     plans.sort(key=_route_score, reverse=True)   # 良い行程から並べる
     for p in plans:                              # 組み立てにだけ使った値は返さない
@@ -4439,11 +4506,19 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         'sun': {'rise': hhmm(rise), 'set': hhmm(sets)},
         'spots_considered': len(usable),
         'night_considered': len(night),
-        'max_leg_min': _PLAN_MAX_LEG_MIN,
+        'max_leg_min': max_leg,
+        'easy': bool(easy),
+        'must': ({'requested': True, 'found': anchor is not None,
+                  'name': (must_name or (_spot_view(anchor, subject)['name']
+                                         if anchor else '')),
+                  'area': anchor['area'] if anchor else ''}
+                 if must_latlng else {'requested': False}),
         'plans': plans,
         'notice': ('移動時間は直線距離の1.3倍を時速45kmで走った見込みです。'
                    '撮影地の座標は市区町村までのため、実際の道のりとは前後します。'
-                   f'1区間の移動が{_PLAN_MAX_LEG_MIN // 60}時間を超える撮影地は入れていません。'),
+                   + (f'1区間の移動が{max_leg}分を超える撮影地は入れていません。'
+                      if max_leg % 60 else
+                      f'1区間の移動が{max_leg // 60}時間を超える撮影地は入れていません。')),
     }
 
 
@@ -4607,9 +4682,19 @@ def api_plan():
     if subject and subject not in KEYWORD_NORMALIZE:
         subject = None                         # 知らない被写体なら指定なし扱い
 
+    must = None
+    try:
+        must = (float(request.args.get("must_lat")), float(request.args.get("must_lng")))
+    except (TypeError, ValueError):
+        must = None
+    easy = request.args.get("easy", "") in ("1", "true", "yes")
+
     try:
         out = build_plans((lat, lng), request.args.get("origin_name") or None,
-                          base, leave, back, subject=subject)
+                          base, leave, back, subject=subject,
+                          must_latlng=must,
+                          must_name=(request.args.get("must_name") or "").strip() or None,
+                          easy=easy)
     except Exception:
         import traceback
         print(f"[ERROR] api_plan: {traceback.format_exc()}", flush=True)
