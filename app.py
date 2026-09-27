@@ -4100,6 +4100,21 @@ _PLAN_MAX_STOPS = 4        # 1案に入れる撮影地の上限
 _PLAN_MIN_WORKS = 2        # 実績が1件だけの地域は計画に載せない
 _PLAN_EARLY_MIN = 60       # 撮られている時間帯より、これ以上早く着けば「早い」とする(分)
 _PLAN_LATE_MIN = 90        # 同じく、これ以上遅れれば「遅い」とする(分)
+_PLAN_MAX_LEG_MIN = 240    # 1区間の移動時間の上限(分)。これを超える地点は行程に入れない
+_PLAN_NIGHT_MARGIN = 60    # 日の入り後・日の出前これだけ離れた時間帯を「夜の被写体」とする(分)
+
+def is_night_hour(best_hour, sun_rise, sun_set):
+    """その時間帯が、夜が本番のものかどうか。
+    夜明け前(雲海・朝霧・朝焼けなど)は夜ではなく昼の行程に入れる。早発ちの話であって、
+    夜の撮影ではないため。ここで夜と呼ぶのは『日の入りのあと』と『深夜0時〜3時』。"""
+    if best_hour is None:
+        return False
+    t = best_hour * 60
+    if t < 3 * 60:
+        return True
+    if sun_set is None:
+        return t >= 19 * 60
+    return t > sun_set + _PLAN_NIGHT_MARGIN
 
 def _window_bins(base_date, expand=False):
     """その日の前後(およそ-7〜+13日)にあたる旬の番号の集まりを返す。"""
@@ -4189,36 +4204,93 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     必ず落とすのは『帰り着けない』『日が暮れている』地点だけ。
     撮られている時間帯からのずれは『早い・遅い』として添える。
     drop_late=True のときは、間に合わない地点を捨てた組み方を試す。"""
-    if order == 'works':
-        ordered = sorted(spots, key=lambda s: -s['n'])
-    else:
-        ordered = sorted(spots, key=lambda s: ((s['hours'].most_common(1)[0][0]
-                                                if s['hours'] else 12), -s['n']))
-    now, cur = leave_min, origin
-    stops, used = [], 0
-    for s in ordered:
-        if used >= max_stops:
-            break
+    def fits(s, cur, now):
+        """その地点を次に入れられるか。入れられるなら (移動分, 到着時刻, 待ち分) を返す。
+        着くのが早すぎるときは、その地点で撮られている時間帯に合わせて待つ。
+        夕景の場所に朝着いても仕方がないため。"""
         move = drive_minutes(haversine(cur[0], cur[1], s['lat'], s['lng']))
+        if move > _PLAN_MAX_LEG_MIN:                   # 1区間が長すぎる
+            return None
         arrive = now + move
+        bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
+        wait = 0
+        if bh is not None and arrive < bh * 60 - 30:
+            wait = (bh * 60 - 30) - arrive
+            arrive += wait
         home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
         if arrive + stay_min + home > return_min:      # 帰り着けない
-            continue
+            return None
         if sun_set is not None and arrive > sun_set:   # 着いたときには日が暮れている
-            continue
-        v = _spot_view(s, subject)
-        tm = _timing(arrive, v['best_hour'])
-        if drop_late and tm == '遅い':
-            continue
-        v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
-                  'drive_min': move, 'stay_min': stay_min, 'timing': tm})
-        stops.append(v)
-        now, cur, used = arrive + stay_min, (s['lat'], s['lng']), used + 1
+            return None
+        return (move, arrive, wait)
+
+    now, cur = leave_min, origin
+    stops, used, drove = [], 0, 0
+
+    if order == 'greedy':
+        # 近さと時間帯の合い具合の両方を見て、1か所ずつ選んでいく。
+        # 時間帯順に並べるだけだと、地理を無視した行き来が起きるため。
+        rest = list(spots)
+        while rest and used < max_stops:
+            pick = None
+            for s in rest:
+                f = fits(s, cur, now)
+                if not f:
+                    continue
+                move, arrive, wait = f
+                bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
+                late = max(0, arrive - bh * 60) if bh is not None else 0
+                # 近くて、遅れず、待ち時間も少ない地点を先に
+                cost = (move + late + wait * 0.5, -s['n'])
+                if pick is None or cost < pick[0]:
+                    pick = (cost, s, move, arrive, wait)
+            if pick is None:
+                break
+            _, s, move, arrive, wait = pick
+            v = _spot_view(s, subject)
+            tm = _timing(arrive, v['best_hour'])
+            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
+                      'drive_min': move, 'stay_min': stay_min,
+                      'wait_min': wait, 'timing': tm})
+            stops.append(v)
+            now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
+            rest.remove(s)
+    else:
+        if order == 'works':
+            ordered = sorted(spots, key=lambda s: -s['n'])
+        else:
+            ordered = sorted(spots, key=lambda s: ((s['hours'].most_common(1)[0][0]
+                                                    if s['hours'] else 12), -s['n']))
+        for s in ordered:
+            if used >= max_stops:
+                break
+            f = fits(s, cur, now)
+            if not f:
+                continue
+            move, arrive, wait = f
+            v = _spot_view(s, subject)
+            tm = _timing(arrive, v['best_hour'])
+            if drop_late and tm == '遅い':
+                continue
+            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
+                      'drive_min': move, 'stay_min': stay_min,
+                      'wait_min': wait, 'timing': tm})
+            stops.append(v)
+            now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
+
     if not stops:
         return None
     home = drive_minutes(haversine(cur[0], cur[1], origin[0], origin[1]))
-    out = {'stops': stops, 'back': hhmm(now + home),
-           'total_min': (now + home) - leave_min}
+    # 1か所目で待つことになるなら、その分だけ遅く出ればよい。
+    # 出発してから現地で10時間待つ、という案は計画として意味をなさない。
+    start = leave_min + stops[0].get('wait_min', 0)
+    stops[0]['wait_min'] = 0
+    out = {'stops': stops, 'back': hhmm(now + home), 'depart': hhmm(start),
+           'total_min': (now + home) - start,
+           'drive_total_min': drove + home,
+           'stay_total_min': stay_min * len(stops),
+           'last': {'lat': cur[0], 'lng': cur[1]},
+           'last_end': now}
 
     # 1か所目が『遅い』なら、何時に出れば間に合うかを添える。
     # ただし希望より4時間以上早い出発になる場合は、助言として現実的でないので言わない。
@@ -4234,7 +4306,7 @@ def _best_route(origin, group, leave_min, return_min, subject,
                 sun_rise=None, sun_set=None):
     """同じ方角の中で、組み方を何通りか試して、いちばん良い行程を選ぶ。"""
     best = None
-    for order, drop in (('hour', False), ('hour', True), ('works', False)):
+    for order, drop in (('greedy', False), ('hour', False), ('hour', True), ('works', False)):
         r = _route(origin, group, leave_min, return_min, subject,
                    stay_min=stay_min, max_stops=max_stops,
                    sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop)
@@ -4264,22 +4336,47 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
     if not spots:
         spots = plan_spots(base_date, subject, expand=True)   # 時期を広げて拾い直す
 
-    usable = []
+    rise, sets = sun_times(origin[0], origin[1], base_date)
+
+    usable, night = [], []
     for s in spots:
         km = haversine(origin[0], origin[1], s['lat'], s['lng'])
         move = drive_minutes(km)
+        if move > _PLAN_MAX_LEG_MIN:                   # 片道が遠すぎる
+            continue
         if leave_min + move * 2 + 30 > return_min:     # 往復と最低限の滞在が入らない
             continue
         s['km'], s['drive'] = km, move
         s['dir'] = bearing_label(bearing(origin[0], origin[1], s['lat'], s['lng']))
-        usable.append(s)
-
-    rise, sets = sun_times(origin[0], origin[1], base_date)
+        bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
+        if is_night_hour(bh, rise, sets):
+            night.append(s)                            # 夜が本番の被写体は昼の行程に入れない
+        else:
+            usable.append(s)
 
     by_dir = defaultdict(list)
     for s in usable:
         by_dir[s['dir']].append(s)
     ranked = sorted(by_dir.items(), key=lambda kv: (-sum(x['n'] for x in kv[1]), kv[0]))
+
+    def night_near(dname, last, after_min):
+        """その方角にある『夜の部』の候補を、最後の撮影地からの移動つきで返す。"""
+        out = []
+        for s in sorted((x for x in night if x['dir'] == dname), key=lambda x: -x['n']):
+            move = drive_minutes(haversine(last['lat'], last['lng'], s['lat'], s['lng']))
+            if move > _PLAN_MAX_LEG_MIN:
+                continue
+            v = _spot_view(s, subject)
+            home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
+            start = max(after_min + move, (v['best_hour'] or 20) * 60)
+            if start - (after_min + move) > 4 * 60:
+                continue                  # 待ち時間が長すぎる。同じ日の続きとは言えない
+            v.update({'drive_min': move, 'from_last': move,
+                      'start': hhmm(start), 'back': hhmm(start + 60 + home)})
+            out.append(v)
+            if len(out) >= 3:
+                break
+        return out
 
     plans = []
     for dname, group in ranked:
@@ -4290,6 +4387,7 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         if r:
             r.update({'direction': dname, 'kind': '方角',
                       'label': _label(dname, r['stops'], r['total_min'])})
+            r['night_options'] = night_near(dname, r['last'], r['last_end'])
             plans.append(r)
 
     # 方角が3つ取れない日は、いちばん濃い方角の中で性格を変えた案で埋める
@@ -4306,7 +4404,13 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                 continue
             r.update({'direction': dname, 'kind': kind,
                       'label': _label(dname, r['stops'], r['total_min']) + f"（{kind}）"})
+            r['night_options'] = night_near(dname, r['last'], r['last_end'])
             plans.append(r)
+
+    plans.sort(key=_route_score, reverse=True)   # 良い行程から並べる
+    for p in plans:                              # 組み立てにだけ使った値は返さない
+        p.pop('last', None)
+        p.pop('last_end', None)
 
     return {
         'date': base_date.isoformat(),
@@ -4316,9 +4420,12 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         'subject': subject or '',
         'sun': {'rise': hhmm(rise), 'set': hhmm(sets)},
         'spots_considered': len(usable),
+        'night_considered': len(night),
+        'max_leg_min': _PLAN_MAX_LEG_MIN,
         'plans': plans,
         'notice': ('移動時間は直線距離の1.3倍を時速45kmで走った見込みです。'
-                   '撮影地の座標は市区町村までのため、実際の道のりとは前後します。'),
+                   '撮影地の座標は市区町村までのため、実際の道のりとは前後します。'
+                   f'1区間の移動が{_PLAN_MAX_LEG_MIN // 60}時間を超える撮影地は入れていません。'),
     }
 
 
