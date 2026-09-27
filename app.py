@@ -4461,8 +4461,11 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                          f"{'半' if stay % 60 else ''}／往復約{_span(r['total_min'])}"):
                 break
 
+        # 道中にも同じ方角にも寄れる場所が無いことはある(都心の一点を指定した場合など)。
+        # そのときのために、方角を問わず入るものを足す組み方も試す。
         for kind, group in (('行きがけに寄る', [anchor] + onway),
-                            ('前後に足す', [anchor] + same_dir)):
+                            ('前後に足す', [anchor] + same_dir),
+                            ('ほかにも寄る', [anchor] + others)):
             if len(plans) >= max_plans:
                 break
             r = _best_route(origin, group, leave_min, return_min, subject,
