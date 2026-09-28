@@ -4124,10 +4124,16 @@ _WX_CODE_NAME = {0: '快晴', 1: '晴れ', 2: '晴れ', 3: '曇り', 45: '霧', 
                  80: 'にわか雨', 81: 'にわか雨', 82: 'にわか雨',
                  85: 'にわか雪', 86: 'にわか雪',
                  95: '雷雨', 96: '雷雨', 99: '雷雨'}
-_WX_RAIN = set(range(51, 68)) | {80, 81, 82, 95, 96, 99}
+# 霧雨(51-57)と本降りの雨は分けて持つ。霧雨のコードは降水確率が低い日にも出るので、
+# これを雨として扱うと、降水確率27%の日まで雨の日の組み方になってしまう。
+_WX_DRIZZLE = {51, 53, 55, 56, 57}
+_WX_RAIN = {61, 63, 65, 66, 67, 80, 81, 82, 95, 96, 99}
 _WX_SNOW = set(range(71, 78)) | {85, 86}
 _WX_FOG = {45, 48}
 _WX_THUNDER = {95, 96, 99}
+# 雨として扱う境目。降水確率が半分を超えたら雨、本降りのコードが出ていれば4割で雨とみなす。
+_WX_WET_POP = 50
+_WX_WET_POP_HARD = 40
 
 def forecast_for(points, base_date):
     """points（[(lat, lng), ...]）と同じ順番で、その日の1時間ごとの天気を返す。
@@ -4186,13 +4192,14 @@ def wx_span(f, start_min, end_min):
     b = max(a, min(23, int((end_min + 59) // 60)))
     codes = f['code'][a:b + 1] or [0]
     pops = f['pop'][a:b + 1] or [0]
-    worst = max(codes, key=lambda c: (c in _WX_THUNDER, c in _WX_SNOW,
-                                      c in _WX_RAIN, c in _WX_FOG, c))
+    worst = max(codes, key=lambda c: (c in _WX_THUNDER, c in _WX_SNOW, c in _WX_RAIN,
+                                      c in _WX_DRIZZLE, c in _WX_FOG, c))
     pop = max(pops)
+    hard = any(c in _WX_RAIN or c in _WX_SNOW for c in codes)
     return {
         'pop': pop,
         'sky': _WX_CODE_NAME.get(worst, '曇り'),
-        'wet': pop >= 50 or any(c in _WX_RAIN or c in _WX_SNOW for c in codes),
+        'wet': pop >= _WX_WET_POP or (hard and pop >= _WX_WET_POP_HARD),
         'thunder': any(c in _WX_THUNDER for c in codes),
         'fog': any(c in _WX_FOG for c in codes),
     }
