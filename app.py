@@ -15,6 +15,7 @@ import random
 import secrets
 import time
 import urllib.parse
+import urllib.request
 from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort, jsonify, make_response
@@ -1079,8 +1080,18 @@ def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, li
 # カテゴリ別の除外語。作品データのSubject/Title等で、被写体variantを部分文字列として含むが
 # その被写体ではない語を、判定前に各フィールドから除去する（subject_matchesのexclude引数へ渡す）。
 # 例: 「鳥」は「鳥居」(神社)「鳥海山」「鳥甲山」(山名)の一部として現れるため、鳥の野鳥判定から外す。
+# 被写体の判定は Subject とタイトルについては単純な文字列の含みで見るため、
+# 短い語が長い語の一部として誤って当たることがある。
+# 「雲海」に「海」が含まれるために、尾瀬ヶ原の雲海の作品が「海」として数えられていた。
+# ここに挙げた語は、その被写体を判定する前に取り除く。
+# 「海霧」「川霧」「海鳥」「白鳥」は、実際に海や川、鳥が写っているので残す。
 SUBJECT_EXCLUDE = {
     '鳥': ['鳥居', '鳥海山', '鳥甲山', '害鳥'],
+    '海': ['雲海', 'みずうみ'],          # 雲の海、湖
+    '桜': ['秋桜', '芝桜'],              # コスモス、シバザクラ
+    '川': ['天の川'],                    # 銀河
+    '滝': ['滝雲'],                      # 雲海の一種
+    '藤': ['ふじさん', 'ふじ山'],        # 富士山をひらがなで書いたもの
 }
 
 def subject_exclude_for(canon):
@@ -4089,6 +4100,130 @@ def get_michinoeki():
     _EKI, _EKI_AT = rows, now
     return _EKI
 
+# ──────────────── 天候の予報（撮影地ごと） ────────────────
+# 出発地1点の予報では足りない。同じ日でも「渡良瀬遊水地は終日霧雨、日光は午後から
+# 晴れ」ということが実際に起きる。Open-Meteo は1回の呼び出しで複数地点を返せるので、
+# 候補の撮影地をまとめて1回だけ聞く。
+#
+# 取れなかったときは天候なしで従来どおり組む。予報は計画を良くする材料であって、
+# 計画が出ない理由にしてはいけない。
+_WX_URL = "https://api.open-meteo.com/v1/forecast"
+_WX_TIMEOUT = 8            # 秒。ここで待たされて計画が出ないほうが困る
+_WX_TTL = 3600             # 同じ日・同じ地点の予報は1時間使い回す
+_WX_MAX_POINTS = 60        # 1回に聞く地点の上限
+_WX_AHEAD_MAX = 14         # 何日先まで予報が届くか（実測した値）
+_WX_BACK_MAX = 60          # 何日前までさかのぼれるか
+
+_WX_CACHE = {}
+
+# Open-Meteo の天気コード（WMO）を、誌面で使う言い方に寄せる
+_WX_CODE_NAME = {0: '快晴', 1: '晴れ', 2: '晴れ', 3: '曇り', 45: '霧', 48: '霧',
+                 51: '霧雨', 53: '霧雨', 55: '霧雨', 56: '霧雨', 57: '霧雨',
+                 61: '雨', 63: '雨', 65: '雨', 66: '雨', 67: '雨',
+                 71: '雪', 73: '雪', 75: '雪', 77: '雪',
+                 80: 'にわか雨', 81: 'にわか雨', 82: 'にわか雨',
+                 85: 'にわか雪', 86: 'にわか雪',
+                 95: '雷雨', 96: '雷雨', 99: '雷雨'}
+_WX_RAIN = set(range(51, 68)) | {80, 81, 82, 95, 96, 99}
+_WX_SNOW = set(range(71, 78)) | {85, 86}
+_WX_FOG = {45, 48}
+_WX_THUNDER = {95, 96, 99}
+
+def forecast_for(points, base_date):
+    """points（[(lat, lng), ...]）と同じ順番で、その日の1時間ごとの天気を返す。
+    各要素は {'code': [24個], 'pop': [24個]} か None。まとめて取れなければ None。"""
+    if not points:
+        return None
+    ahead = (base_date - date.today()).days
+    if ahead > _WX_AHEAD_MAX or ahead < -_WX_BACK_MAX:
+        return None                       # 予報の届かない日。天候なしで組む
+    pts = [(round(float(a), 2), round(float(b), 2)) for a, b in points][:_WX_MAX_POINTS]
+    key = (base_date.isoformat(), tuple(pts))
+    now = time.time()
+    hit = _WX_CACHE.get(key)
+    if hit and now - hit[0] < _WX_TTL:
+        return hit[1]
+
+    q = urllib.parse.urlencode({
+        'latitude': ','.join(str(a) for a, _ in pts),
+        'longitude': ','.join(str(b) for _, b in pts),
+        'hourly': 'weather_code,precipitation_probability',
+        'timezone': 'Asia/Tokyo',
+        'start_date': base_date.isoformat(),
+        'end_date': base_date.isoformat(),
+    })
+    try:
+        with urllib.request.urlopen(f"{_WX_URL}?{q}", timeout=_WX_TIMEOUT) as r:
+            raw = json.loads(r.read().decode('utf-8'))
+    except Exception as e:
+        print(f"[WARN] 予報を取れませんでした: {e}", flush=True)
+        _WX_CACHE[key] = (now, None)
+        return None
+
+    blocks = raw if isinstance(raw, list) else [raw]   # 1地点だけのときは配列にならない
+    out = []
+    for b in blocks:
+        h = (b or {}).get('hourly') or {}
+        code = h.get('weather_code') or []
+        pop = list(h.get('precipitation_probability') or [])
+        if len(code) < 24:
+            out.append(None)
+            continue
+        pop = (pop + [0] * 24)[:24]
+        out.append({'code': [int(c or 0) for c in code[:24]],
+                    'pop': [int(p or 0) for p in pop]})
+    while len(out) < len(pts):
+        out.append(None)
+    _WX_CACHE[key] = (now, out)
+    print(f"[INFO] 予報を取得: {len(pts)}地点 / {base_date.isoformat()}", flush=True)
+    return out
+
+def wx_span(f, start_min, end_min):
+    """その時間帯をひとまとめにして見る。降水確率は最大、空模様は悪いほうを採る。"""
+    if not f:
+        return None
+    a = max(0, min(23, int(start_min // 60)))
+    b = max(a, min(23, int((end_min + 59) // 60)))
+    codes = f['code'][a:b + 1] or [0]
+    pops = f['pop'][a:b + 1] or [0]
+    worst = max(codes, key=lambda c: (c in _WX_THUNDER, c in _WX_SNOW,
+                                      c in _WX_RAIN, c in _WX_FOG, c))
+    pop = max(pops)
+    return {
+        'pop': pop,
+        'sky': _WX_CODE_NAME.get(worst, '曇り'),
+        'wet': pop >= 50 or any(c in _WX_RAIN or c in _WX_SNOW for c in codes),
+        'thunder': any(c in _WX_THUNDER for c in codes),
+        'fog': any(c in _WX_FOG for c in codes),
+    }
+
+# 入賞作品に記録されていた天候のうち、雨がかりと呼べるもの
+_WX_WET_NAMES = ('雨', '雪', '霧')
+
+def wx_weight(s, span):
+    """雨の日に、その撮影地がどれだけ向くかの重み。
+    その地点の入賞作品に、雨・雪・霧で撮られたものが多いほど下がらない。
+    滝や渓流、霧の出る林は雨のほうが撮れる、という実績がそのまま出る。
+    使うのは記録された数だけで、こちらの好みは入れない。"""
+    if not span or not span['wet']:
+        return 1.0
+    counts = s.get('weather')
+    tot = sum(counts.values()) if counts else 0
+    if not tot:
+        return 0.7                         # 天候の記録が無い地点は中ほどに置く
+    wet = sum(k for w, k in counts.items() if w in _WX_WET_NAMES)
+    return max(0.45, min(1.15, 0.45 + 0.9 * (wet / tot)))
+
+# 雨で足元が悪くなりやすい地形。撮影地の名前から分かる範囲だけを見る。
+# ここに無い場所の地面の状態は、手元のデータからは分からないので言わない。
+_WX_SOFT_GROUND = ('遊水地', '湿原', '湿地', '干潟', '河川敷', '砂丘',
+                   '棚田', '水田', '田んぼ', '湿原')
+
+def _soft_ground(s):
+    """その撮影地が、雨でぬかるみやすい地形だと名前から分かるか。"""
+    t = f"{s.get('place') or ''}{s.get('name') or ''}{s.get('area') or ''}"
+    return any(w in t for w in _WX_SOFT_GROUND)
+
 # ──────────────── 撮影計画の組み立て ────────────────
 # 「今日(または指定の日)、どこへ何を撮りに行くか」の行程を、方角ちがいで3案作る。
 # 案を分ける主軸は方角。同じ方角の中で、帰着時刻に収まる1本を組む。
@@ -4196,18 +4331,30 @@ def _route_score(route):
     かかる時間はそのまま引き、走っている時間はさらに少し重く見る。
     同じ帰着時刻なら、現地で待つほうがハンドルを握り続けるより楽なため。"""
     got = sum(st['n'] * _TIMING_WEIGHT.get(st.get('timing', ''), 0.7)
+              * st.get('wx_weight', 1.0)
               for st in route['stops'])
     return (got - route['total_min'] / 60.0
             - route.get('drive_total_min', 0) / 60.0 * 0.3)
 
+def _attach_wx(v, s, arrive, stay_min):
+    """その撮影地に、滞在する時間帯の予報と重みを添える。予報が無ければ何もしない。"""
+    span = wx_span(s.get('wx'), arrive, arrive + stay_min)
+    if not span:
+        return
+    v['wx'] = {'sky': span['sky'], 'pop': span['pop'], 'wet': span['wet'],
+               'thunder': span['thunder']}
+    v['wx_weight'] = round(wx_weight(s, span), 3)
+    v['soft_ground'] = bool(span['wet'] and _soft_ground(v))
+
 def _route(origin, spots, leave_min, return_min, subject=None,
            stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
            sun_rise=None, sun_set=None, order='hour', drop_late=False,
-           max_leg=_PLAN_MAX_LEG_MIN, must=None):
+           max_leg=_PLAN_MAX_LEG_MIN, must=None, stay_over=False):
     """撮影地の集まりから、時刻のついた行程を1本組む。
     必ず落とすのは『帰り着けない』『日が暮れている』地点だけ。
     撮られている時間帯からのずれは『早い・遅い』として添える。
-    drop_late=True のときは、間に合わない地点を捨てた組み方を試す。"""
+    drop_late=True のときは、間に合わない地点を捨てた組み方を試す。
+    stay_over=True は宿泊前提。帰りの移動を勘定に入れず、最後の撮影地で終える。"""
     def fits(s, cur, now):
         """その地点を次に入れられるか。入れられるなら (移動分, 到着時刻, 待ち分) を返す。
         着くのが早すぎるときは、その地点で撮られている時間帯に合わせて待つ。
@@ -4221,8 +4368,10 @@ def _route(origin, spots, leave_min, return_min, subject=None,
         if bh is not None and arrive < bh * 60 - 30:
             wait = (bh * 60 - 30) - arrive
             arrive += wait
-        home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
-        if arrive + stay_min + home > return_min:      # 帰り着けない
+        # 宿泊するなら帰りの移動は要らない。その日の終わりは最後の撮影地。
+        home = 0 if stay_over else drive_minutes(
+            haversine(s['lat'], s['lng'], origin[0], origin[1]))
+        if arrive + stay_min + home > return_min:      # 帰り着けない（終われない）
             return None
         if sun_set is not None and arrive > sun_set:   # 着いたときには日が暮れている
             return None
@@ -4250,7 +4399,9 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                     home_new = drive_minutes(haversine(s['lat'], s['lng'],
                                                        origin[0], origin[1]))
                     extra = move + wait + (home_new - home_now)   # 余計にかかる時間
-                    gain = s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bh), 0.7)
+                    gain = (s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bh), 0.7)
+                            * wx_weight(s, wx_span(s.get('wx'), arrive,
+                                                   arrive + stay_min)))
                     # 走る時間は採点と同じ重み(1.3倍)で見る。ここだけ等倍にしていると、
                     # 採点では割に合わない寄り道を、選ぶ段階で拾ってしまう
                     worth = gain - extra / 60.0 * 1.3
@@ -4270,6 +4421,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
             v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
                       'drive_min': move, 'stay_min': stay_min,
                       'wait_min': wait, 'timing': tm})
+            _attach_wx(v, s, arrive, stay_min)
             stops.append(v)
             now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
             rest.remove(s)
@@ -4293,6 +4445,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
             v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
                       'drive_min': move, 'stay_min': stay_min,
                       'wait_min': wait, 'timing': tm})
+            _attach_wx(v, s, arrive, stay_min)
             stops.append(v)
             now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
 
@@ -4300,7 +4453,8 @@ def _route(origin, spots, leave_min, return_min, subject=None,
         return None
     if must and not any(s['area'] == must for s in stops):
         return None                      # 必ず寄る地点が入らなかった組み方は捨てる
-    home = drive_minutes(haversine(cur[0], cur[1], origin[0], origin[1]))
+    home = 0 if stay_over else drive_minutes(
+        haversine(cur[0], cur[1], origin[0], origin[1]))
     # 1か所目で待つことになるなら、その分だけ遅く出ればよい。
     # 出発してから現地で10時間待つ、という案は計画として意味をなさない。
     start = leave_min + stops[0].get('wait_min', 0)
@@ -4309,22 +4463,34 @@ def _route(origin, spots, leave_min, return_min, subject=None,
            'total_min': (now + home) - start,
            'drive_total_min': drove + home,
            'stay_total_min': stay_min * len(stops),
+           'stay_over': bool(stay_over),
            'last': {'lat': cur[0], 'lng': cur[1]},
            'last_end': now}
 
     # 1か所目が『遅い』なら、何時に出れば間に合うかを添える。
     # ただし希望より4時間以上早い出発になる場合は、助言として現実的でないので言わない。
+    # 朝が雨で確定しているときは、早発ちしても朝の光は無い。だから勧めない。
     first = stops[0]
-    if first['timing'] == '遅い' and first['best_hour'] is not None:
+    morning_wet = bool((first.get('wx') or {}).get('wet'))
+    if first['timing'] == '遅い' and first['best_hour'] is not None and not morning_wet:
         want = first['best_hour'] * 60 - first['drive_min']
         if 0 <= want < leave_min and (leave_min - want) <= 4 * 60:
             out['suggest_leave'] = hhmm(want)
+
+    # 逆に、朝が雨で光が期待できないなら、遅く出ても同じ行程を回れる。
+    # 帰着（宿泊なら撮影終了）までの余りの中で、2時間までずらせることを伝える。
+    if morning_wet and first['best_hour'] is not None and first['best_hour'] <= 9:
+        slack = return_min - (now + home)
+        shift = min(slack, 120)
+        if shift >= 30:
+            out['suggest_later'] = hhmm(start + shift)
+            out['suggest_later_min'] = shift
     return out
 
 def _best_route(origin, group, leave_min, return_min, subject,
                 stay_min=_PLAN_STAY_MIN, max_stops=_PLAN_MAX_STOPS,
                 sun_rise=None, sun_set=None,
-                max_leg=_PLAN_MAX_LEG_MIN, must=None):
+                max_leg=_PLAN_MAX_LEG_MIN, must=None, stay_over=False):
     """同じ方角の中で、組み方を何通りか試して、いちばん良い行程を選ぶ。"""
     best = None
     for order, drop in (('value', False), ('greedy', False), ('hour', False),
@@ -4332,7 +4498,7 @@ def _best_route(origin, group, leave_min, return_min, subject,
         r = _route(origin, group, leave_min, return_min, subject,
                    stay_min=stay_min, max_stops=max_stops,
                    sun_rise=sun_rise, sun_set=sun_set, order=order, drop_late=drop,
-                   max_leg=max_leg, must=must)
+                   max_leg=max_leg, must=must, stay_over=stay_over)
         if r and (best is None or _route_score(r) > _route_score(best)):
             best = r
     return best
@@ -4342,25 +4508,76 @@ def _span(total_min):
     h, m = divmod(int(total_min or 0), 60)
     return f"{h}時間{m}分" if m else f"{h}時間"
 
-def _label(direction, stops, total_min):
-    """『北西へ — 秩父市・長瀞町方面／往復約4時間』のような見出しを作る。"""
+def _spot_label(s):
+    """見出しに出す呼び名。撮影地の名前があればそれを、無ければ市区町村を使う。"""
+    n = str(s.get('place') or '').strip()
+    for suf in ('付近', '周辺'):
+        if n.endswith(suf):
+            n = n[:-len(suf)]
+    n = n.strip() or str(s.get('name') or '').strip()
+    return (n[:16] + '…') if len(n) > 17 else n     # 途中で切ると読みにくいので、よほど長いときだけ
+
+def _how(total_min, stay_over=False):
+    """見出しの末尾。宿泊前提のときは帰りを数えていないので『往復』とは言わない。"""
+    return (f"現地泊 行程約{_span(total_min)}" if stay_over
+            else f"往復約{_span(total_min)}")
+
+def _label(direction, stops, total_min, stay_over=False):
+    """『北へ — 渡良瀬遊水地〜光徳沼ほか2か所／往復約12時間52分』のような見出し。
+    市区町村名より撮影地の名前のほうが、読む人の目を引くため。
+    どこからどこまで回る日なのかが分かるよう、最初と最後の地点を出す。
+    宿泊前提のときは帰りを勘定に入れていないので『往復』とは言わない。"""
     names, seen = [], set()
     for s in stops:
-        n = s['name']
+        n = _spot_label(s)
         if n and n not in seen:
             seen.add(n)
             names.append(n)
-        if len(names) >= 2:
-            break
-    return f"{direction}へ — {'・'.join(names)}方面／往復約{_span(total_min)}"
+    if not names:
+        where = ''
+    elif len(names) == 1:
+        where = names[0]
+    elif len(names) == 2:
+        where = f"{names[0]}〜{names[1]}"
+    else:
+        where = f"{names[0]}〜{names[-1]}ほか{len(names) - 2}か所"
+    return f"{direction}へ — {where}／{_how(total_min, stay_over)}"
+
+def _plan_cautions(r):
+    """その行程に添える注意書き。予報と、撮影地の名前から分かることだけを言う。
+    地面の状態や装備は現地の判断が優先で、ここでは一般に言えることに留める。
+    手元のデータに無い場所ごとの事情は書かない。"""
+    stops = r.get('stops') or []
+    if not any((s.get('wx') or {}).get('wet') for s in stops):
+        return []
+    out = []
+    th = [s for s in stops if (s.get('wx') or {}).get('thunder')]
+    if th:
+        out.append(f"{'・'.join(_spot_label(s) for s in th[:2])}で雷の予報が出ています。"
+                   "開けた水辺や稜線は避け、車に戻れるようにしてください。")
+    soft = [s for s in stops if s.get('soft_ground')]
+    if soft:
+        out.append(f"{'・'.join(_spot_label(s) for s in soft[:2])}は雨で足元がぬかるみます。"
+                   "長靴は中に水や泥が入ると脱げにくく、かえって危ないことがあります。"
+                   "防水の靴とスパッツのほうが安全で、動ける範囲もふだんより狭く見てください。")
+    if r.get('suggest_later'):
+        out.append(f"朝は雨の見込みで、朝の斜光は望めません。"
+                   f"{r['suggest_later']}に出ても同じ行程を回れます。")
+    last = stops[-1] if stops else None
+    if last and (last.get('wx') or {}).get('wet'):
+        out.append("夕方も雨の見込みです。暗くなるのが早いので、"
+                   "無理に粘らず切り上げる判断も持っておいてください。")
+    out.append("予報は変わります。現地での見きわめを優先してください。")
+    return out
 
 def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                 subject=None, max_plans=3, must_latlng=None, must_name=None,
-                easy=False):
+                easy=False, stay_over=False):
     """撮影計画を最大3案つくる。
     ふだんは方角ちがいの3案。行きたい撮影地(must_latlng)が指定されたときは、
     行き先が定まっているので方角では分けず、組み立て方を変えた3案にする。
-    easy=True は『手軽に』(片道90分以内・寄るのは1〜2か所)。"""
+    easy=True は『手軽に』(片道90分以内・寄るのは1〜2か所)。
+    stay_over=True は『撮影地で行程を終える』(宿泊前提。帰りの移動を数えない)。"""
     origin = (float(origin_latlng[0]), float(origin_latlng[1]))
     max_leg = 90 if easy else _PLAN_MAX_LEG_MIN
     cap = 2 if easy else _PLAN_MAX_STOPS
@@ -4389,7 +4606,9 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         move = drive_minutes(km)
         if move > max_leg and s is not anchor:         # 片道が遠すぎる
             continue
-        if leave_min + move * 2 + 30 > return_min:     # 往復と最低限の滞在が入らない
+        # 往復と最低限の滞在が入らない。宿泊するなら帰りは数えない。
+        need = move + 30 if stay_over else move * 2 + 30
+        if leave_min + need > return_min:
             continue
         s['km'], s['drive'] = km, move
         s['dir'] = bearing_label(bearing(origin[0], origin[1], s['lat'], s['lng']))
@@ -4398,6 +4617,14 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
             night.append(s)                            # 夜が本番の被写体は昼の行程に入れない
         else:
             usable.append(s)
+
+    # 候補の撮影地ぶんの予報を、1回の呼び出しでまとめて取る。
+    # 出発地1点では、行き先ごとの違い（午後から回復する方角がある）が見えないため。
+    cand = usable + night
+    fc = forecast_for([(s['lat'], s['lng']) for s in cand], base_date)
+    if fc:
+        for s, f in zip(cand, fc):
+            s['wx'] = f
 
     by_dir = defaultdict(list)
     for s in usable:
@@ -4416,8 +4643,8 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
             start = max(after_min + move, (v['best_hour'] or 20) * 60)
             if start - (after_min + move) > 4 * 60:
                 continue                  # 待ち時間が長すぎる。同じ日の続きとは言えない
-            v.update({'drive_min': move, 'from_last': move,
-                      'start': hhmm(start), 'back': hhmm(start + 60 + home)})
+            v.update({'drive_min': move, 'from_last': move, 'start': hhmm(start),
+                      'back': hhmm(start + 60 if stay_over else start + 60 + home)})
             out.append(v)
             if len(out) >= 3:
                 break
@@ -4434,6 +4661,7 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
             return False
         r.update({'direction': dname, 'kind': kind, 'label': label})
         r['night_options'] = night_near(dname, r['last'], r['last_end'])
+        r['cautions'] = _plan_cautions(r)
         plans.append(r)
         return True
 
@@ -4455,10 +4683,10 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         for stay in (240, 180, 120, _PLAN_STAY_MIN):
             r = _best_route(origin, [anchor], leave_min, return_min, subject,
                             stay_min=stay, max_stops=1, sun_rise=rise, sun_set=sets,
-                            max_leg=max_leg, must=must)
+                            max_leg=max_leg, must=must, stay_over=stay_over)
             if r and add(r, anchor['dir'], 'じっくり',
                          f"{aname}をじっくり — 滞在{stay // 60}時間"
-                         f"{'半' if stay % 60 else ''}／往復約{_span(r['total_min'])}"):
+                         f"{'半' if stay % 60 else ''}／{_how(r['total_min'], stay_over)}"):
                 break
 
         # 道中にも同じ方角にも寄れる場所が無いことはある(都心の一点を指定した場合など)。
@@ -4470,17 +4698,19 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                 break
             r = _best_route(origin, group, leave_min, return_min, subject,
                             max_stops=cap if easy else 3, sun_rise=rise, sun_set=sets,
-                            max_leg=max_leg, must=must)
+                            max_leg=max_leg, must=must, stay_over=stay_over)
             add(r, anchor['dir'], kind,
-                f"{aname}を軸に — {kind}／往復約{_span(r['total_min'])}" if r else '')
+                f"{aname}を軸に — {kind}／{_how(r['total_min'], stay_over)}" if r else '')
     else:
         for dname, group in ranked:
             if len(plans) >= max_plans:
                 break
             r = _best_route(origin, group, leave_min, return_min, subject,
-                            max_stops=cap, sun_rise=rise, sun_set=sets, max_leg=max_leg)
+                            max_stops=cap, sun_rise=rise, sun_set=sets, max_leg=max_leg,
+                            stay_over=stay_over)
             if r:
-                add(r, dname, '方角', _label(dname, r['stops'], r['total_min']))
+                add(r, dname, '方角',
+                    _label(dname, r['stops'], r['total_min'], stay_over))
 
         # 方角が3つ取れない日は、いちばん濃い方角の中で性格を変えた案で埋める
         if plans and len(plans) < max_plans and ranked:
@@ -4490,10 +4720,12 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                     break
                 r = _best_route(origin, group, leave_min, return_min, subject,
                                 stay_min=stay, max_stops=min(cap2, cap),
-                                sun_rise=rise, sun_set=sets, max_leg=max_leg)
+                                sun_rise=rise, sun_set=sets, max_leg=max_leg,
+                                stay_over=stay_over)
                 if r:
                     add(r, dname, kind,
-                        _label(dname, r['stops'], r['total_min']) + f"（{kind}）")
+                        _label(dname, r['stops'], r['total_min'], stay_over)
+                        + f"（{kind}）")
 
     plans.sort(key=_route_score, reverse=True)   # 良い行程から並べる
     for p in plans:                              # 組み立てにだけ使った値は返さない
@@ -4511,6 +4743,8 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         'night_considered': len(night),
         'max_leg_min': max_leg,
         'easy': bool(easy),
+        'stay_over': bool(stay_over),
+        'weather_used': bool(fc),
         'must': ({'requested': True, 'found': anchor is not None,
                   'name': (must_name or (_spot_view(anchor, subject)['name']
                                          if anchor else '')),
@@ -4521,7 +4755,12 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                    '撮影地の座標は市区町村までのため、実際の道のりとは前後します。'
                    + (f'1区間の移動が{max_leg}分を超える撮影地は入れていません。'
                       if max_leg % 60 else
-                      f'1区間の移動が{max_leg // 60}時間を超える撮影地は入れていません。')),
+                      f'1区間の移動が{max_leg // 60}時間を超える撮影地は入れていません。')
+                   + ('天候は撮影地ごとの予報を見て、雨のときは雨で撮られた実績のある'
+                      '撮影地を厚く見ています。' if fc else
+                      'この日は予報が届かないため、天候は見ていません。')
+                   + ('宿泊するものとして、帰りの移動は数えていません。'
+                      if stay_over else '')),
     }
 
 
@@ -4691,13 +4930,14 @@ def api_plan():
     except (TypeError, ValueError):
         must = None
     easy = request.args.get("easy", "") in ("1", "true", "yes")
+    stay_over = request.args.get("stay_over", "") in ("1", "true", "yes")
 
     try:
         out = build_plans((lat, lng), request.args.get("origin_name") or None,
                           base, leave, back, subject=subject,
                           must_latlng=must,
                           must_name=(request.args.get("must_name") or "").strip() or None,
-                          easy=easy)
+                          easy=easy, stay_over=stay_over)
     except Exception:
         import traceback
         print(f"[ERROR] api_plan: {traceback.format_exc()}", flush=True)
