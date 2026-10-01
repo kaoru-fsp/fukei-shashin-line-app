@@ -2023,6 +2023,8 @@ _PEAK_INDEX = None          # [(lat, lng, bin, (被写体,...), 作者名, 地�
                             #   時刻, 天候, 地域, 県, 地名), ...]
 _PEAK_INDEX_AT = 0.0        # 索引を作った時刻
 _PEAK_INDEX_TTL = 6 * 3600  # 6時間で作り直す
+_PEAK_BEST = {}             # 地域 → その地域の代表作品。索引を作るときに一緒に拾う。
+                            # {'title','winner','award','period','pub','img'}
 
 def build_peak_index():
     """Master_Photos を一度だけ読んで、撮り頃の集計に必要なぶんだけ取り出す。
@@ -2030,6 +2032,7 @@ def build_peak_index():
     if not db:
         return None
     idx = []
+    best = {}
     try:
         for d in get_photos():
             pub = d.get('Published', '')
@@ -2062,11 +2065,28 @@ def build_peak_index():
                         d.get('Winner', ''), place + ' ' + area,
                         photo_hour(d.get('Hour')), normalize_weather(d.get('Weather')),
                         area, pref, place))
+
+            # その地域の代表作品を1点だけ覚えておく。受賞順位がいちばん高いもの。
+            # 末尾N（風景写真祭）と画像の無い作品は、この上で既に除いてある。
+            score = calc_award_score(d.get('AwardRank'))
+            cur = best.get(area)
+            if cur is None or score > cur['score']:
+                best[area] = {
+                    'score': score,
+                    'title': title,
+                    'winner': d.get('Winner', '') or '',
+                    'award': d.get('AwardRank', '') or '',
+                    'period': format_period(mo, d.get('Day')),
+                    'pub': pub,
+                    'img': view_image_url(pub, d.get('PicFileName')),
+                }
     except Exception:
         import traceback
         print(f"[ERROR] build_peak_index: {traceback.format_exc()}", flush=True)
         return None
-    print(f"[INFO] peak index built: {len(idx)} 件", flush=True)
+    global _PEAK_BEST
+    _PEAK_BEST = best
+    print(f"[INFO] peak index built: {len(idx)} 件 / 代表作品 {len(best)} 地域", flush=True)
     return idx
 
 def get_peak_index():
@@ -4312,11 +4332,16 @@ def _spot_view(s, subject=None):
             else (s['subjects'].most_common(1)[0][0] if s['subjects'] else ''))
     wx = s['weather'].most_common(2)
     place = s['places'].most_common(1)[0][0] if s['places'] else ''
+    work = _PEAK_BEST.get(s['area']) or {}
     return {'area': s['area'], 'name': short_area(s['area'], s['pref']),
             'place': place, 'lat': s['lat'], 'lng': s['lng'],
             'subject': subj, 'n': s['n'], 'best_hour': hour,
             'subjects': [c for c, _ in s['subjects'].most_common(3)],
-            'weather': [{'name': w, 'n': k} for w, k in wx]}
+            'weather': [{'name': w, 'n': k} for w, k in wx],
+            # その地域の代表作品。撮影地を写真で選べるようにするため。
+            'title': work.get('title', ''), 'winner': work.get('winner', ''),
+            'award': work.get('award', ''), 'period': work.get('period', ''),
+            'img': work.get('img', '')}
 
 def _timing(arrive, best_hour):
     """到着が、その地点で撮られている時間帯に対して早いか遅いかを言葉にする。"""
