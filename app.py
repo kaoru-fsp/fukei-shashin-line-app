@@ -2107,6 +2107,25 @@ def best_work_for(area, target_bin=None):
         return min((target_bin - bi) % 36, (bi - target_bin) % 36)
     return min(slot.items(), key=lambda kv: (near(kv[0]), -kv[1]['score']))[1]
 
+def works_for(area, target_bin=None, limit=6):
+    """その地域の受賞作を、行く時期に近い順に数点返す。
+    撮影地を決めたあと「ここではどんな写真が撮られているのか」を見るためのもの。
+    旬ごとに1点ずつ持っているので、並べると季節のちがいが見える。
+    末尾N（風景写真祭）と画像の無い作品は、索引を作る段階で既に除いてある。"""
+    slot = _PEAK_BEST.get(area)
+    if not slot:
+        return []
+    items = list(slot.items())
+    if target_bin is None:
+        items.sort(key=lambda kv: -kv[1]['score'])
+    else:
+        def near(bi):
+            return min((target_bin - bi) % 36, (bi - target_bin) % 36)
+        items.sort(key=lambda kv: (near(kv[0]), -kv[1]['score']))
+    return [{'title': w['title'], 'winner': w['winner'], 'award': w['award'],
+             'period': w['period'], 'img': w['img']}
+            for _bi, w in items[:limit]]
+
 def get_peak_index():
     """索引を返す。無ければ作る。期限が切れていれば作り直す。"""
     global _PEAK_INDEX, _PEAK_INDEX_AT
@@ -4352,7 +4371,8 @@ def _spot_view(s, subject=None):
     place = s['places'].most_common(1)[0][0] if s['places'] else ''
     # 代表作品。build_plans が時期に合わせて付けていればそれを使う。
     # 付いていない経路から呼ばれたときは、受賞順位がいちばん高いものを使う。
-    work = s.get('work') or best_work_for(s['area'])
+    works = s.get('works') or works_for(s['area'])
+    work = s.get('work') or (works[0] if works else {})
     return {'area': s['area'], 'name': short_area(s['area'], s['pref']),
             'place': place, 'lat': s['lat'], 'lng': s['lng'],
             'subject': subj, 'n': s['n'], 'best_hour': hour,
@@ -4360,7 +4380,9 @@ def _spot_view(s, subject=None):
             'weather': [{'name': w, 'n': k} for w, k in wx],
             'title': work.get('title', ''), 'winner': work.get('winner', ''),
             'award': work.get('award', ''), 'period': work.get('period', ''),
-            'img': work.get('img', '')}
+            'img': work.get('img', ''),
+            # その撮影地の受賞作を数点。季節のちがいが並ぶ。
+            'works': works}
 
 def _timing(arrive, best_hour):
     """到着が、その地点で撮られている時間帯に対して早いか遅いかを言葉にする。"""
@@ -4677,7 +4699,8 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
     # 行程を組む前にここで済ませる。
     _tbin = bin_index(base_date.month, base_date.day)
     for s in cand:
-        s['work'] = best_work_for(s['area'], _tbin)
+        s['works'] = works_for(s['area'], _tbin)
+        s['work'] = s['works'][0] if s['works'] else {}
 
     fc = forecast_for([(s['lat'], s['lng']) for s in cand], base_date)
     if fc:
