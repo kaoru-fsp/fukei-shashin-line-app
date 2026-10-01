@@ -2023,8 +2023,9 @@ _PEAK_INDEX = None          # [(lat, lng, bin, (被写体,...), 作者名, 地�
                             #   時刻, 天候, 地域, 県, 地名), ...]
 _PEAK_INDEX_AT = 0.0        # 索引を作った時刻
 _PEAK_INDEX_TTL = 6 * 3600  # 6時間で作り直す
-_PEAK_BEST = {}             # 地域 → その地域の代表作品。索引を作るときに一緒に拾う。
-                            # {'title','winner','award','period','pub','img'}
+_PEAK_BEST = {}             # 地域 → {旬index: その旬の代表作品}
+                            # 代表作品 = {'score','title','winner','award','period','pub','img'}
+                            # 撮影地を写真で選べるようにするためのもの。索引と一緒に作る。
 
 def build_peak_index():
     """Master_Photos を一度だけ読んで、撮り頃の集計に必要なぶんだけ取り出す。
@@ -2061,17 +2062,20 @@ def build_peak_index():
             )
             if not subs:                        # どの被写体にも当たらない作品は集計に使わない
                 continue
-            idx.append((wll[0], wll[1], bin_index(mo, d.get('Day')), subs,
+            bi = bin_index(mo, d.get('Day'))
+            idx.append((wll[0], wll[1], bi, subs,
                         d.get('Winner', ''), place + ' ' + area,
                         photo_hour(d.get('Hour')), normalize_weather(d.get('Weather')),
                         area, pref, place))
 
-            # その地域の代表作品を1点だけ覚えておく。受賞順位がいちばん高いもの。
+            # 地域ごと・旬ごとに、受賞順位がいちばん高い作品を1点だけ覚えておく。
+            # 旬で分けておくのは、行く時期に近い作品を後で選べるようにするため。
             # 末尾N（風景写真祭）と画像の無い作品は、この上で既に除いてある。
             score = calc_award_score(d.get('AwardRank'))
-            cur = best.get(area)
+            slot = best.setdefault(area, {})
+            cur = slot.get(bi)
             if cur is None or score > cur['score']:
-                best[area] = {
+                slot[bi] = {
                     'score': score,
                     'title': title,
                     'winner': d.get('Winner', '') or '',
@@ -2088,6 +2092,20 @@ def build_peak_index():
     _PEAK_BEST = best
     print(f"[INFO] peak index built: {len(idx)} 件 / 代表作品 {len(best)} 地域", flush=True)
     return idx
+
+def best_work_for(area, target_bin=None):
+    """その地域の代表作品を1点返す。撮影地を写真で選べるようにするためのもの。
+    target_bin（行く時期の旬）に近い作品を優先し、同じくらい近ければ受賞順位の高いほうを選ぶ。
+    10月の計画に1月の雪景色を出しても、行き先を選ぶ材料にならないため。
+    索引がまだ無い、またはその地域の作品が無ければ空の辞書を返す。"""
+    slot = _PEAK_BEST.get(area)
+    if not slot:
+        return {}
+    if target_bin is None:
+        return max(slot.values(), key=lambda w: w['score'])
+    def near(bi):
+        return min((target_bin - bi) % 36, (bi - target_bin) % 36)
+    return min(slot.items(), key=lambda kv: (near(kv[0]), -kv[1]['score']))[1]
 
 def get_peak_index():
     """索引を返す。無ければ作る。期限が切れていれば作り直す。"""
@@ -4332,13 +4350,14 @@ def _spot_view(s, subject=None):
             else (s['subjects'].most_common(1)[0][0] if s['subjects'] else ''))
     wx = s['weather'].most_common(2)
     place = s['places'].most_common(1)[0][0] if s['places'] else ''
-    work = _PEAK_BEST.get(s['area']) or {}
+    # 代表作品。build_plans が時期に合わせて付けていればそれを使う。
+    # 付いていない経路から呼ばれたときは、受賞順位がいちばん高いものを使う。
+    work = s.get('work') or best_work_for(s['area'])
     return {'area': s['area'], 'name': short_area(s['area'], s['pref']),
             'place': place, 'lat': s['lat'], 'lng': s['lng'],
             'subject': subj, 'n': s['n'], 'best_hour': hour,
             'subjects': [c for c, _ in s['subjects'].most_common(3)],
             'weather': [{'name': w, 'n': k} for w, k in wx],
-            # その地域の代表作品。撮影地を写真で選べるようにするため。
             'title': work.get('title', ''), 'winner': work.get('winner', ''),
             'award': work.get('award', ''), 'period': work.get('period', ''),
             'img': work.get('img', '')}
@@ -4653,6 +4672,13 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
     # 候補の撮影地ぶんの予報を、1回の呼び出しでまとめて取る。
     # 出発地1点では、行き先ごとの違い（午後から回復する方角がある）が見えないため。
     cand = usable + night
+
+    # 行く時期に近い代表作品を、撮影地ごとに付けておく。予報と同じ考え方で、
+    # 行程を組む前にここで済ませる。
+    _tbin = bin_index(base_date.month, base_date.day)
+    for s in cand:
+        s['work'] = best_work_for(s['area'], _tbin)
+
     fc = forecast_for([(s['lat'], s['lng']) for s in cand], base_date)
     if fc:
         for s, f in zip(cand, fc):
