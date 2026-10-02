@@ -20,7 +20,7 @@ from datetime import date, timedelta
 from collections import defaultdict, Counter
 from flask import Flask, request, abort, jsonify, make_response
 from linebot import LineBotApi, WebhookHandler
-from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction, MessageAction
+from linebot.models import MessageEvent, TextMessage, LocationMessage, PostbackEvent, TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, PostbackAction, MessageAction, LocationAction
 from linebot.exceptions import InvalidSignatureError
 import unicodedata
 import firebase_admin
@@ -2917,6 +2917,37 @@ def handle_message(event):
                      "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual?openExternalBrowser=1"
             ))
         return
+
+    # 「現在地」だけで送られたとき（リッチメニューの「現在地から探す」）。
+    # 単独では検索の形になっていないため、そのままだと地名として検索されて空振りする。
+    # LINEのリッチメニューからは位置情報を直接送れないので、
+    # ここで「位置情報を送る」ボタン（LocationAction）を出して1タップで送れるようにする。
+    if event.message.text.strip() in ("現在地", "現在地から探す", "いまいる場所", "今いる場所"):
+        _u = USER_LOCATION.get(user_id)
+        _items = [QuickReplyButton(action=LocationAction(label="位置情報を送る"))]
+        if _u:
+            # すでに起点がある人は、送り直さなくてもそのまま探せる。
+            _items.append(QuickReplyButton(action=MessageAction(label="撮り頃を見る", text="撮り頃")))
+            _city = _u.get("city") or "登録済みの地点"
+            _txt = (f"いまの起点は「{_city}」です。\n"
+                    "別の場所にいるときは、下の「位置情報を送る」で更新してください。\n\n"
+                    "この起点から探すには、こんな送り方ができます。\n"
+                    "・撮り頃150 … いま撮り頃の被写体を半径150kmから\n"
+                    "・滝現在地100 … 被写体を指定して半径100kmから\n"
+                    "・現在地r150 … 登録した自宅へ向かう帰り道で")
+        else:
+            _txt = ("まず、いまいる場所を教えてください。\n"
+                    "下の「位置情報を送る」を押すと地図が開きます。\n\n"
+                    "登録すると、こんな探し方ができるようになります。\n"
+                    "・撮り頃150 … いま撮り頃の被写体を半径150kmから\n"
+                    "・滝現在地100 … 被写体を指定して半径100kmから\n"
+                    "・現在地r150 … 登録した自宅へ向かう帰り道で")
+        line_bot_api.reply_message(
+            reply_token,
+            TextSendMessage(text=_txt, quick_reply=QuickReply(items=_items))
+        )
+        return
+
     # 「コマンド」でコマンド一覧と用例を表示
     if event.message.text.strip() in ("コマンド", "こまんど", "コマンド一覧", "command"):
         line_bot_api.reply_message(reply_token, TextSendMessage(text=command_list_text()))
