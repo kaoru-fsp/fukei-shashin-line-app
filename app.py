@@ -5212,6 +5212,308 @@ def api_reindex():
                     "seconds": round(time.time() - t0, 1), "snapshot": saved})
 
 
+# ──────────────── リッチメニューの確認と解除（確認専用） ────────────────
+# 公式アカウントマネージャーで設定したリッチメニューより、Messaging APIで
+# 設定したメニューが優先される。しかもAPIで設定したものはマネージャーの一覧に
+# 出てこないため、古いメニューが残っていても画面の上では気づけない。
+# ここで中身を見て、外す。
+#
+# 優先順位（上が強い）
+#   1. 利用者ごとに結びつけたメニュー
+#   2. APIの既定メニュー            ← ここに古いものが残っていると画面では分からない
+#   3. 公式アカウントマネージャーで設定したメニュー
+#
+# 環境変数 CHECK_KEY を設定したときだけ開く。設定していなければ404を返し、
+# 存在しないのと同じ扱いになる。鍵は X-Check-Key ヘッダーで受け取る。
+# URLに載せるとRenderのアクセスログに平文で残ってしまうため、
+# 問い合わせ文字列では受け付けない。LINEのユーザーIDも同じ理由でPOSTの本文で受け取る。
+
+def _richmenu_brief(rm):
+    """リッチメニュー1件を、古い・新しいを見比べられる形に整える。"""
+    areas = []
+    try:
+        for a in (getattr(rm, "areas", None) or []):
+            act = getattr(a, "action", None)
+            areas.append({
+                "type": getattr(act, "type", "") or "",
+                "label": getattr(act, "label", "") or "",
+                "uri": getattr(act, "uri", "") or "",
+                "text": getattr(act, "text", "") or "",
+                "data": getattr(act, "data", "") or "",
+            })
+    except Exception:
+        areas = []
+    size = getattr(rm, "size", None)
+    return {
+        "richMenuId": getattr(rm, "rich_menu_id", "") or "",
+        "name": getattr(rm, "name", "") or "",
+        "chatBarText": getattr(rm, "chat_bar_text", "") or "",
+        "width": getattr(size, "width", 0) or 0,
+        "height": getattr(size, "height", 0) or 0,
+        "areas": areas,
+    }
+
+
+@app.route("/api/_richmenu", methods=["POST"])
+def api_richmenu():
+    """いま何が設定されているかを読むだけ。何も書き換えない。"""
+    if not _check_key_ok():
+        abort(404)
+
+    body = request.get_json(silent=True) or {}
+    out = {"default": None, "list": [], "user": None, "notes": []}
+
+    # 1. APIの既定メニュー
+    try:
+        out["default"] = line_bot_api.get_default_rich_menu() or None
+    except Exception as e:
+        if "404" in str(e):
+            out["default"] = None          # 設定なし。異常ではない
+        else:
+            out["notes"].append("既定メニューの取得に失敗しました：%s" % e)
+
+    # 2. APIに登録されているメニューの一覧
+    try:
+        for rm in (line_bot_api.get_rich_menu_list() or []):
+            out["list"].append(_richmenu_brief(rm))
+    except Exception as e:
+        out["notes"].append("一覧の取得に失敗しました：%s" % e)
+
+    # 3. 利用者ごとの結びつけ（ユーザーIDが分かる場合のみ）
+    uid = (body.get("userId") or "").strip()
+    if uid:
+        try:
+            out["user"] = {"userId": uid,
+                           "richMenuId": line_bot_api.get_rich_menu_id_of_user(uid) or None}
+        except Exception as e:
+            note = "結びつけはありません" if "404" in str(e) else str(e)
+            out["user"] = {"userId": uid, "richMenuId": None, "note": note}
+
+    return jsonify(out)
+
+
+@app.route("/api/_richmenu/clear-default", methods=["POST"])
+def api_richmenu_clear_default():
+    """APIの既定メニューを外す。外すとマネージャーの設定がそのまま使われる。
+    メニュー自体は消えないので、やり直しがきく。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        line_bot_api.cancel_default_rich_menu()
+        return jsonify({"ok": True, "did": "APIの既定メニューを外しました"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/_richmenu/unlink-user", methods=["POST"])
+def api_richmenu_unlink_user():
+    """利用者ひとりに結びついたメニューを外す。"""
+    if not _check_key_ok():
+        abort(404)
+    uid = ((request.get_json(silent=True) or {}).get("userId") or "").strip()
+    if not uid:
+        return jsonify({"ok": False, "error": "ユーザーIDが空です"}), 400
+    try:
+        line_bot_api.unlink_rich_menu_from_user(uid)
+        return jsonify({"ok": True, "did": "この利用者の結びつけを外しました"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/_richmenu/delete", methods=["POST"])
+def api_richmenu_delete():
+    """メニューそのものを消す。元に戻せないので、使うのは中身を確かめたあと。"""
+    if not _check_key_ok():
+        abort(404)
+    rid = ((request.get_json(silent=True) or {}).get("richMenuId") or "").strip()
+    if not rid:
+        return jsonify({"ok": False, "error": "リッチメニューIDが空です"}), 400
+    try:
+        line_bot_api.delete_rich_menu(rid)
+        return jsonify({"ok": True, "did": "メニューを削除しました"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_RICHMENU_PAGE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>リッチメニューの確認</title>
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  max-width:760px;margin:0 auto;padding:22px 16px 90px;font-size:17px;line-height:1.75;
+  color:#1b2a24;background:#faf9f5;-webkit-text-size-adjust:100%}
+ h1{font-size:23px;margin:0 0 6px}
+ p.lead{color:#5b6b64;margin:0 0 22px;font-size:16px}
+ label{display:block;font-weight:600;margin:18px 0 6px;font-size:16px}
+ input{width:100%;font-size:17px;padding:11px 12px;border:1px solid #cfd8d4;
+  border-radius:8px;box-sizing:border-box;background:#fff}
+ button{font-size:17px;padding:12px 20px;border-radius:8px;border:0;cursor:pointer;
+  background:#143d2e;color:#fff;margin:10px 8px 0 0}
+ button.sub{background:#fff;color:#143d2e;border:1px solid #9fb3aa}
+ button.danger{background:#9b2c2c}
+ .card{background:#fff;border:1px solid #e4e8e6;border-radius:10px;padding:16px 18px;margin:16px 0}
+ .card .card{background:#faf9f5;margin:12px 0 0}
+ .card h2{font-size:18px;margin:0 0 8px}
+ .id{font-family:ui-monospace,Menlo,monospace;font-size:14px;word-break:break-all;
+  color:#3c4a44;background:#f1f4f2;padding:6px 8px;border-radius:6px}
+ .tag{display:inline-block;font-size:14px;padding:3px 10px;border-radius:999px;
+  background:#143d2e;color:#fff;margin-left:8px;vertical-align:2px}
+ ul{margin:8px 0 0;padding-left:1.3em}
+ li{font-size:16px}
+ .note{font-size:15px;color:#5b6b64;margin:8px 0 0}
+ #msg{margin:16px 0;padding:13px 15px;border-radius:8px;display:none;font-size:16px}
+ #msg.ok{display:block;background:#e8f0ec;color:#143d2e}
+ #msg.ng{display:block;background:#fdeaea;color:#9b2c2c}
+</style></head><body>
+<h1>リッチメニューの確認</h1>
+<p class="lead">Messaging API で設定したリッチメニューは、公式アカウントマネージャーの一覧には出てきません。
+古いメニューがここに残っていると、マネージャーで新しく設定しても画面には反映されません。</p>
+
+<label for="key">CHECK_KEY</label>
+<input id="key" type="password" autocomplete="off" placeholder="Render の環境変数に設定した値">
+<label for="uid">LINE ユーザーID（分かる場合だけ。空でよい）</label>
+<input id="uid" type="text" autocomplete="off" placeholder="U で始まる文字列">
+<div><button id="load">いまの設定を見る</button></div>
+
+<div id="msg"></div>
+<div id="out"></div>
+
+<script>
+var $ = function (s) { return document.querySelector(s); };
+function key() { return $("#key").value.trim(); }
+function show(ok, t) { var m = $("#msg"); m.className = ok ? "ok" : "ng"; m.textContent = t; }
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function call(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Check-Key": key() },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    if (r.status === 404) {
+      throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません");
+    }
+    return r.json().catch(function () { return {}; }).then(function (j) {
+      if (!r.ok || j.ok === false) { throw new Error(j.error || ("エラー " + r.status)); }
+      return j;
+    });
+  });
+}
+function load() {
+  if (!key()) { show(false, "CHECK_KEY を入れてください"); return; }
+  show(true, "読み込んでいます…");
+  var uid = $("#uid").value.trim();
+  call("/api/_richmenu", uid ? { userId: uid } : {}).then(function (d) {
+    try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
+    show(true, "読み込みました");
+    render(d);
+  }).catch(function (e) { show(false, e.message); $("#out").innerHTML = ""; });
+}
+function render(d) {
+  var h = "";
+
+  h += '<div class="card"><h2>API の既定メニュー</h2>';
+  if (d.default) {
+    h += '<div class="id">' + esc(d.default) + "</div>";
+    h += '<p class="note">これがマネージャーの設定より優先されます。'
+       + "下の一覧で中身を確かめて、古いメニューなら外してください。</p>";
+    h += '<button class="danger" onclick="clearDefault()">API の既定メニューを外す</button>';
+    h += '<p class="note">外してもメニュー自体は消えません。やり直しがききます。</p>';
+  } else {
+    h += "<p>設定されていません。マネージャーの設定がそのまま使われます。</p>";
+  }
+  h += "</div>";
+
+  if (d.user) {
+    h += '<div class="card"><h2>この利用者に結びついたメニュー</h2>';
+    h += '<div class="id">' + esc(d.user.userId) + "</div>";
+    if (d.user.richMenuId) {
+      h += '<div class="id">' + esc(d.user.richMenuId) + "</div>";
+      h += '<p class="note">既定メニューよりさらに優先されます。</p>';
+      h += '<button class="danger" onclick="unlinkUser()">この結びつけを外す</button>';
+    } else {
+      h += "<p>" + esc(d.user.note || "結びつけはありません") + "</p>";
+    }
+    h += "</div>";
+  }
+
+  h += '<div class="card"><h2>API に登録されているメニュー（' + d.list.length + "件）</h2>";
+  if (!d.list.length) {
+    h += "<p>ありません。</p>";
+  }
+  d.list.forEach(function (m) {
+    h += '<div class="card"><h2>' + esc(m.name || "(名前なし)")
+       + (m.richMenuId === d.default ? '<span class="tag">いま既定</span>' : "") + "</h2>";
+    h += '<div class="id">' + esc(m.richMenuId) + "</div>";
+    h += '<p class="note">メニューバー：' + esc(m.chatBarText)
+       + "　／　" + m.width + "×" + m.height + "</p>";
+    if (m.areas.length) {
+      h += "<ul>";
+      m.areas.forEach(function (a) {
+        h += "<li>" + esc(a.label || a.type) + "：" + esc(a.uri || a.text || a.data) + "</li>";
+      });
+      h += "</ul>";
+    }
+    h += '<button class="sub" onclick="del(\\'' + esc(m.richMenuId) + '\\')">このメニューを削除する</button>';
+    h += "</div>";
+  });
+  h += "</div>";
+
+  if (d.notes && d.notes.length) {
+    h += '<div class="card"><h2>気づいたこと</h2><ul>';
+    d.notes.forEach(function (n) { h += "<li>" + esc(n) + "</li>"; });
+    h += "</ul></div>";
+  }
+
+  $("#out").innerHTML = h;
+}
+function clearDefault() {
+  call("/api/_richmenu/clear-default").then(function (j) {
+    show(true, j.did + "　LINEアプリを完全に終了してから開き直すと切り替わります。");
+    load();
+  }).catch(function (e) { show(false, e.message); });
+}
+function unlinkUser() {
+  var uid = $("#uid").value.trim();
+  call("/api/_richmenu/unlink-user", { userId: uid }).then(function (j) {
+    show(true, j.did);
+    load();
+  }).catch(function (e) { show(false, e.message); });
+}
+function del(rid) {
+  if (!confirm("このメニューを削除します。元には戻せません。よろしいですか？")) { return; }
+  call("/api/_richmenu/delete", { richMenuId: rid }).then(function (j) {
+    show(true, j.did);
+    load();
+  }).catch(function (e) { show(false, e.message); });
+}
+$("#load").addEventListener("click", load);
+$("#key").addEventListener("keydown", function (e) { if (e.key === "Enter") { load(); } });
+try {
+  var saved = sessionStorage.getItem("rmkey");
+  if (saved) { $("#key").value = saved; }
+} catch (e) {}
+</script>
+</body></html>
+"""
+
+
+@app.route("/_richmenu", methods=["GET"])
+def page_richmenu():
+    """ブラウザで開く確認画面。鍵はこの画面の入力欄で受け取り、
+    ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_RICHMENU_PAGE)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
