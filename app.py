@@ -1199,6 +1199,74 @@ def bare_pref_short(user_message):
             return _pf, _ct
     return None, None
 
+
+# 上と同じ考え方を、47都道府県すべてに広げたもの。parse_target_area が使う。
+# 「北広島市」の中の『広島』、「河内長野市」の中の『長野』を拾わないようにする。
+_PREF_SHORT_OF = {}
+for _p in PREF_LATLNG:
+    _PREF_SHORT_OF["北海道" if _p == "北海道" else re.sub(r'[都府県]$', '', _p)] = _p
+
+def _build_area_mask_names():
+    names = set(PREF_LATLNG.keys())
+    names |= set(CITY_LATLNG.keys())
+    for _list in CITY_NAMES_BY_PREF.values():
+        names |= set(_list)
+    keep = [n for n in names
+            if n not in _PREF_SHORT_OF and any(s in n for s in _PREF_SHORT_OF)]
+    return sorted(keep, key=len, reverse=True)
+
+_AREA_MASK_NAMES = _build_area_mask_names()
+print(f"[INFO] area mask names: {len(_AREA_MASK_NAMES)}", flush=True)
+
+def pref_by_short(text):
+    """県の略称だけから県を決める。本物の地名を伏せてから探し、先に現れたものを採る。
+    見つからなければ None。"""
+    masked = text
+    for _n in _AREA_MASK_NAMES:
+        if _n in masked:
+            masked = masked.replace(_n, '　')
+    best = None
+    for _sh, _pf in _PREF_SHORT_OF.items():
+        i = masked.find(_sh)
+        if i >= 0 and (best is None or i < best[0]):
+            best = (i, _pf)
+    return best[1] if best else None
+
+
+# ──────────────── 市区町村名から県を引く索引 ────────────────
+# city_latlng.json（全国2,830件）から、県名を外した呼び方→県 の対応を作る。
+# 長い名前から順に見るのが肝心で、そうしないと
+#   「横浜市港北区」→『北区』→東京都
+#   「上三川町」　　→『三川町』→山形県
+#   「東村山市」　　→『村山市』→山形県
+# のように、短い地名を中に見つけて取り違える。
+# 同じ名前が複数の県にあるとき（伊達市＝北海道と福島県）は AMBIGUOUS を返し、
+# これまでどおり利用者に問い返す。
+_plain_prefs = {}
+for _full in CITY_LATLNG:
+    _m = PREF_RE.match(_full)
+    if not _m:
+        continue
+    _p = _m.group(1)
+    _plain = _full[len(_p):]
+    if len(_plain) >= 2:
+        _plain_prefs.setdefault(_plain, set()).add(_p)
+PLAIN_CITY_SORTED = sorted(_plain_prefs, key=len, reverse=True)
+PLAIN_CITY_TO_PREF = {_k: (next(iter(_v)) if len(_v) == 1 else "AMBIGUOUS")
+                      for _k, _v in _plain_prefs.items()}
+print(f"[INFO] plain city index: {len(PLAIN_CITY_SORTED)} names", flush=True)
+
+def city_by_plain_name(text):
+    """文中にある市区町村名のうち、いちばん長いものを採る。
+    戻り値は (県名 or 'AMBIGUOUS' or None, 座標 or None, 名前 or None)。"""
+    for _name in PLAIN_CITY_SORTED:
+        if _name in text:
+            _pf = PLAIN_CITY_TO_PREF[_name]
+            if _pf == "AMBIGUOUS":
+                return "AMBIGUOUS", None, _name
+            return _pf, (CITY_LATLNG.get(_pf + _name) or PREF_LATLNG[_pf]), _name
+    return None, None, None
+
 # 陸続きで隣接する都道府県（県検索を「県内→隣県」に広げるための表）。海上のみで接する組合せは含めない。
 PREF_NEIGHBORS = {
     "北海道": [],
@@ -1337,16 +1405,36 @@ def parse_target_date(text):
     return parse_period(text)['date']
 
 def parse_target_area(text):
+    """文中から地域を1つ選ぶ。戻り値は (県名 or 'AMBIGUOUS' or None, 座標, 表示名)。
+
+    見る順番が結果を左右する。
+      1. 都道府県名がそのまま書かれていれば、いちばん先に現れたものを採る。
+      2. 次に市区町村名。
+      3. 最後に県の略称（「大阪」「福島」）。本物の地名を伏せてから探す。
+
+    以前は1と3をまとめて先頭で見ていたため、県の略称が別の地名の一部から
+    拾われていた。「大阪府大阪市福島区」は福島県、「河内長野市」は長野県、
+    「北広島市」は広島県と解釈されていた。県名をはっきり書いていても起きる。
+    全国2,830件のうち25件が該当。（2026-10-03 修正）
+    """
+    # 1. 都道府県名そのもの。複数あればいちばん先に現れたものを採る。
+    hit_pos, hit_pref = None, None
     for pref in PREF_LATLNG:
-        if pref == "北海道":
-            short = "北海道"
-        else:
-            short = re.sub(r'[都府県]$', '', pref)
-        if pref in text or short in text:
-            return pref, PREF_LATLNG[pref], pref  # 県のみ指定 → 表示も検索キーも県名（県庁所在地名にしない）
+        i = text.find(pref)
+        if i >= 0 and (hit_pos is None or i < hit_pos):
+            hit_pos, hit_pref = i, pref
+    if hit_pref:
+        # 県のみ指定 → 表示も検索キーも県名（県庁所在地名にしない）
+        return hit_pref, PREF_LATLNG[hit_pref], hit_pref
     for city, pref in CITY_PREF.items():
         if city in text:
             return pref, PREF_LATLNG[pref], city
+    # 2b. 市区町村名そのもの。長い名前を優先して取り違えを防ぐ。
+    _cp, _cll, _cnm = city_by_plain_name(text)
+    if _cp == "AMBIGUOUS":
+        return "AMBIGUOUS", None, _cnm
+    if _cp:
+        return _cp, _cll, _cnm
     for city, pref in CITY_TO_PREF.items():
         # 「美瑛」→「美瑛町」のような前方一致も拾う
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
@@ -1360,6 +1448,11 @@ def parse_target_area(text):
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
         if city in text or (len(city_base) >= 2 and city_base in text):
             return "AMBIGUOUS", None, city
+    # 3. 県の略称。市区町村で決まらなかったときだけ見る。
+    #    「大阪　夜景」のような書き方を拾うための最後の手当て。
+    _sp = pref_by_short(text)
+    if _sp:
+        return _sp, PREF_LATLNG[_sp], _sp
     EXCLUDE_WORDS = {'撮影', '明日', '今日', '明後日', '写真', '行きたい', '探して', '教えて', 'したい', 'ください'}
     words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2 and w not in EXCLUDE_WORDS]
     for word in words:
