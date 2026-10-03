@@ -3052,7 +3052,10 @@ def handle_message(event):
                 text="地名（栃木県、美瑛）や被写体（滝、桜）を送ると撮影地をご提案します。\n"
                      "日付を添えることもできます（週末 京都、明日 滝）。\n\n"
                      "詳しい使い方は「コマンド」と送ってください。\n\n"
-                     "📖 使い方ガイド\nhttps://reference.fukei-shashin.co.jp/guide?openExternalBrowser=1\n\n"
+                     # 2026-10-03 /guide へのリンクを外した。
+                     # あのページには改名前の名前（撮影プランナー・候補マップ）と
+                     # 改定前の料金（PRO 月額990円）が残っていて、いまの案内と食い違う。
+                     # マニュアル(/manual)は10月2日に全面改訂済みなので、こちらだけを出す。
                      "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual?openExternalBrowser=1"
             ))
         return
@@ -5841,13 +5844,38 @@ function runAll() {
   });
 }
 
+/* ブラウザによっては navigator.clipboard が使えない。そのときのために、
+   選択済みの入力欄に結果を出しておき、そのままコピーできるようにする。 */
 function copyAll() {
   var t = "地点\\t項目\\t結果\\t件数\\t秒\\n";
   rows.forEach(function (r) {
     t += [r.pref, r.what, r.s, r.n, (r.ms / 1000).toFixed(1)].join("\\t") + "\\n";
   });
-  navigator.clipboard.writeText(t).then(function () { say("結果をコピーしました。そのまま貼り付けられます。"); },
-    function () { say("コピーできませんでした。表を選んで手でコピーしてください。", true); });
+  var ta = document.getElementById("dump");
+  if (!ta) {
+    ta = document.createElement("textarea");
+    ta.id = "dump";
+    ta.readOnly = true;
+    ta.style.cssText = "width:100%;height:220px;margin-top:14px;font-size:14px;padding:10px;"
+      + "border:1px solid #cfd8d4;border-radius:8px;font-family:ui-monospace,Menlo,monospace";
+    document.getElementById("out").parentNode.appendChild(ta);
+  }
+  ta.value = t;
+  ta.focus();
+  ta.setSelectionRange(0, t.length);
+  var done = false;
+  try { done = document.execCommand("copy"); } catch (e) { done = false; }
+  if (done) {
+    say("結果をコピーしました。そのまま貼り付けられます。");
+    return;
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(
+      function () { say("結果をコピーしました。そのまま貼り付けられます。"); },
+      function () { say("下の欄に結果を出して全選択しました。⌘C（WindowsはCtrl+C）でコピーしてください。", true); });
+    return;
+  }
+  say("下の欄に結果を出して全選択しました。⌘C（WindowsはCtrl+C）でコピーしてください。", true);
 }
 
 $("#run").addEventListener("click", runAll);
