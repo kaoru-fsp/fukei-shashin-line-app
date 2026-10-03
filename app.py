@@ -1153,6 +1153,52 @@ PREF_SAME_NAME_CITY = {
     "宮崎県": "宮崎市", "鹿児島県": "鹿児島市", "沖縄県": "沖縄市",
 }
 
+# ──────────────── 県の略称の取り違え防止 ────────────────
+# 「静岡」「京都」のように県・府から末尾の都/府/県を取った呼び方は、同名の市と
+# 県のどちらを指すのか分からない。そこで単独で送られたときだけ、市→県→隣県→全国と
+# 段階的に広げて答える（reply_staged_area）。
+#
+# ところがこの略称は、別の地名の一部としても現れる。
+#     「東京都板橋区」の中の『京都』   ← 東[京都]板橋区
+#     「長野原町」の中の『長野』
+#     「大阪市福島区」の中の『福島』
+# 以前は単に含まれるかどうかだけを見ていたため、東京都内の地名を送った方は
+# 全員が京都の案内を受け取っていた。全国2,830件のうち73件が誤判定で、
+# うち66件が東京都内。利用者のいちばん多い地域がまるごと該当していた。
+# （2026-10-03 修正）
+#
+# 直し方は、判定の前に本物の地名を伏せること。「東京都板橋区」を伏せてしまえば
+# 残りに『京都』は出てこない。「京都　紅葉」のように略称だけなら何も伏せられず、
+# これまでどおり段階検索に入る。
+_SHORT_PREF_OF = {re.sub(r'[都府県]$', '', _p): (_p, _c)
+                  for _p, _c in PREF_SAME_NAME_CITY.items()}
+
+def _build_short_mask_names():
+    """略称を中に含んでしまう本物の地名を集める。長い名前から先に伏せるため降順に並べる。
+    略称そのもの（「京都」「静岡」）は伏せる対象から外す。伏せてしまうと判定できなくなる。"""
+    names = set(PREF_LATLNG.keys())                  # 東京都・京都府 など
+    names |= set(CITY_LATLNG.keys())                 # 東京都板橋区 など（県名つき）
+    for _list in CITY_NAMES_BY_PREF.values():
+        names |= set(_list)                          # 板橋区・長野原町 など（県名なし）
+    keep = [n for n in names
+            if n not in _SHORT_PREF_OF and any(s in n for s in _SHORT_PREF_OF)]
+    return sorted(keep, key=len, reverse=True)
+
+_SHORT_MASK_NAMES = _build_short_mask_names()
+print(f"[INFO] short-pref mask names: {len(_SHORT_MASK_NAMES)}", flush=True)
+
+def bare_pref_short(user_message):
+    """県・府の略称だけが単独で送られたなら (県名, 同名市) を返す。
+    別の地名の一部として現れただけなら (None, None)。"""
+    masked = user_message
+    for _n in _SHORT_MASK_NAMES:
+        if _n in masked:
+            masked = masked.replace(_n, '　')
+    for _sh, (_pf, _ct) in _SHORT_PREF_OF.items():
+        if _sh in masked:
+            return _pf, _ct
+    return None, None
+
 # 陸続きで隣接する都道府県（県検索を「県内→隣県」に広げるための表）。海上のみで接する組合せは含めない。
 PREF_NEIGHBORS = {
     "北海道": [],
@@ -3668,11 +3714,8 @@ def handle_message(event):
         _short_pref = None
         _short_city = None
         if not _amb_keyword:
-            for _pf, _ct in PREF_SAME_NAME_CITY.items():
-                _sh = re.sub(r'[都府県]$', '', _pf)  # 末尾の都/府/県のみ除去（「京都府」→「京都」、「東京都」を誤って「京」にしない）
-                if _sh in user_message and _pf not in user_message and _ct not in user_message:
-                    _short_pref, _short_city = _pf, _ct
-                    break
+            # 本物の地名を伏せてから略称を探す。詳しくは bare_pref_short の説明を参照。
+            _short_pref, _short_city = bare_pref_short(user_message)
         if _short_pref:
             _u = USER_LOCATION.get(user_id)
             _ol = (_u["lat"], _u["lng"]) if _u else None
