@@ -5650,6 +5650,236 @@ def page_richmenu():
     return resp
 
 
+# ──────────────── 全国一括点検（確認専用） ────────────────
+# これまでの確認が東京起点に偏っていたため、47都道府県の代表地点から
+# 同じ検索を一度に走らせて、結果を並べて見るための画面。
+#
+# 検索そのものは既存の /api/_check を呼ぶだけで、ここで新しい検索は書かない。
+# 同じ入口を使うので、本番の利用者がたどる道とずれない。
+#
+# 1件ずつブラウザから呼び、届いたそばから表に足していく。
+# まとめて1回のリクエストにすると、47地点ぶんの検索が終わる前に
+# Render側で時間切れになるため。同時に走らせるのは2件まで。
+#
+# 環境変数 CHECK_KEY を設定したときだけ開く。鍵は X-Check-Key ヘッダーで受け取る。
+
+_SWEEP_PAGE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>全国一括点検</title>
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  max-width:980px;margin:0 auto;padding:22px 16px 90px;font-size:17px;line-height:1.7;
+  color:#1b2a24;background:#faf9f5;-webkit-text-size-adjust:100%}
+ h1{font-size:23px;margin:0 0 6px}
+ p.lead{color:#5b6b64;margin:0 0 20px;font-size:16px}
+ label{display:block;font-weight:600;margin:16px 0 6px;font-size:16px}
+ input[type=text],input[type=password],input[type=number]{width:100%;font-size:17px;padding:11px 12px;
+  border:1px solid #cfd8d4;border-radius:8px;box-sizing:border-box;background:#fff}
+ .checks{margin:14px 0 0}
+ .checks label{display:block;font-weight:400;margin:8px 0;font-size:16px;cursor:pointer}
+ .checks input{margin-right:8px;transform:scale(1.3)}
+ button{font-size:17px;padding:12px 20px;border-radius:8px;border:0;cursor:pointer;
+  background:#143d2e;color:#fff;margin:14px 8px 0 0}
+ button.sub{background:#fff;color:#143d2e;border:1px solid #9fb3aa}
+ button:disabled{opacity:.45;cursor:default}
+ .card{background:#fff;border:1px solid #e4e8e6;border-radius:10px;padding:16px 18px;margin:16px 0}
+ #status{margin:16px 0;padding:13px 15px;border-radius:8px;display:none;font-size:16px;
+  background:#e8f0ec;color:#143d2e}
+ #status.ng{background:#fdeaea;color:#9b2c2c}
+ table{width:100%;border-collapse:collapse;margin-top:10px;font-size:15px}
+ th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #eceeed;vertical-align:top}
+ th{font-size:14px;color:#5b6b64;font-weight:600;position:sticky;top:0;background:#faf9f5}
+ td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+ tr.warn td{background:#fdf4f4}
+ tr.warn td:first-child::before{content:"● ";color:#9b2c2c}
+ .sum{font-size:16px;margin:0 0 4px}
+ .sum b{font-size:19px}
+ .hint{font-size:14px;color:#5b6b64;margin-top:10px}
+</style></head><body>
+<h1>全国一括点検</h1>
+<p class="lead">47都道府県の代表地点から同じ検索を走らせて、結果を並べます。
+0件になる地域や、エラーになる地域を見つけるためのものです。
+検索は本番と同じ入口（<code>/api/_check</code>）を通ります。</p>
+
+<label for="key">CHECK_KEY</label>
+<input id="key" type="password" autocomplete="off" placeholder="Render の環境変数に設定した値">
+
+<label>何を調べるか</label>
+<div class="checks">
+  <label><input type="checkbox" id="m_peaks" checked>撮り頃の被写体（その地点の周りで、いま撮り頃のもの）</label>
+  <label><input type="checkbox" id="m_place" checked>地域＋被写体（県名と被写体を指定した検索）</label>
+  <label><input type="checkbox" id="m_three">3地点の選定（撮影プランの下敷きになる処理）</label>
+</div>
+
+<label for="subjects">被写体（読点か空白で区切る。地域＋被写体で使う）</label>
+<input id="subjects" type="text" value="紅葉　コスモス　滝">
+
+<label for="radius">半径（km）</label>
+<input id="radius" type="number" value="150" min="10" max="500">
+
+<div>
+  <button id="run">点検を始める</button>
+  <button id="stop" class="sub" disabled>中止</button>
+  <button id="copy" class="sub" disabled>結果をコピー</button>
+</div>
+
+<div id="status"></div>
+<div id="out"></div>
+
+<script>
+var PREFS = __PREFS__;
+var $ = function (s) { return document.querySelector(s); };
+var rows = [], stopped = false, running = false;
+
+function key() { return $("#key").value.trim(); }
+function say(t, ng) { var s = $("#status"); s.style.display = "block"; s.className = ng ? "ng" : ""; s.textContent = t; }
+function esc(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function check(params) {
+  var q = new URLSearchParams(params).toString();
+  var t0 = Date.now();
+  return fetch("/api/_check?" + q, { headers: { "X-Check-Key": key() } }).then(function (r) {
+    if (r.status === 404) { throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません"); }
+    return r.json().catch(function () { return { error: "返事を読めませんでした" }; })
+      .then(function (j) { j.__ms = Date.now() - t0; return j; });
+  });
+}
+
+/* 1地点ぶんの仕事を並べる。被写体ごとに1件ずつ。 */
+function jobsFor(p) {
+  var out = [], subs = $("#subjects").value.split(/[,、\s　]+/).filter(Boolean);
+  var r = $("#radius").value || "150";
+  if ($("#m_peaks").checked) {
+    out.push({ pref: p.name, what: "撮り頃", params: { mode: "peaks", clat: p.lat, clng: p.lng, radius: r } });
+  }
+  if ($("#m_place").checked) {
+    subs.forEach(function (s) {
+      out.push({
+        pref: p.name, what: "地域＋" + s,
+        params: { mode: "place", place: p.name, subject: s, lat: p.lat, lng: p.lng, origin_name: p.name, radius: r }
+      });
+    });
+  }
+  if ($("#m_three").checked) {
+    out.push({ pref: p.name, what: "3地点", params: { mode: "three", clat: p.lat, clng: p.lng, radius: r, origin_name: p.name } });
+  }
+  return out;
+}
+
+/* 返事を見て、気にすべきものかどうかを決める */
+function judge(what, j) {
+  if (j.error) return { n: "-", s: "エラー: " + (j.error === "exception" ? "例外" : j.error), warn: true };
+  if (what === "撮り頃") {
+    var n = (j.rows || []).length;
+    return { n: n, s: n ? "撮り頃 " + n + "件" : "0件", warn: n === 0 };
+  }
+  if (what === "3地点") {
+    var n = j.count || 0;
+    return { n: n, s: j.status === "none" ? "選べず" : n + "地点", warn: n < 3 };
+  }
+  var c = j.count || 0;
+  return { n: c, s: (j.status || "?") + " / " + c + "件", warn: (c === 0) };
+}
+
+function render() {
+  var warn = rows.filter(function (r) { return r.warn; }).length;
+  var h = '<div class="card">';
+  h += '<p class="sum">調べた項目 <b>' + rows.length + '</b> 件　／　気になるもの <b>' + warn + '</b> 件</p>';
+  h += "<table><tr><th>地点</th><th>項目</th><th>結果</th><th>件数</th><th>秒</th></tr>";
+  rows.forEach(function (r) {
+    h += '<tr class="' + (r.warn ? "warn" : "") + '"><td>' + esc(r.pref) + "</td><td>" + esc(r.what)
+       + "</td><td>" + esc(r.s) + '</td><td class="n">' + esc(r.n) + '</td><td class="n">'
+       + (r.ms / 1000).toFixed(1) + "</td></tr>";
+  });
+  h += "</table>";
+  h += '<p class="hint">「気になるもの」は、0件・3地点に満たない・エラー、のいずれかです。'
+     + "0件が必ず不具合とは限りません（その県にその被写体の入賞作品が無いだけのこともあります）。"
+     + "まわりの県と見比べて、そこだけ極端なら疑ってください。</p>";
+  h += "</div>";
+  $("#out").innerHTML = h;
+}
+
+function runAll() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  var jobs = [];
+  PREFS.forEach(function (p) { jobs = jobs.concat(jobsFor(p)); });
+  if (!jobs.length) { say("調べる項目を1つ以上選んでください", true); return; }
+  rows = []; stopped = false; running = true;
+  $("#run").disabled = true; $("#stop").disabled = false; $("#copy").disabled = true;
+  var i = 0, done = 0, failedHard = null;
+
+  function next() {
+    if (stopped || i >= jobs.length) { return Promise.resolve(); }
+    var job = jobs[i++];
+    return check(job.params).then(function (j) {
+      var v = judge(job.what, j);
+      rows.push({ pref: job.pref, what: job.what, s: v.s, n: v.n, warn: v.warn, ms: j.__ms });
+    }).catch(function (e) {
+      failedHard = e.message;
+      rows.push({ pref: job.pref, what: job.what, s: "エラー: " + e.message, n: "-", warn: true, ms: 0 });
+      if (/CHECK_KEY/.test(e.message)) { stopped = true; }
+    }).then(function () {
+      done++;
+      say("点検中… " + done + " / " + jobs.length + "（" + rows[rows.length - 1].pref + "）");
+      render();
+      return next();
+    });
+  }
+
+  var lanes = [next(), next()];          // 同時に2件まで。Renderを詰まらせないため
+  Promise.all(lanes).then(function () {
+    running = false;
+    $("#run").disabled = false; $("#stop").disabled = true; $("#copy").disabled = false;
+    var warn = rows.filter(function (r) { return r.warn; }).length;
+    if (failedHard && /CHECK_KEY/.test(failedHard)) { say(failedHard, true); }
+    else if (stopped) { say("中止しました（" + rows.length + "件まで）"); }
+    else { say("終わりました。" + rows.length + "件を調べ、気になるものが " + warn + "件。", warn > 0); }
+    render();
+  });
+}
+
+function copyAll() {
+  var t = "地点\\t項目\\t結果\\t件数\\t秒\\n";
+  rows.forEach(function (r) {
+    t += [r.pref, r.what, r.s, r.n, (r.ms / 1000).toFixed(1)].join("\\t") + "\\n";
+  });
+  navigator.clipboard.writeText(t).then(function () { say("結果をコピーしました。そのまま貼り付けられます。"); },
+    function () { say("コピーできませんでした。表を選んで手でコピーしてください。", true); });
+}
+
+$("#run").addEventListener("click", runAll);
+$("#stop").addEventListener("click", function () { stopped = true; say("中止しています…"); });
+$("#copy").addEventListener("click", copyAll);
+try {
+  var saved = sessionStorage.getItem("rmkey");
+  if (saved) { $("#key").value = saved; }
+} catch (e) {}
+$("#key").addEventListener("change", function () {
+  try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
+});
+</script>
+</body></html>
+"""
+
+
+@app.route("/_sweep", methods=["GET"])
+def page_sweep():
+    """ブラウザで開く全国一括点検の画面。鍵はこの画面の入力欄で受け取り、
+    ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    prefs = [{"name": _p, "lat": _ll[0], "lng": _ll[1]} for _p, _ll in PREF_LATLNG.items()]
+    html = _SWEEP_PAGE.replace("__PREFS__", json.dumps(prefs, ensure_ascii=False))
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
