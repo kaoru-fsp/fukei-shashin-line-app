@@ -5071,6 +5071,314 @@ def api_michinoeki():
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
 
+# ──────────────── サービスエリア・パーキングエリア ────────────────
+# 高速道路のSA・PA。道の駅と同じ扱いで、ルート沿いの立ち寄り先として使う。
+#
+# 道の駅と違い、国が座標つきの一覧を出していない。そこで OpenStreetMap から
+# 一度だけ取り込んでFirestoreに置く（下の /_import-sapa）。以後は道の駅と同じで、
+# 読み取りはメモリに載せて使い回すだけなので、呼び出しごとの費用は発生しない。
+# 出典表記：© OpenStreetMap contributors（ODbL）。表示する画面に必ず添える。
+_SAPA = None
+_SAPA_AT = 0.0
+_SAPA_TTL = 24 * 3600
+
+def get_sapa():
+    """SA・PAの一覧を返す。無ければ読む。期限が切れていれば読み直す。"""
+    global _SAPA, _SAPA_AT
+    now = time.time()
+    if _SAPA is not None and (now - _SAPA_AT) < _SAPA_TTL:
+        return _SAPA
+    if not db:
+        return _SAPA or []
+    rows = []
+    try:
+        for doc in db.collection('sapa').stream():
+            d = doc.to_dict() or {}
+            try:
+                rows.append({'name': d.get('name', ''), 'pref': d.get('pref', ''),
+                             'city': d.get('city', ''), 'site': '',
+                             'kind': d.get('kind', 'SA'),
+                             'lat': float(d['lat']), 'lng': float(d['lng'])})
+            except (KeyError, TypeError, ValueError):
+                continue
+    except Exception:
+        import traceback
+        print(f"[ERROR] get_sapa: {traceback.format_exc()}", flush=True)
+        return _SAPA or []
+    print(f"[INFO] sapa loaded: {len(rows)}件", flush=True)
+    _SAPA, _SAPA_AT = rows, now
+    return rows
+
+
+def nearest_city(lat, lng):
+    """いちばん近い市区町村を city_latlng.json から引いて (県, 市区町村) を返す。
+    OpenStreetMap は所在地を持たないので、座標から当てる。表示に使うだけなので、
+    役所の位置を基準にしたこの当て方で足りる。"""
+    best, bd = None, None
+    for full, (clat, clng) in CITY_LATLNG.items():
+        d = (clat - lat) ** 2 + ((clng - lng) * 0.81) ** 2     # 比較だけなので平方のまま
+        if bd is None or d < bd:
+            bd, best = d, full
+    if not best:
+        return "", ""
+    m = PREF_RE.match(best)
+    pref = m.group(1) if m else ""
+    return pref, best[len(pref):]
+
+
+@app.route("/api/_import/sapa", methods=["POST"])
+def api_import_sapa():
+    """SA・PAの一覧を受け取ってFirestoreに入れる。取り込み専用。
+    CHECK_KEY を X-Check-Key ヘッダーで送れる人だけが使える。
+
+    本文（JSON）
+      items   [{name, lat, lng, kind}] の配列。1回あたり500件まで
+    同じ場所を二度入れないよう、文書IDは名前と座標から作る。何度流し込んでも増えない。
+    """
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreにつながっていません"}), 500
+    items = (request.get_json(silent=True) or {}).get("items")
+    if not isinstance(items, list) or not items:
+        return jsonify({"ok": False, "error": "items が空です"}), 400
+    if len(items) > 500:
+        return jsonify({"ok": False, "error": "1回500件までにしてください"}), 400
+
+    saved, skipped = 0, 0
+    batch = db.batch()
+    n_in_batch = 0
+    for it in items:
+        try:
+            name = str(it.get("name", "")).strip()
+            lat = float(it["lat"]); lng = float(it["lng"])
+        except (KeyError, TypeError, ValueError):
+            skipped += 1; continue
+        if not name or not (20 < lat < 50) or not (120 < lng < 150):
+            skipped += 1; continue          # 名前が無いもの、日本の外は入れない
+        if "道の駅" in name:
+            skipped += 1; continue          # 道の駅は別に持っているので重ねない
+        kind = "PA" if str(it.get("kind", "")).upper() == "PA" else "SA"
+        pref, city = nearest_city(lat, lng)
+        doc_id = re.sub(r'[^0-9A-Za-zぁ-んァ-ン一-龥]', '',
+                        f"{name}{round(lat,3)}{round(lng,3)}")[:120] or f"{round(lat,4)}_{round(lng,4)}"
+        batch.set(db.collection('sapa').document(doc_id), {
+            "name": name, "lat": lat, "lng": lng, "kind": kind,
+            "pref": pref, "city": city, "source": "OpenStreetMap",
+        })
+        saved += 1; n_in_batch += 1
+        if n_in_batch >= 400:
+            batch.commit(); batch = db.batch(); n_in_batch = 0
+    if n_in_batch:
+        batch.commit()
+
+    global _SAPA, _SAPA_AT
+    _SAPA, _SAPA_AT = None, 0.0        # 次の検索で読み直させる
+    return jsonify({"ok": True, "saved": saved, "skipped": skipped})
+
+
+@app.route("/api/_import/sapa/count", methods=["GET"])
+def api_import_sapa_count():
+    """いま何件入っているかを返す。取り込みの前後を見比べるため。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        n = sum(1 for _ in db.collection('sapa').stream()) if db else 0
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "count": n})
+
+
+_IMPORT_SAPA_PAGE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SA・PAの取り込み</title>
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+  max-width:780px;margin:0 auto;padding:22px 16px 90px;font-size:17px;line-height:1.75;
+  color:#1b2a24;background:#faf9f5;-webkit-text-size-adjust:100%}
+ h1{font-size:23px;margin:0 0 6px}
+ p.lead{color:#5b6b64;margin:0 0 20px;font-size:16px}
+ label{display:block;font-weight:600;margin:16px 0 6px;font-size:16px}
+ input{width:100%;font-size:17px;padding:11px 12px;border:1px solid #cfd8d4;
+  border-radius:8px;box-sizing:border-box;background:#fff}
+ button{font-size:17px;padding:12px 20px;border-radius:8px;border:0;cursor:pointer;
+  background:#143d2e;color:#fff;margin:14px 8px 0 0}
+ button.sub{background:#fff;color:#143d2e;border:1px solid #9fb3aa}
+ button:disabled{opacity:.45;cursor:default}
+ .card{background:#fff;border:1px solid #e4e8e6;border-radius:10px;padding:16px 18px;margin:16px 0}
+ #msg{margin:16px 0;padding:13px 15px;border-radius:8px;display:none;font-size:16px;
+  background:#e8f0ec;color:#143d2e;white-space:pre-wrap}
+ #msg.ng{background:#fdeaea;color:#9b2c2c}
+ table{width:100%;border-collapse:collapse;margin-top:8px;font-size:15px}
+ td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #eceeed}
+ th{font-size:14px;color:#5b6b64}
+ .note{font-size:14px;color:#5b6b64}
+</style></head><body>
+<h1>SA・PAの取り込み</h1>
+<p class="lead">高速道路のサービスエリア・パーキングエリアを OpenStreetMap から取り込みます。
+一度行えば、以後は道の駅と同じようにサーバーの中だけで完結します。
+取り込みは何度行っても重複しません。</p>
+
+<label for="key">CHECK_KEY</label>
+<input id="key" type="password" autocomplete="off" placeholder="Render の環境変数に設定した値">
+<div>
+  <button id="count" class="sub">いま何件あるか見る</button>
+  <button id="run">取り込む</button>
+</div>
+
+<div id="msg"></div>
+<div id="out"></div>
+
+<p class="note" style="margin-top:28px">
+出典：© OpenStreetMap contributors（ODbL）。所在地（県・市区町村）は座標から
+いちばん近い市区町村を当てたもので、OpenStreetMap の情報ではありません。
+</p>
+
+<script>
+var $ = function (s) { return document.querySelector(s); };
+function key() { return $("#key").value.trim(); }
+function say(t, ng) { var m = $("#msg"); m.style.display = "block"; m.className = ng ? "ng" : ""; m.textContent = t; }
+function esc(s) { return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+var OVERPASS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter"
+];
+var QUERY = '[out:json][timeout:240];'
+  + 'area["ISO3166-1"="JP"][admin_level=2]->.jp;'
+  + '('
+  + ' node["highway"~"^(services|rest_area)$"](area.jp);'
+  + ' way["highway"~"^(services|rest_area)$"](area.jp);'
+  + ' relation["highway"~"^(services|rest_area)$"](area.jp);'
+  + ');'
+  + 'out center tags;';
+
+function fetchOverpass() {
+  var i = 0;
+  function tryOne() {
+    if (i >= OVERPASS.length) { return Promise.reject(new Error("OpenStreetMap から取得できませんでした")); }
+    var url = OVERPASS[i++];
+    say("OpenStreetMap から取得しています…（1〜2分かかることがあります）\\n" + url);
+    return fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "data=" + encodeURIComponent(QUERY)
+    }).then(function (r) {
+      if (!r.ok) { throw new Error("HTTP " + r.status); }
+      return r.json();
+    }).catch(function () { return tryOne(); });
+  }
+  return tryOne();
+}
+
+function normalise(json) {
+  var out = [], seen = {};
+  (json.elements || []).forEach(function (el) {
+    var t = el.tags || {};
+    var name = t["name:ja"] || t.name || "";
+    if (!name) { return; }
+    if (name.indexOf("道の駅") >= 0) { return; }
+    var lat = el.lat, lon = el.lon;
+    if (lat == null && el.center) { lat = el.center.lat; lon = el.center.lon; }
+    if (lat == null || lon == null) { return; }
+    var kind = (t.highway === "rest_area") ? "PA" : "SA";
+    // 同じ場所が複数の形（点と面）で入っていることがあるので、名前と概略の座標で1つにする
+    var k = name + "@" + lat.toFixed(2) + "," + lon.toFixed(2);
+    if (seen[k]) { return; }
+    seen[k] = 1;
+    out.push({ name: name, lat: lat, lng: lon, kind: kind });
+  });
+  return out;
+}
+
+function post(items) {
+  return fetch("/api/_import/sapa", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Check-Key": key() },
+    body: JSON.stringify({ items: items })
+  }).then(function (r) {
+    if (r.status === 404) { throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません"); }
+    return r.json();
+  });
+}
+
+function showCount() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  fetch("/api/_import/sapa/count", { headers: { "X-Check-Key": key() } })
+    .then(function (r) {
+      if (r.status === 404) { throw new Error("CHECK_KEY が違うか、設定されていません"); }
+      return r.json();
+    })
+    .then(function (j) { say("いま登録されているSA・PA：" + j.count + "件"); })
+    .catch(function (e) { say(e.message, true); });
+}
+
+function run() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#run").disabled = true; $("#count").disabled = true;
+  fetchOverpass().then(function (json) {
+    var items = normalise(json);
+    if (!items.length) { throw new Error("取得できましたが、SA・PAが1件もありませんでした"); }
+    say("取得しました：" + items.length + "件。これから登録します…");
+    var sa = items.filter(function (x) { return x.kind === "SA"; }).length;
+    $("#out").innerHTML = '<div class="card"><p>取得した件数：<b>' + items.length
+      + "</b> 件（SA " + sa + " / PA " + (items.length - sa) + "）</p>"
+      + "<table><tr><th>名前</th><th>種別</th><th>緯度</th><th>経度</th></tr>"
+      + items.slice(0, 10).map(function (x) {
+          return "<tr><td>" + esc(x.name) + "</td><td>" + x.kind + "</td><td>"
+            + x.lat.toFixed(4) + "</td><td>" + x.lng.toFixed(4) + "</td></tr>";
+        }).join("")
+      + "</table><p class='note'>最初の10件だけ表示しています。</p></div>";
+    // 500件ずつ送る
+    var chunks = [], n = 400;
+    for (var i = 0; i < items.length; i += n) { chunks.push(items.slice(i, i + n)); }
+    var saved = 0, skipped = 0, done = 0;
+    function next() {
+      if (!chunks.length) {
+        say("取り込みが終わりました。\\n登録 " + saved + "件／見送り " + skipped + "件");
+        $("#run").disabled = false; $("#count").disabled = false;
+        return;
+      }
+      var c = chunks.shift();
+      return post(c).then(function (j) {
+        if (j.ok === false) { throw new Error(j.error || "登録に失敗しました"); }
+        saved += j.saved || 0; skipped += j.skipped || 0; done++;
+        say("登録しています… " + saved + " 件");
+        return next();
+      });
+    }
+    return next();
+  }).catch(function (e) {
+    say(e.message, true);
+    $("#run").disabled = false; $("#count").disabled = false;
+  });
+}
+
+$("#run").addEventListener("click", run);
+$("#count").addEventListener("click", showCount);
+try { var s = sessionStorage.getItem("rmkey"); if (s) { $("#key").value = s; } } catch (e) {}
+$("#key").addEventListener("change", function () {
+  try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
+});
+</script>
+</body></html>
+"""
+
+
+@app.route("/_import-sapa", methods=["GET"])
+def page_import_sapa():
+    """ブラウザで開く取り込み画面。OpenStreetMapへの問い合わせはこの画面（＝利用者の
+    ブラウザ）が行う。サーバー側からは外部に出られないため。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_IMPORT_SAPA_PAGE)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
 # ──────────────── ルート沿いの道の駅 ────────────────
 # 「どこに道の駅があるか」ではなく「行き帰りの道すがら、どこに寄れるか」を返す。
 # 立ち寄り地を決めるとき、名前を知らないと探せないのが不便だったため。
@@ -5179,37 +5487,44 @@ def api_michinoeki_route():
     lat_lo, lat_hi = min(lats) - pad, max(lats) + pad
     lng_lo, lng_hi = min(lngs) - pad / 0.8, max(lngs) + pad / 0.8
 
-    found = []
-    for e in get_michinoeki():
-        if not (lat_lo <= e['lat'] <= lat_hi and lng_lo <= e['lng'] <= lng_hi):
-            continue
-        best_d, best_along = None, 0.0
-        for plat, plng, along in path:
-            d = haversine(plat, plng, e['lat'], e['lng'])
-            if best_d is None or d < best_d:
-                best_d, best_along = d, along
-                if d < 0.3:        # 経路上とみなせるほど近い。これ以上測る必要はない
-                    break
-        if best_d is not None and best_d <= radius:
-            found.append((best_along, best_d, e))
+    def gather(places, kind):
+        """経路の近くにあるものを拾う。道の駅もSA・PAも同じ測り方でよい。"""
+        out = []
+        for e in places:
+            if not (lat_lo <= e['lat'] <= lat_hi and lng_lo <= e['lng'] <= lng_hi):
+                continue
+            best_d, best_along = None, 0.0
+            for plat, plng, along in path:
+                d = haversine(plat, plng, e['lat'], e['lng'])
+                if best_d is None or d < best_d:
+                    best_d, best_along = d, along
+                    if d < 0.3:    # 経路上とみなせるほど近い。これ以上測る必要はない
+                        break
+            if best_d is not None and best_d <= radius:
+                out.append((best_along, best_d, e, kind))
+        return out
 
+    found = gather(get_michinoeki(), "michinoeki") + gather(get_sapa(), "sapa")
     found.sort(key=lambda x: x[0])      # 出発地に近い順
 
     stations = [{
         "name": e['name'], "pref": e['pref'], "city": e['city'],
-        "lat": e['lat'], "lng": e['lng'], "site": e['site'],
+        "lat": e['lat'], "lng": e['lng'], "site": e.get('site', ''),
+        # 道の駅は「道の駅」、SA・PAは「SA」か「PA」。画面で見分けるために返す。
+        "kind": "道の駅" if kind == "michinoeki" else e.get('kind', 'SA'),
         "off_route_km": round(d, 1),      # 経路からの隔たり
         "along_km": round(along, 1),      # 出発地から経路に沿って進んだ距離
-    } for along, d, e in found[:limit]]
+    } for along, d, e, kind in found[:limit]]
 
     resp = jsonify({
         "stations": stations,
         "total_near_route": len(found),
         "route_km": round(path[-1][2], 1),
         "radius_km": radius,
-        "notice": "道の駅は施設により営業時間や利用のルールが異なります。"
+        "notice": "施設により営業時間や利用のルールが異なります。"
                   "ご利用の際は事前に各施設のWEBサイトなどでご確認ください。",
-        "source": "出典：国土交通省ウェブサイト「道の駅」一覧、Wikidata",
+        "source": "出典：道の駅＝国土交通省ウェブサイト「道の駅」一覧、Wikidata／"
+                  "SA・PA＝© OpenStreetMap contributors",
     })
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
