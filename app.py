@@ -5306,16 +5306,17 @@ _IMPORT_SAPA_PAGE = """<!doctype html>
 <h1>SA・PAの取り込み</h1>
 <p class="lead">高速道路のサービスエリア・パーキングエリアを OpenStreetMap から取り込みます。
 一度行えば、以後は道の駅と同じようにサーバーの中だけで完結します。
-<br>全国を6つの地方に分けて取りに行きます。2〜4分かかります。
-<br>取得できたことを確かめてから、登録済みのものを消して入れ直します。
-取得に失敗したときは何も消しません。
+<br>全国を13の範囲に分けて取りに行きます。5分ほどかかります。
+<br><b>取れた範囲から順に登録します。</b>どこかで取れなくても、ほかの範囲の成果は残ります。
+取れなかった範囲は、あとでもう一度押せば追加されます（消さずに足すので重複しません）。
 名前にSA・PAの別が無いもの（道の駅や一般の駐車場）は取り込みません。</p>
 
 <label for="key">CHECK_KEY</label>
 <input id="key" type="password" autocomplete="off" placeholder="Render の環境変数に設定した値">
 <div>
   <button id="count" class="sub">いま何件あるか見る</button>
-  <button id="run">入れ直す（古いものを消してから取り込む）</button>
+  <button id="run">取り込む</button>
+  <button id="clear" class="sub">全部消す</button>
 </div>
 
 <div id="msg"></div>
@@ -5334,38 +5335,41 @@ var $ = function (s) { return document.querySelector(s); };
 function key() { return $("#key").value.trim(); }
 function say(t, ng) { var m = $("#msg"); m.style.display = "block"; m.className = ng ? "ng" : ""; m.textContent = t; }
 function log(t) { var o = $("#log"); o.style.display = "block"; o.textContent += t + "\\n"; o.scrollTop = o.scrollHeight; }
-function esc(s) { return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 
-/* 問い合わせ先。混んでいることが多いので複数用意し、順に試す。 */
 var OVERPASS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass.osm.jp/api/interpreter"
 ];
 
-/* 全国を一度に聞くと重すぎて時間切れになる（504が返る）。
-   地方ごとの四角に分けて、6回に分けて聞く。四角は少し重ねてあるが、
-   同じ施設は登録のときにまとめられるので差し支えない。 */
+/* 範囲が広いと時間切れ（504 や Query timed out）になる。細かく割って軽くする。
+   少し重なっているが、同じ施設は文書IDが同じになるので重複しない。 */
 var BOXES = [
-  ["北海道",           "41.0,139.0,46.0,146.2"],
-  ["東北",             "36.5,138.8,41.8,142.3"],
-  ["関東・甲信",        "34.8,137.6,37.3,141.1"],
-  ["中部・北陸",        "34.3,135.6,38.2,138.9"],
-  ["近畿・中国・四国",   "32.3,131.7,36.5,136.5"],
-  ["九州・沖縄",        "23.9,122.7,34.3,132.5"]
+  ["北海道（北）",     "43.0,139.2,46.0,146.2"],
+  ["北海道（南）",     "41.0,139.2,43.1,146.0"],
+  ["東北（北）",       "39.2,138.9,41.9,142.3"],
+  ["東北（南）",       "36.6,138.9,39.3,142.0"],
+  ["関東（東）",       "34.9,139.2,37.1,141.1"],
+  ["関東（西）・甲信", "34.9,137.6,37.3,139.3"],
+  ["東海",            "34.3,136.4,35.9,138.0"],
+  ["北陸・信越",       "35.8,135.8,38.3,138.5"],
+  ["近畿",            "33.4,134.4,36.0,136.6"],
+  ["中国",            "33.6,130.9,36.0,134.6"],
+  ["四国",            "32.6,131.9,34.7,135.0"],
+  ["九州（北）",       "32.4,129.3,34.3,132.3"],
+  ["九州（南）・沖縄", "23.9,122.7,32.6,132.2"]
 ];
 
+/* relation は数が少ない割に重いので外す。SA・PAはほとんどが点か面で登録されている。 */
 function query(bbox) {
-  return '[out:json][timeout:120];('
+  return '[out:json][timeout:90];('
     + 'node["highway"~"^(services|rest_area)$"](' + bbox + ');'
     + 'way["highway"~"^(services|rest_area)$"](' + bbox + ');'
-    + 'relation["highway"~"^(services|rest_area)$"](' + bbox + ');'
     + ');out center tags;';
 }
 
 function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
-/* 1つの四角を取りに行く。混んでいたら間を置いて、別の問い合わせ先も試す。 */
 function fetchBox(label, bbox) {
   var tries = [];
   for (var k = 0; k < 2; k++) {
@@ -5373,11 +5377,9 @@ function fetchBox(label, bbox) {
   }
   var n = 0;
   function go() {
-    if (n >= tries.length) {
-      return Promise.reject(new Error(label + "：何度試しても取得できませんでした"));
-    }
+    if (n >= tries.length) { return Promise.reject(new Error("取得できませんでした")); }
     var url = tries[n++];
-    say("取得中… " + label + "（" + n + " / " + tries.length + " 回目）\\n" + url);
+    say("取得中… " + label + "（" + n + " / " + tries.length + " 回目）");
     return fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -5385,13 +5387,10 @@ function fetchBox(label, bbox) {
     }).then(function (r) {
       return r.text().then(function (t) { return { status: r.status, text: t }; });
     }).then(function (res) {
-      if (res.status !== 200) { throw new Error("HTTP " + res.status + "（混雑しています）"); }
+      if (res.status !== 200) { throw new Error("HTTP " + res.status); }
       var j;
       try { j = JSON.parse(res.text); } catch (e) { throw new Error("返事を読み取れませんでした"); }
-      if (!j.elements || !j.elements.length) {
-        throw new Error(j.remark ? String(j.remark).slice(0, 80) : "0件でした");
-      }
-      log("　" + label + "：" + j.elements.length + "件");
+      if (!j.elements) { throw new Error(j.remark ? String(j.remark).slice(0, 60) : "中身がありません"); }
       return j.elements;
     }).catch(function (e) {
       log("　" + label + "：" + e.message + " → 間を置いて試し直します");
@@ -5430,6 +5429,21 @@ function post(body) {
   });
 }
 
+function sendItems(items) {
+  var chunks = [];
+  for (var i = 0; i < items.length; i += 400) { chunks.push(items.slice(i, i + 400)); }
+  var saved = 0, skipped = 0;
+  function next() {
+    if (!chunks.length) { return Promise.resolve({ saved: saved, skipped: skipped }); }
+    return post({ items: chunks.shift() }).then(function (r) {
+      if (r.ok === false) { throw new Error(r.error || "登録に失敗しました"); }
+      saved += r.saved || 0; skipped += r.skipped || 0;
+      return next();
+    });
+  }
+  return next();
+}
+
 function showCount() {
   if (!key()) { say("CHECK_KEY を入れてください", true); return; }
   fetch("/api/_import/sapa/count", { headers: { "X-Check-Key": key() } })
@@ -5441,72 +5455,64 @@ function showCount() {
     .catch(function (e) { say(e.message, true); });
 }
 
+function clearAll() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (!confirm("登録されているSA・PAをすべて消します。よろしいですか？")) { return; }
+  post({ replace: true })
+    .then(function (j) { say((j.deleted || 0) + "件を消しました。"); })
+    .catch(function (e) { say(e.message, true); });
+}
+
+/* 地方ごとに、取れたそばから登録する。
+   1つの地方が取れなくても、ほかの地方の成果は残る。
+   （以前は1地方の失敗で全部を捨てていた。2026-10-04 改め） */
 function run() {
   if (!key()) { say("CHECK_KEY を入れてください", true); return; }
-  $("#run").disabled = true; $("#count").disabled = true;
-  $("#log").textContent = ""; $("#out").innerHTML = "";
-  log("取得を始めます（6地方に分けて聞きます）");
+  $("#run").disabled = true; $("#count").disabled = true; $("#clear").disabled = true;
+  $("#log").textContent = "";
+  log("取得を始めます（" + BOXES.length + "の範囲に分けて聞きます）");
 
-  var all = [];
   var queue = BOXES.slice();
+  var okList = [], ngList = [], total = 0;
+
   function nextBox() {
     if (!queue.length) { return Promise.resolve(); }
     var b = queue.shift();
     return fetchBox(b[0], b[1]).then(function (els) {
-      all = all.concat(els);
-      return wait(2000);          // 続けざまに聞くと断られるので、少し間を置く
+      var items = normalise(els);
+      log("　" + b[0] + "：取得 " + items.length + "件 → 登録しています");
+      if (!items.length) { okList.push(b[0] + " 0件"); return; }
+      return sendItems(items).then(function (r) {
+        total += r.saved;
+        okList.push(b[0] + " " + r.saved + "件");
+        log("　" + b[0] + "：登録 " + r.saved + "件／見送り " + r.skipped + "件");
+      });
+    }).catch(function (e) {
+      ngList.push(b[0]);
+      log("　" + b[0] + "：✕ " + e.message + "（この範囲は飛ばします）");
+    }).then(function () {
+      return wait(2000);
     }).then(nextBox);
   }
 
   nextBox().then(function () {
-    var items = normalise(all);
-    log("重複を除いて " + items.length + "件");
-    /* 取得できたことを確かめてから消す。先に消すと、取得に失敗したときに
-       データが無くなったまま終わってしまう（2026-10-04 実際にそうなった）。 */
-    if (items.length < 300) {
-      throw new Error("取得できた件数が少なすぎます（" + items.length
-        + "件）。消さずに中止しました。時間をおいてお試しください。");
+    var msg = "終わりました。登録 " + total + "件。\\n"
+      + "取れた範囲：" + (okList.join("、") || "なし");
+    if (ngList.length) {
+      msg += "\\n取れなかった範囲：" + ngList.join("、")
+        + "\\nこの範囲だけ、あとでもう一度押せば追加されます（消さずに足すので重複しません）。";
     }
-    var sa = items.filter(function (x) { return x.kind === "SA"; }).length;
-    $("#out").innerHTML = '<div class="card"><p>取得：<b>' + items.length
-      + "</b> 件（タグ上 SA " + sa + " / PA " + (items.length - sa) + "）</p>"
-      + "<table><tr><th>名前</th><th>緯度</th><th>経度</th></tr>"
-      + items.slice(0, 12).map(function (x) {
-          return "<tr><td>" + esc(x.name) + "</td><td>" + x.lat.toFixed(4)
-            + "</td><td>" + x.lng.toFixed(4) + "</td></tr>";
-        }).join("")
-      + "</table><p class='note'>最初の12件。種別と上下線はサーバー側で名前から決め直します。</p></div>";
-
-    say("登録済みのものを消しています…");
-    return post({ replace: true }).then(function (j) {
-      log((j.deleted || 0) + "件を消しました");
-      var chunks = [];
-      for (var i = 0; i < items.length; i += 400) { chunks.push(items.slice(i, i + 400)); }
-      var saved = 0, skipped = 0;
-      function send() {
-        if (!chunks.length) {
-          say("取り込みが終わりました。\\n登録 " + saved + "件／見送り " + skipped + "件"
-            + "\\n（見送りは、名前にSA・PAの別が無いもの＝駐車場や道の駅です）");
-          return;
-        }
-        return post({ items: chunks.shift() }).then(function (r) {
-          if (r.ok === false) { throw new Error(r.error || "登録に失敗しました"); }
-          saved += r.saved || 0; skipped += r.skipped || 0;
-          say("登録しています… " + saved + "件");
-          return send();
-        });
-      }
-      return send();
-    });
+    say(msg, ngList.length > 0);
   }).catch(function (e) {
     say(e.message, true);
   }).then(function () {
-    $("#run").disabled = false; $("#count").disabled = false;
+    $("#run").disabled = false; $("#count").disabled = false; $("#clear").disabled = false;
   });
 }
 
 $("#run").addEventListener("click", run);
 $("#count").addEventListener("click", showCount);
+$("#clear").addEventListener("click", clearAll);
 try { var s = sessionStorage.getItem("rmkey"); if (s) { $("#key").value = s; } } catch (e) {}
 $("#key").addEventListener("change", function () {
   try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
