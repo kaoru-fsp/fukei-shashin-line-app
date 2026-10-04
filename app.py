@@ -5672,8 +5672,6 @@ def api_michinoeki_route():
     # 同じ施設が左右の両方にあるときだけ、左側のものを残す。
     # 片側にしか無いときは判断材料が無いので残し、上り／下りの別を添えて
     # 利用者に委ねる（経路から離れた一般道沿いの施設もここに入る）。
-    COMBINED_KM = 0.4      # これより近ければ、上下の施設が同じ場所にある＝集約型とみなす
-
     by_base = {}
     for f in found:
         e = f["e"]
@@ -5682,48 +5680,86 @@ def api_michinoeki_route():
         f["sideLR"] = side_of_route(path, f["idx"], e['lat'], e['lng'])
         by_base.setdefault((e.get('base', e['name']), e.get('kind', '')), []).append(f)
 
+    def keep_only(group, keeper):
+        """groupのうちkeeperだけを残し、ほかは落とす。"""
+        for g in group:
+            if g is not keeper:
+                drop.add(id(g))
+
     drop = set()
     for _key, group in by_base.items():
         group.sort(key=lambda g: g["dist"])
-        if len(group) >= 2:
-            spread = max(
-                haversine(a["e"]['lat'], a["e"]['lng'], b["e"]['lat'], b["e"]['lng'])
-                for a in group for b in group
-            )
-            dirs = {g["e"].get('direction') for g in group if g["e"].get('direction')}
-            # 上下が同じ場所に揃っている＝上下線集約型。宝塚北SA・浜名湖SAなど、
-            # どちらから来ても同じ施設に入れる。近年増えており、規模も大きい。
-            if spread <= COMBINED_KM and dirs == {"上り", "下り"}:
-                group[0]["side"] = "both"
-                group[0]["combined"] = True        # 上り／下りは言わない。どちらでも入れる
-                for g in group[1:]:
-                    drop.add(id(g))
-                continue
-            sides = {g.get("sideLR") for g in group if g.get("sideLR")}
-            if spread > COMBINED_KM and len(sides) >= 2:
-                # 左右に分かれている＝上下線が別の施設。走っている側だけ残す。
-                for g in group:
-                    if g.get("sideLR") == "L":
-                        g["side"] = "same"
-                    else:
-                        drop.add(id(g))
-                continue
-            # それ以外は表記ゆれの重複（「佐野SA (下り)」と「佐野サービスエリア」など）。
-            # 上下の別が付いているほうを残す。そのほうが走っている側を判断できる。
-            group.sort(key=lambda g: (0 if g["e"].get('direction') else 1, g["dist"]))
-            for g in group[1:]:
-                drop.add(id(g))
-            group = group[:1]
 
-        # 1件だけ。まず、集約型として知られている施設かどうかを見る。
-        # OpenStreetMap に片方しか無くても、集約型なら反対車線の心配は要らない。
-        g = group[0]
-        base = g["e"].get('base', '')
-        if base in COMBINED_SAPA_BASES or g["e"].get('name', '') in COMBINED_SAPA_BASES:
-            g["side"] = "both_listed"
-            g["combined"] = True
+        # まず、集約型として知られている施設かどうかを見る。
+        # OpenStreetMap の登録のしかたに関わらず、これが分かっていれば
+        # 反対車線の心配は要らない。
+        base = group[0]["e"].get('base', '')
+        if base in COMBINED_SAPA_BASES or group[0]["e"].get('name', '') in COMBINED_SAPA_BASES:
+            group[0]["side"] = "both_listed"
+            group[0]["combined"] = True
+            keep_only(group, group[0])
             continue
-        # 上り／下りの別が付いているなら、走っている側かどうかは判断できる。
+
+        if len(group) >= 2:
+            dirs = {g["e"].get('direction') for g in group if g["e"].get('direction')}
+            if dirs == {"上り", "下り"}:
+                # 上りと下りの両方が登録されている。
+                # 日本は左側通行なので、走りながら入れるのは進行方向の左にあるほう。
+                # 左右に分かれているなら、それで確実に選り分けられる。
+                #
+                # 近さでは決められない。上下線が別々の施設でも、道をはさんで
+                # 向かい合っているので百数十メートルしか離れていない。
+                # 以前は400m以内なら集約型とみなしていたが、それだと
+                # 佐野SA・羽生PA・大谷PAなど、ごく普通の上下別施設まで
+                # 「どちら向きからでも入れます」と出てしまっていた。
+                # 反対車線の施設を待ち合わせ場所に選ばせかねないので改めた。
+                # （2026-10-04）
+                spread = max(
+                    haversine(a["e"]['lat'], a["e"]['lng'], b["e"]['lat'], b["e"]['lng'])
+                    for a in group for b in group
+                )
+                if spread <= 0.06:
+                    # 60m以内。道をはさんで向かい合う上下別施設では、
+                    # 車線の幅と建物の奥行きだけで百数十メートルは離れる。
+                    # これだけ近いのは同じ建物＝上下線集約型。
+                    # 宝塚北SA・浜名湖SAなど、どちらから来ても同じ施設に入れる。
+                    group[0]["side"] = "both"
+                    group[0]["combined"] = True    # 上り／下りは言わない。どちらでも入れる
+                    keep_only(group, group[0])
+                    continue
+                lefts = [g for g in group if g.get("sideLR") == "L"]
+                rights = [g for g in group if g.get("sideLR") == "R"]
+                if lefts and rights:
+                    lefts[0]["side"] = "same"
+                    keep_only(group, lefts[0])
+                    continue
+                # 離れているのに左右を分けられない。経路が施設からかなり遠いときに
+                # こうなる（遠くから見れば上り線も下り線も同じ方角にある）。
+                # ここで片方を選ぶと反対車線を案内しかねないので、分からないと伝える。
+                group[0]["side"] = ""
+                group[0]["ambiguous"] = True       # 上り／下りも伏せる
+                keep_only(group, group[0])
+                continue
+
+            sides = {g.get("sideLR") for g in group if g.get("sideLR")}
+            if len(sides) >= 2:
+                # 左右に分かれている＝上下線が別の施設。走っている側だけ残す。
+                lefts = [g for g in group if g.get("sideLR") == "L"]
+                if lefts:
+                    lefts[0]["side"] = "same"
+                    keep_only(group, lefts[0])
+                    continue
+                keep_only(group, group[0])
+                group = group[:1]
+            else:
+                # それ以外は表記ゆれの重複（「佐野SA (下り)」と「佐野サービスエリア」など）。
+                # 上下の別が付いているほうを残す。そのほうが走っている側を判断できる。
+                group.sort(key=lambda g: (0 if g["e"].get('direction') else 1, g["dist"]))
+                keep_only(group, group[0])
+                group = group[:1]
+
+        # 1件だけ。上り／下りの別が付いているなら、走っている側かどうかは判断できる。
+        g = group[0]
         if g["e"].get('direction'):
             g["side"] = "same" if g.get("sideLR") == "L" else "opposite"
 
@@ -5739,7 +5775,7 @@ def api_michinoeki_route():
             # 道の駅は「道の駅」、SA・PAは「SA」か「PA」。画面で見分けるために返す。
             "kind": "道の駅" if f["group"] == "michinoeki" else e.get('kind', 'SA'),
             # 上り／下り。集約型はどちらからでも入れるので、あえて言わない。
-            "direction": "" if f.get("combined") else e.get('direction', ''),
+            "direction": "" if (f.get("combined") or f.get("ambiguous")) else e.get('direction', ''),
             "side": f.get("side", ""),               # same＝進行方向側と判断できたもの
             "off_route_km": round(f["dist"], 1),     # 経路からの隔たり
             "along_km": round(f["along"], 1),        # 出発地から経路に沿って進んだ距離
