@@ -5098,6 +5098,8 @@ def get_sapa():
                 rows.append({'name': d.get('name', ''), 'pref': d.get('pref', ''),
                              'city': d.get('city', ''), 'site': '',
                              'kind': d.get('kind', 'SA'),
+                             'base': d.get('base', d.get('name', '')),
+                             'direction': d.get('direction', ''),
                              'lat': float(d['lat']), 'lng': float(d['lng'])})
             except (KeyError, TypeError, ValueError):
                 continue
@@ -5126,6 +5128,69 @@ def nearest_city(lat, lng):
     return pref, best[len(pref):]
 
 
+# ── 名前の読み取り ──
+# OpenStreetMap の名前は付き方がまちまちで、「佐野SA (上り)」「佐野サービスエリア」
+# 「池田PA」のように略称と正式名称、上下線の有無が入り混じっている。
+# 種別は OpenStreetMap のタグ（services / rest_area）より名前のほうが当てになる。
+# 実際、池田PA も日光口PA も services と付けられていた。
+# 名前にSA・PAの別が無いもの（「宇奈月ダム駐車場」「一向一揆の里」など）は
+# 高速道路の施設と言い切れないので取り込まない。道の駅が紛れているのもここで落ちる。
+_DIR_RE = re.compile(r'[（(\[【]?\s*(上り線|下り線|上り|下り|上線|下線|のぼり|くだり)\s*[)）\]】]?')
+
+def parse_sapa_name(raw):
+    """名前から (表示名, 基の名前, 種別, 上下) を取り出す。SA・PAでなければ None。"""
+    if not raw:
+        return None
+    s = unicodedata.normalize("NFKC", str(raw)).strip()
+    m = _DIR_RE.search(s)
+    direction = ""
+    if m:
+        d = m.group(1)
+        direction = "上り" if d.startswith(("上", "のぼ")) else "下り"
+        s = _DIR_RE.sub("", s).strip()
+    low = s.upper()
+    if "パーキングエリア" in s or re.search(r'(?<![A-Z])PA(?![A-Z])', low):
+        kind = "PA"
+    elif "サービスエリア" in s or re.search(r'(?<![A-Z])SA(?![A-Z])', low):
+        kind = "SA"
+    else:
+        return None
+    base = s
+    for w in ("パーキングエリア", "サービスエリア"):
+        base = base.replace(w, "")
+    base = re.sub(r'(?<![A-Z])(PA|SA)(?![A-Z])', "", base, flags=re.I)
+    base = base.strip(" \u3000・-−—()（）")
+    if not base:
+        return None
+    return (f"{base}{kind}", base, kind, direction)
+
+
+# 上下線集約型として知られているSA・PA（2026-10-04 石川さん調べ）。
+# OpenStreetMap に上り・下りの両方が登録されていれば、そちらで集約型と判断できる。
+# ここはその裏付けが取れないとき——片方しか登録が無いとき——の手がかりに使う。
+# 裏付けのあるものと区別して「とされています」と控えめに出し、色も分ける。
+# 同じ名前で集約型でない施設が別の高速道路にある場合（例：鈴鹿PAは新名神と東名阪の
+# 両方にある）に取り違える余地があるため、断定はしない。
+COMBINED_SAPA_BASES = {
+    "岡崎", "NEOPASA岡崎", "清水", "NEOPASA清水", "浜名湖", "EXPASA浜名湖",
+    "土山", "宝塚北", "鈴鹿", "錦秋湖", "南相馬鹿島", "菖蒲", "太田強戸",
+    "来島海峡", "鳥の海", "高滝湖",
+}
+
+def side_of_route(path, idx, lat, lng):
+    """進行方向から見て、その施設が左右どちらにあるかを返す（'L' か 'R'、不明なら ''）。
+    日本は左側通行なので、走りながら入れるのは左側にある施設。
+    上下線で別々に登録されているSA・PAを選り分けるのに使う。"""
+    i0 = max(0, idx - 1)
+    i1 = min(len(path) - 1, idx + 1)
+    if i0 == i1:
+        return ""
+    course = bearing(path[i0][0], path[i0][1], path[i1][0], path[i1][1])
+    to = bearing(path[idx][0], path[idx][1], lat, lng)
+    rel = (to - course + 540) % 360 - 180
+    return "L" if rel < 0 else "R"
+
+
 @app.route("/api/_import/sapa", methods=["POST"])
 def api_import_sapa():
     """SA・PAの一覧を受け取ってFirestoreに入れる。取り込み専用。
@@ -5139,7 +5204,27 @@ def api_import_sapa():
         abort(404)
     if not db:
         return jsonify({"ok": False, "error": "Firestoreにつながっていません"}), 500
-    items = (request.get_json(silent=True) or {}).get("items")
+    global _SAPA, _SAPA_AT
+    body = request.get_json(silent=True) or {}
+
+    # 入れ直すとき用。古いものを残したまま入れると、整理前の名前が混ざってしまう。
+    if body.get("replace"):
+        n = 0
+        while True:
+            docs = list(db.collection('sapa').limit(400).stream())
+            if not docs:
+                break
+            b = db.batch()
+            for d in docs:
+                b.delete(d.reference)
+            b.commit()
+            n += len(docs)
+            if n > 20000:
+                break
+        _SAPA, _SAPA_AT = None, 0.0
+        return jsonify({"ok": True, "deleted": n})
+
+    items = body.get("items")
     if not isinstance(items, list) or not items:
         return jsonify({"ok": False, "error": "items が空です"}), 400
     if len(items) > 500:
@@ -5150,21 +5235,25 @@ def api_import_sapa():
     n_in_batch = 0
     for it in items:
         try:
-            name = str(it.get("name", "")).strip()
+            raw = str(it.get("name", "")).strip()
             lat = float(it["lat"]); lng = float(it["lng"])
         except (KeyError, TypeError, ValueError):
             skipped += 1; continue
-        if not name or not (20 < lat < 50) or not (120 < lng < 150):
-            skipped += 1; continue          # 名前が無いもの、日本の外は入れない
-        if "道の駅" in name:
-            skipped += 1; continue          # 道の駅は別に持っているので重ねない
-        kind = "PA" if str(it.get("kind", "")).upper() == "PA" else "SA"
+        if not (20 < lat < 50) or not (120 < lng < 150):
+            skipped += 1; continue          # 日本の外は入れない
+        parsed = parse_sapa_name(raw)
+        if not parsed:
+            skipped += 1; continue          # SA・PAと言い切れない名前は入れない
+        name, base, kind, direction = parsed
         pref, city = nearest_city(lat, lng)
+        # 同じ施設の上り・下りは別物として持つ。文書IDは名前と上下と概略の座標から作る。
         doc_id = re.sub(r'[^0-9A-Za-zぁ-んァ-ン一-龥]', '',
-                        f"{name}{round(lat,3)}{round(lng,3)}")[:120] or f"{round(lat,4)}_{round(lng,4)}"
+                        f"{base}{kind}{direction}{round(lat,2)}{round(lng,2)}")[:120] \
+                 or f"{round(lat,4)}_{round(lng,4)}"
         batch.set(db.collection('sapa').document(doc_id), {
-            "name": name, "lat": lat, "lng": lng, "kind": kind,
-            "pref": pref, "city": city, "source": "OpenStreetMap",
+            "name": name, "base": base, "kind": kind, "direction": direction,
+            "lat": lat, "lng": lng,
+            "pref": pref, "city": city, "source": "OpenStreetMap", "raw": raw,
         })
         saved += 1; n_in_batch += 1
         if n_in_batch >= 400:
@@ -5172,7 +5261,6 @@ def api_import_sapa():
     if n_in_batch:
         batch.commit()
 
-    global _SAPA, _SAPA_AT
     _SAPA, _SAPA_AT = None, 0.0        # 次の検索で読み直させる
     return jsonify({"ok": True, "saved": saved, "skipped": skipped})
 
@@ -5218,13 +5306,14 @@ _IMPORT_SAPA_PAGE = """<!doctype html>
 <h1>SA・PAの取り込み</h1>
 <p class="lead">高速道路のサービスエリア・パーキングエリアを OpenStreetMap から取り込みます。
 一度行えば、以後は道の駅と同じようにサーバーの中だけで完結します。
-取り込みは何度行っても重複しません。</p>
+<br>登録済みのものをすべて消してから入れ直すので、何度行っても重複しません。
+名前にSA・PAの別が無いもの（道の駅や一般の駐車場）は取り込みません。</p>
 
 <label for="key">CHECK_KEY</label>
 <input id="key" type="password" autocomplete="off" placeholder="Render の環境変数に設定した値">
 <div>
   <button id="count" class="sub">いま何件あるか見る</button>
-  <button id="run">取り込む</button>
+  <button id="run">入れ直す（古いものを消してから取り込む）</button>
 </div>
 
 <div id="msg"></div>
@@ -5317,7 +5406,18 @@ function showCount() {
 function run() {
   if (!key()) { say("CHECK_KEY を入れてください", true); return; }
   $("#run").disabled = true; $("#count").disabled = true;
-  fetchOverpass().then(function (json) {
+  say("登録済みのものを消しています…");
+  fetch("/api/_import/sapa", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Check-Key": key() },
+    body: JSON.stringify({ replace: true })
+  }).then(function (r) {
+    if (r.status === 404) { throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません"); }
+    return r.json();
+  }).then(function (j) {
+    say((j.deleted || 0) + "件を消しました。これから取り直します…");
+    return fetchOverpass();
+  }).then(function (json) {
     var items = normalise(json);
     if (!items.length) { throw new Error("取得できましたが、SA・PAが1件もありませんでした"); }
     say("取得しました：" + items.length + "件。これから登録します…");
@@ -5487,34 +5587,107 @@ def api_michinoeki_route():
     lat_lo, lat_hi = min(lats) - pad, max(lats) + pad
     lng_lo, lng_hi = min(lngs) - pad / 0.8, max(lngs) + pad / 0.8
 
-    def gather(places, kind):
-        """経路の近くにあるものを拾う。道の駅もSA・PAも同じ測り方でよい。"""
+    def gather(places, group):
+        """経路の近くにあるものを拾う。道の駅もSA・PAも同じ測り方でよい。
+        あとで上下線を選り分けるため、いちばん近かった経路上の位置も控えておく。"""
         out = []
         for e in places:
             if not (lat_lo <= e['lat'] <= lat_hi and lng_lo <= e['lng'] <= lng_hi):
                 continue
-            best_d, best_along = None, 0.0
-            for plat, plng, along in path:
+            best_d, best_i = None, 0
+            for i, (plat, plng, _along) in enumerate(path):
                 d = haversine(plat, plng, e['lat'], e['lng'])
                 if best_d is None or d < best_d:
-                    best_d, best_along = d, along
+                    best_d, best_i = d, i
                     if d < 0.3:    # 経路上とみなせるほど近い。これ以上測る必要はない
                         break
             if best_d is not None and best_d <= radius:
-                out.append((best_along, best_d, e, kind))
+                out.append({"along": path[best_i][2], "dist": best_d, "e": e,
+                            "group": group, "idx": best_i})
         return out
 
     found = gather(get_michinoeki(), "michinoeki") + gather(get_sapa(), "sapa")
-    found.sort(key=lambda x: x[0])      # 出発地に近い順
 
-    stations = [{
-        "name": e['name'], "pref": e['pref'], "city": e['city'],
-        "lat": e['lat'], "lng": e['lng'], "site": e.get('site', ''),
-        # 道の駅は「道の駅」、SA・PAは「SA」か「PA」。画面で見分けるために返す。
-        "kind": "道の駅" if kind == "michinoeki" else e.get('kind', 'SA'),
-        "off_route_km": round(d, 1),      # 経路からの隔たり
-        "along_km": round(along, 1),      # 出発地から経路に沿って進んだ距離
-    } for along, d, e, kind in found[:limit]]
+    # ── 上下線の選り分け ──
+    # SA・PAは上り線と下り線に別々にあることが多い。両方を並べて見せると、
+    # 走っている側ではないほうを待ち合わせ場所に選んでしまい、行程が壊れる。
+    #
+    # 日本は左側通行なので、走りながら入れるのは進行方向の左側にある施設。
+    # 同じ施設が左右の両方にあるときだけ、左側のものを残す。
+    # 片側にしか無いときは判断材料が無いので残し、上り／下りの別を添えて
+    # 利用者に委ねる（経路から離れた一般道沿いの施設もここに入る）。
+    COMBINED_KM = 0.4      # これより近ければ、上下の施設が同じ場所にある＝集約型とみなす
+
+    by_base = {}
+    for f in found:
+        e = f["e"]
+        if f["group"] != "sapa":
+            continue
+        f["sideLR"] = side_of_route(path, f["idx"], e['lat'], e['lng'])
+        by_base.setdefault((e.get('base', e['name']), e.get('kind', '')), []).append(f)
+
+    drop = set()
+    for _key, group in by_base.items():
+        group.sort(key=lambda g: g["dist"])
+        if len(group) >= 2:
+            spread = max(
+                haversine(a["e"]['lat'], a["e"]['lng'], b["e"]['lat'], b["e"]['lng'])
+                for a in group for b in group
+            )
+            dirs = {g["e"].get('direction') for g in group if g["e"].get('direction')}
+            # 上下が同じ場所に揃っている＝上下線集約型。宝塚北SA・浜名湖SAなど、
+            # どちらから来ても同じ施設に入れる。近年増えており、規模も大きい。
+            if spread <= COMBINED_KM and dirs == {"上り", "下り"}:
+                group[0]["side"] = "both"
+                group[0]["combined"] = True        # 上り／下りは言わない。どちらでも入れる
+                for g in group[1:]:
+                    drop.add(id(g))
+                continue
+            sides = {g.get("sideLR") for g in group if g.get("sideLR")}
+            if spread > COMBINED_KM and len(sides) >= 2:
+                # 左右に分かれている＝上下線が別の施設。走っている側だけ残す。
+                for g in group:
+                    if g.get("sideLR") == "L":
+                        g["side"] = "same"
+                    else:
+                        drop.add(id(g))
+                continue
+            # それ以外は表記ゆれの重複（「佐野SA (下り)」と「佐野サービスエリア」など）。
+            # 上下の別が付いているほうを残す。そのほうが走っている側を判断できる。
+            group.sort(key=lambda g: (0 if g["e"].get('direction') else 1, g["dist"]))
+            for g in group[1:]:
+                drop.add(id(g))
+            group = group[:1]
+
+        # 1件だけ。まず、集約型として知られている施設かどうかを見る。
+        # OpenStreetMap に片方しか無くても、集約型なら反対車線の心配は要らない。
+        g = group[0]
+        base = g["e"].get('base', '')
+        if base in COMBINED_SAPA_BASES or g["e"].get('name', '') in COMBINED_SAPA_BASES:
+            g["side"] = "both_listed"
+            g["combined"] = True
+            continue
+        # 上り／下りの別が付いているなら、走っている側かどうかは判断できる。
+        if g["e"].get('direction'):
+            g["side"] = "same" if g.get("sideLR") == "L" else "opposite"
+
+    found = [f for f in found if id(f) not in drop]
+    found.sort(key=lambda f: f["along"])      # 出発地に近い順
+
+    stations = []
+    for f in found[:limit]:
+        e = f["e"]
+        stations.append({
+            "name": e['name'], "pref": e['pref'], "city": e['city'],
+            "lat": e['lat'], "lng": e['lng'], "site": e.get('site', ''),
+            # 道の駅は「道の駅」、SA・PAは「SA」か「PA」。画面で見分けるために返す。
+            "kind": "道の駅" if f["group"] == "michinoeki" else e.get('kind', 'SA'),
+            # 上り／下り。集約型はどちらからでも入れるので、あえて言わない。
+            "direction": "" if f.get("combined") else e.get('direction', ''),
+            "side": f.get("side", ""),               # same＝進行方向側と判断できたもの
+            "off_route_km": round(f["dist"], 1),     # 経路からの隔たり
+            "along_km": round(f["along"], 1),        # 出発地から経路に沿って進んだ距離
+        })
 
     resp = jsonify({
         "stations": stations,
