@@ -5071,6 +5071,150 @@ def api_michinoeki():
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
 
+# ──────────────── ルート沿いの道の駅 ────────────────
+# 「どこに道の駅があるか」ではなく「行き帰りの道すがら、どこに寄れるか」を返す。
+# 立ち寄り地を決めるとき、名前を知らないと探せないのが不便だったため。
+#
+# 受け取るのは Google ルート API が返す符号化された経路（encodedPolyline）。
+# それを座標の列に戻し、一定間隔で間引いた点から各道の駅までの距離を測る。
+# 経路のどのあたりかも返すので、出発地に近い順に並べられる。
+
+def decode_polyline(encoded):
+    """Google の符号化された経路を、(緯度, 経度) の列に戻す。
+    方式は Encoded Polyline Algorithm Format。外部のライブラリは使わない。"""
+    points = []
+    index = lat = lng = 0
+    length = len(encoded)
+    while index < length:
+        for is_lat in (True, False):
+            shift = result = 0
+            while True:
+                if index >= length:
+                    return points
+                b = ord(encoded[index]) - 63
+                index += 1
+                result |= (b & 0x1f) << shift
+                shift += 5
+                if b < 0x20:
+                    break
+            d = ~(result >> 1) if (result & 1) else (result >> 1)
+            if is_lat:
+                lat += d
+            else:
+                lng += d
+        points.append((lat * 1e-5, lng * 1e-5))
+    return points
+
+
+def thin_path(points, step_km=2.0):
+    """経路の点を間引く。曲がり角ごとの細かい点をすべて使うと計算が増えるだけで、
+    道の駅が近いかどうかの判定は粗い間隔で足りる。
+    進んだ距離も一緒に返すので、出発地からどのあたりかが分かる。"""
+    if not points:
+        return []
+    out = [(points[0][0], points[0][1], 0.0)]
+    acc = 0.0           # 経路に沿って進んだ距離
+    since = 0.0         # 最後に点を採ってから進んだ距離
+    for i in range(1, len(points)):
+        d = haversine(points[i - 1][0], points[i - 1][1], points[i][0], points[i][1])
+        acc += d
+        since += d
+        if since >= step_km:
+            out.append((points[i][0], points[i][1], acc))
+            since = 0.0
+    last = points[-1]
+    if out[-1][0] != last[0] or out[-1][1] != last[1]:
+        out.append((last[0], last[1], acc))
+    return out
+
+
+@app.route("/api/michinoeki/route", methods=["POST", "OPTIONS"])
+def api_michinoeki_route():
+    """経路沿いの道の駅を、出発地に近い順に返す。
+    撮影プランナー（リファレンス側）から呼ばれるのでCORSを許可する。
+
+    本文（JSON）
+      polyline   Google ルート API の encodedPolyline（必須）
+      radius     経路から何km以内を拾うか（既定5、上限30）
+      limit      最大何件返すか（既定12、上限40）
+    """
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    body = request.get_json(silent=True) or {}
+    encoded = body.get("polyline") or ""
+    if not isinstance(encoded, str) or len(encoded) < 10:
+        return jsonify({"error": "polyline required"}), 400
+    if len(encoded) > 200000:
+        return jsonify({"error": "polyline too long"}), 400
+    try:
+        radius = float(body.get("radius", 5))
+    except (TypeError, ValueError):
+        radius = 5.0
+    radius = max(0.5, min(30.0, radius))
+    try:
+        limit = int(body.get("limit", 12))
+    except (TypeError, ValueError):
+        limit = 12
+    limit = max(1, min(40, limit))
+
+    try:
+        path = thin_path(decode_polyline(encoded))
+    except Exception:
+        return jsonify({"error": "polyline decode failed"}), 400
+    if len(path) < 2:
+        return jsonify({"error": "polyline too short"}), 400
+
+    # 経路から大きく離れた道の駅は、距離を測る前に外す。
+    # 全国の道の駅すべてに対して経路の全点を測ると無駄が多いため、
+    # まず経路を囲む四角から外れるものを落とす。
+    lats = [p[0] for p in path]
+    lngs = [p[1] for p in path]
+    pad = radius / 111.0 + 0.05
+    lat_lo, lat_hi = min(lats) - pad, max(lats) + pad
+    lng_lo, lng_hi = min(lngs) - pad / 0.8, max(lngs) + pad / 0.8
+
+    found = []
+    for e in get_michinoeki():
+        if not (lat_lo <= e['lat'] <= lat_hi and lng_lo <= e['lng'] <= lng_hi):
+            continue
+        best_d, best_along = None, 0.0
+        for plat, plng, along in path:
+            d = haversine(plat, plng, e['lat'], e['lng'])
+            if best_d is None or d < best_d:
+                best_d, best_along = d, along
+                if d < 0.3:        # 経路上とみなせるほど近い。これ以上測る必要はない
+                    break
+        if best_d is not None and best_d <= radius:
+            found.append((best_along, best_d, e))
+
+    found.sort(key=lambda x: x[0])      # 出発地に近い順
+
+    stations = [{
+        "name": e['name'], "pref": e['pref'], "city": e['city'],
+        "lat": e['lat'], "lng": e['lng'], "site": e['site'],
+        "off_route_km": round(d, 1),      # 経路からの隔たり
+        "along_km": round(along, 1),      # 出発地から経路に沿って進んだ距離
+    } for along, d, e in found[:limit]]
+
+    resp = jsonify({
+        "stations": stations,
+        "total_near_route": len(found),
+        "route_km": round(path[-1][2], 1),
+        "radius_km": radius,
+        "notice": "道の駅は施設により営業時間や利用のルールが異なります。"
+                  "ご利用の際は事前に各施設のWEBサイトなどでご確認ください。",
+        "source": "出典：国土交通省ウェブサイト「道の駅」一覧、Wikidata",
+    })
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
+
 @app.route("/api/peak-subjects", methods=["GET", "OPTIONS"])
 def api_peak_subjects():
     """撮り頃の被写体を返す。風景撮ろうよ！（/enjoy）から呼ばれる。
