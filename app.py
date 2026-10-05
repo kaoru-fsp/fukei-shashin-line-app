@@ -6355,7 +6355,7 @@ function fixMoji() {
       say("直しています…");
       return post("/api/_fix/mojibake", {}).then(function (k) {
         if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
-        say(k.fixed + "件を直しました。\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+        say(k.fixed + "件を直しました。\\n続けて「集める」を押すと、直した地名で座標を取り直します。");
       });
     })
     .catch(function (e) { say(e.message, true); })
