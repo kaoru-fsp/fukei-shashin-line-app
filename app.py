@@ -5657,26 +5657,75 @@ def geocode_detail(query):
             'pref': pref,
             'formatted': r0.get('formatted_address', '')}
 
+def _strip_pref_suffix(s):
+    """『長野県』→『長野』。ただし削ると1文字になるものは削らない。
+    『京都』から「都」を落とすと『京』になり、『京都府』と別物になってしまう。"""
+    t = re.sub(r'[都道府県]$', '', s)
+    return t if len(t) >= 2 else s
+
+def _pref_match(a, b):
+    """県名が同じかどうか。『長野県』と『長野』は同じものとみなす。
+    地図はときどき県名を英語（Nagano など）で返してくる。
+    その場合は突き合わせようがないので、ここでは判断せず隔たりで見る。"""
+    a = str(a or '').strip()
+    b = str(b or '').strip()
+    if not a or not b:
+        return True
+    if re.fullmatch(r'[A-Za-z \-\.]+', b):
+        return True
+    return _strip_pref_suffix(a) == _strip_pref_suffix(b)
+
 def judge_place_geo(area, pref, got):
     """取れた座標を使ってよいか決める。
        ok    … そのまま使う
        check … 使うが、目で確かめたほうがよい
        ng    … 使わない（市区町村の座標のままにする）
-    戻り値 (status, reason, km)。km は市区町村の中心からの隔たり。"""
+    戻り値 (status, reason, km)。km は市区町村の中心からの隔たり。
+
+    partial_match（地名が完全には一致しない）は見ない。
+    4,988か所を集めて確かめたところ、partial_match が付いたものと付かないものとで
+    精度の内訳も市区町村中心からの隔たりもほとんど変わらなかった。
+    「問い合わせ文字列に余計な語が入っていた」というだけで、場所が違うことを
+    意味していなかった。これで要確認が2,375件から数十件に減る。（2026-10-05）"""
     if not got:
         return 'ng', '見つかりませんでした', None
     city = work_latlng(area, pref)
     km = (haversine(city[0], city[1], got['lat'], got['lng'])
           if city else None)
-    if pref and got.get('pref') and got['pref'] != pref:
-        return 'ng', '別の県が返ってきました（%s）' % got['pref'], km
+    if not _pref_match(pref, got.get('pref')):
+        # 県境の撮影地は、隣の県として返ってくる。渋峠は長野県側から引いても
+        # 群馬県中之条町が返る。市区町村の中心から近ければ、同じ場所とみなす。
+        if km is None or km > 30:
+            return 'ng', '別の県が返ってきました（%s）' % got.get('pref', ''), km
+        return 'ok', '県境のため隣の県として返っています（%s）' % got.get('pref', ''), km
     if km is not None and km > 60:
         return 'ng', '市区町村の中心から%.0fkm離れています' % km, km
-    if got.get('partial'):
-        return 'check', '地名が完全には一致していません', km
     if km is not None and km < 0.2:
         return 'check', '市区町村の中心と同じ場所です（地名が見つかっていない可能性）', km
     return 'ok', '', km
+
+_PLACE_SEP = re.compile(r'[・／/、,･]')
+_GEO_RANK = {'ROOFTOP': 3, 'RANGE_INTERPOLATED': 2, 'GEOMETRIC_CENTER': 2, 'APPROXIMATE': 1}
+
+def geocode_place_best(area, place):
+    """Area と Place をつないで問い合わせる。戻り値 (結果, 使った文字列)。
+
+    『赤城山・覚満淵』のように区切り記号でつないだ地名は、地図が前半だけを拾って
+    大まかな位置を返すことがある。実際、覚満淵は4通りの表記のうち3つが
+    「赤城山」に落ちていた。区切りの後ろでも問い合わせ、細かいほうを採る。"""
+    tries = [(area + ' ' + place).strip()]
+    if _PLACE_SEP.search(place):
+        tail = _PLACE_SEP.split(place)[-1].strip()
+        if tail and tail != place:
+            tries.append((area + ' ' + tail).strip())
+    best, best_q = None, tries[0]
+    for q in tries:
+        got = geocode_detail(q)
+        if not got:
+            continue
+        if best is None or _GEO_RANK.get(got['type'], 0) > _GEO_RANK.get(best['type'], 0):
+            best, best_q = got, q
+    return best, best_q
 
 # ── 取り込み ──
 
@@ -5741,7 +5790,7 @@ def api_geocode_places_run():
         pref = extract_pref(area)
         query = (area + ' ' + place).strip()
         try:
-            got = geocode_detail(query)
+            got, query = geocode_place_best(area, place)
         except RuntimeError as e:
             err = str(e)
             break
@@ -5791,6 +5840,90 @@ def api_geocode_places_count():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "done": total, "pairs": len(place_pairs()), "tally": tally})
+
+@app.route("/api/_geocode/places/rejudge", methods=["POST"])
+def api_geocode_places_rejudge():
+    """すでに集めてある座標を、地図に問い合わせ直さずに判定だけやり直す。
+    判定の決まりを変えたときに使う。問い合わせないので費用も時間もかからない。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    body = request.get_json(silent=True) or {}
+    after = str(body.get('after') or '')
+    col = db.collection(_PLACEGEO_COL)
+    q = col.order_by('__name__').limit(300)
+    if after:
+        snap = col.document(after).get()
+        if snap.exists:
+            q = q.start_after(snap)
+    docs = list(q.stream())
+    batch = db.batch()
+    changed, last = 0, ''
+    tally = {'ok': 0, 'check': 0, 'ng': 0}
+    moved = []
+    for doc in docs:
+        last = doc.id
+        d = doc.to_dict() or {}
+        got = None
+        if d.get('lat') is not None and d.get('lng') is not None:
+            got = {'lat': d['lat'], 'lng': d['lng'], 'type': d.get('type', ''),
+                   'partial': d.get('partial'), 'pref': d.get('got_pref', ''),
+                   'formatted': d.get('formatted', '')}
+        status, reason, km = judge_place_geo(d.get('area', ''), d.get('pref', ''), got)
+        tally[status] = tally.get(status, 0) + 1
+        if status != d.get('status') or reason != d.get('reason'):
+            batch.set(doc.reference, {'status': status, 'reason': reason}, merge=True)
+            changed += 1
+            if d.get('status') != status and len(moved) < 20:
+                moved.append('%s｜%s　%s→%s' % (d.get('area', ''), d.get('place', ''),
+                                               d.get('status', ''), status))
+    if changed:
+        try:
+            batch.commit()
+        except Exception as e:
+            return jsonify({"ok": False, "error": "書き込みに失敗しました：%s" % e}), 500
+    global _PLACEGEO, _PLACEGEO_AT
+    _PLACEGEO, _PLACEGEO_AT = None, 0.0
+    return jsonify({"ok": True, "seen": len(docs), "changed": changed,
+                    "tally": tally, "moved": moved,
+                    "after": last, "done": len(docs) < 300})
+
+@app.route("/api/_geocode/places/reset-bad", methods=["POST"])
+def api_geocode_places_reset_bad():
+    """取り直したほうがよいものだけを消す。消したぶんは「集める」で入り直す。
+      ・見つからなかったもの（元データの文字化けなどを直したあと）
+      ・区切り記号でつないだ地名で、大まかな位置しか返っていないもの"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    deleted, kinds = 0, {'見つからなかった': 0, '区切り記号つき': 0}
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection(_PLACEGEO_COL).stream():
+            d = doc.to_dict() or {}
+            why = ''
+            if d.get('status') == 'ng' and str(d.get('reason', '')).startswith('見つかりません'):
+                why = '見つからなかった'
+            elif _PLACE_SEP.search(str(d.get('place', ''))) and d.get('type') == 'APPROXIMATE':
+                why = '区切り記号つき'
+            if not why:
+                continue
+            kinds[why] += 1
+            batch.delete(doc.reference)
+            deleted += 1
+            n += 1
+            if n >= 400:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    global _PLACEGEO, _PLACEGEO_AT
+    _PLACEGEO, _PLACEGEO_AT = None, 0.0
+    return jsonify({"ok": True, "deleted": deleted, "kinds": kinds})
 
 @app.route("/api/_geocode/places/export", methods=["GET"])
 def api_geocode_places_export():
@@ -5894,6 +6027,10 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="stop" disabled>止める</button>
   <button id="csv">一覧を書き出す</button>
 </div>
+<div class="btns">
+  <button id="rejudge">判定し直す</button>
+  <button id="resetbad">取り直しが要るものを消す</button>
+</div>
 
 <div id="bar"><i></i></div>
 <div id="msg"></div>
@@ -5901,8 +6038,10 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
 
 <p class="note" style="margin-top:20px">判定の意味。
 <b>ok</b>＝そのまま使います。
-<b>check</b>＝使いますが、目で確かめたほうがよいもの（地名が完全に一致しなかった、または市区町村の中心と同じ場所だった）。
-<b>ng</b>＝使いません（見つからなかった、別の県が返ってきた、市区町村の中心から60km以上離れていた）。市区町村の座標のままになります。</p>
+<b>check</b>＝使いますが、目で確かめたほうがよいもの（市区町村の中心と同じ場所が返ってきた＝地名が見つかっていない可能性）。
+<b>ng</b>＝使いません（見つからなかった、別の県が30km以上離れて返ってきた、市区町村の中心から60km以上離れていた）。市区町村の座標のままになります。</p>
+<p class="note"><b>判定し直す</b>＝集めた座標はそのままに、判定の決まりだけを当て直します。地図には問い合わせません。
+<b>取り直しが要るものを消す</b>＝見つからなかったものと、区切り記号でつないだ地名で大まかな位置しか返っていないものを消します。そのあと「集める」を押すと、入り直します。</p>
 <p class="note">出典：地図データ © Google</p>
 </div>
 <script>
@@ -5995,8 +6134,55 @@ function run() {
   });
 }
 
+/* 集めた座標はそのままに、判定だけ当て直す。地図には問い合わせない。 */
+function rejudge() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#rejudge").disabled = true; $("#run").disabled = true;
+  $("#log").textContent = "";
+  log("判定し直します（地図には問い合わせません）");
+  var seen = 0, changed = 0, sum = { ok: 0, check: 0, ng: 0 };
+  function step(after) {
+    return post("/api/_geocode/places/rejudge", { after: after }).then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+      seen += j.seen || 0; changed += j.changed || 0;
+      var t = j.tally || {};
+      sum.ok += t.ok || 0; sum.check += t.check || 0; sum.ng += t.ng || 0;
+      (j.moved || []).forEach(function (m) { log("　" + m); });
+      say("判定し直しています… " + seen + "か所");
+      if (j.done) { return; }
+      return step(j.after);
+    });
+  }
+  step("").then(function () {
+    say("判定し直しました。\\n見た数 " + seen + "／変わった数 " + changed + "\\n"
+      + "ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng);
+  }).catch(function (e) {
+    say(e.message, true);
+  }).then(function () {
+    $("#rejudge").disabled = false; $("#run").disabled = false;
+  });
+}
+
+function resetBad() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (!confirm("取り直しが要るものを消します。消したぶんは「集める」で入り直します。よろしいですか？")) { return; }
+  $("#resetbad").disabled = true;
+  post("/api/_geocode/places/reset-bad", {}).then(function (j) {
+    if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+    var k = j.kinds || {};
+    say((j.deleted || 0) + "か所を消しました。\\n"
+      + "　見つからなかったもの " + (k["見つからなかった"] || 0) + "／"
+      + "区切り記号つき " + (k["区切り記号つき"] || 0) + "\\n"
+      + "「集める」を押すと、この分だけ入り直します。");
+  }).catch(function (e) {
+    say(e.message, true);
+  }).then(function () { $("#resetbad").disabled = false; });
+}
+
 $("#run").addEventListener("click", run);
 $("#count").addEventListener("click", showCount);
+$("#rejudge").addEventListener("click", rejudge);
+$("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
 $("#csv").addEventListener("click", function () {
   if (!key()) { say("CHECK_KEY を入れてください", true); return; }
