@@ -1442,7 +1442,10 @@ def parse_target_area(text):
         if city in text:
             if city in CITY_TO_PREF_MULTI:
                 return "AMBIGUOUS", None, city
-            latlng = geocode(city) or CITY_TO_LATLNG.get(city, PREF_LATLNG[pref])
+            # 手元の市区町村表を先に見る。地図への問い合わせは、そこに無いときだけ。
+            # 逆順にすると、2,798件そろっている表を差し置いて毎回外に聞きに行くことになり、
+            # 返事を待つぶん遅くなるうえ、表と違う座標が返ることもある。（2026-10-05）
+            latlng = CITY_TO_LATLNG.get(city) or geocode(city) or PREF_LATLNG[pref]
             matched_name = city_base if city_base in text else city
             return pref, latlng, matched_name
     for city in CITY_TO_PREF_MULTI:
@@ -1454,10 +1457,9 @@ def parse_target_area(text):
     _sp = pref_by_short(text)
     if _sp:
         return _sp, PREF_LATLNG[_sp], _sp
-    EXCLUDE_WORDS = {'撮影', '明日', '今日', '明後日', '写真', '行きたい', '探して', '教えて', 'したい', 'ください'}
-    words = [w for w in re.split(r'[\s、。！？!?]+', text) if len(w) >= 2 and w not in EXCLUDE_WORDS]
-    for word in words:
-        latlng = geocode(word + ' 日本')
+    # かつてここで、残りの語をひとつずつ地図に問い合わせていた。
+    # ただし結果をどこにも渡しておらず、戻り値は必ず (None, None, None) だった。
+    # 地図への問い合わせが1語ごとに走るぶんだけ遅くなるので取り除いた。（2026-10-05）
     return None, None, None
 def format_date_jp(d):
     weekdays = ["月","火","水","木","金","土","日"]
@@ -3696,7 +3698,8 @@ def handle_message(event):
             elif resolved_pref:
                 # 地域を確定（番号や県名で選択）
                 del AMBIGUOUS_PENDING[user_id]
-                latlng = geocode(f"{resolved_pref}{city}") or CITY_TO_LATLNG.get(city) or PREF_LATLNG.get(resolved_pref)
+                # ここも手元の表が先。（2026-10-05）
+                latlng = CITY_TO_LATLNG.get(city) or geocode(f"{resolved_pref}{city}") or PREF_LATLNG.get(resolved_pref)
                 _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = resolved_pref, latlng, city
             else:
