@@ -5841,6 +5841,163 @@ def api_geocode_places_count():
         return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "done": total, "pairs": len(place_pairs()), "tally": tally})
 
+# 文字化けした作品データの直し方。鍵は壊れている (Area, Place)、値は正しい (Area, Place)。
+# 元のCSVには壊れた行が1つも無く、Firestoreに取り込んだあとで壊れていた。
+# UTF-8の文字列をShift_JISとして読んだときの壊れ方で、逆の手順で戻したうえ、
+# 元のCSVと突き合わせて47件すべて正しい名前を確かめてある。（2026-10-05）
+_MOJIBAKE_FIX = {
+    ('蜈オ蠎ォ逵御ク臥伐蟶�', '鮟呈サ�'):
+        ('兵庫県三田市', '黒滝'),
+    ('蜿ー貉セ譁ー蛹怜ク�', '譫怜��?譛ィ譽芽干驕�'):
+        ('台湾新北市', '林初?木棉花道'),
+    ('螂郁憶逵悟ョ�髯蟶よヲ帛次蛹コ', '鮴埼式貂楢ーキ'):
+        ('奈良県宇陀市榛原区', '龍鎮渓谷'),
+    ('螂郁憶逵悟・郁憶蟶�', '蜀�謌仙ッコ'):
+        ('奈良県奈良市', '円成寺'),
+    ('螂郁憶逵梧。應コ募ク�', '螟ァ隘ソ蝨ー蛹コ'):
+        ('奈良県桜井市', '大西地区'),
+    ('螂郁憶逵梧擲蜷蛾大正譚�', '謚慕浹縺ョ貊�'):
+        ('奈良県東吉野村', '投石の滝'),
+    ('螟ァ蛻�逵檎罰蟶�蟶�', '逕ア蟶�蟾晄ク楢ーキ'):
+        ('大分県', '由布川渓谷'),
+    ('螻ア蜿」逵檎セ守・「蟶�', '遘句翠蜿ー'):
+        ('山口県美祢市', '秋吉台'),
+    ('螻ア蜿」逵碁亟蠎懷ク�', '螟ァ蟷ウ螻ア繝ュ繝シ繝励え繧ァ繧、螻ア鬆るァ�蜻ィ霎コ'):
+        ('山口県防府市', '大平山ロープウェイ山頂駅周辺'),
+    ('螻ア蠖「逵碁」ッ雎顔伴', '逋ス蟾昴ム繝\uf8f0'):
+        ('山形県飯豊町', '白川ダム'),
+    ('螻ア譴ィ逵悟漉繧「繝ォ繝励せ蟶�', '荳ュ逋ス蟲ー螻ア'):
+        ('山梨県南アルプス市', '中白峰山'),
+    ('蟯宣�懃恁豬キ豢・逕コ', '豢・螻句キ�'):
+        ('岐阜県海津町', '津屋川'),
+    ('蟯宣�懃恁鄒取ソ�蜉\uf8f0闌ょク�', '遞イ闡画ア\uf8f0蜈ャ蝨�'):
+        ('岐阜県美濃加茂市', '稲葉池公園'),
+    ('諢帷衍逵梧眠蝓主ク�', '蟾エ蟾�'):
+        ('愛知県新城市', '巴川'),
+    ('諢帷衍逵瑚ア顔伐蟶ょクょ\uf8f0エ逕コ', '逾櫁カ頑ク楢ーキ'):
+        ('愛知県豊田市市場町', '神越渓谷'),
+    ('譁ー貎溽恁譁ー貎溷クょ圏蛹コ遖丞ウカ貎�', '遖丞ウカ貎�'):
+        ('新潟県新潟市北区福島潟', '福島潟'),
+    ('譁ー貎溽恁譚台ク雁ク�', '轢ャ豕「豬キ蟯ク'):
+        ('新潟県村上市', '瀬波海岸'),
+    ('譁ー貎溽恁譚台ク雁ク�', '荳倶クュ蟲カ'):
+        ('新潟県村上市', '下中島'),
+    ('譚ア莠ャ驛ス譁ー螳ソ蛹コ', '譁ー螳ソ蠕。闍�'):
+        ('東京都新宿区', '新宿御苑'),
+    ('貊玖ウ逵碁聞豬懷ク�', '貉門イク驕楢キッ'):
+        ('滋賀県長浜市', '湖岸道路'),
+    ('逾槫・亥キ晉恁譚セ逕ー逕コ', '譛譏主ッコ蜿イ霍。蜈ャ蝨�'):
+        ('神奈川県松田町', '最明寺史跡公園'),
+    ('逾槫・亥キ晉恁遘ヲ驥主ク�', '蝪斐ヮ蟯ウ螻ア鬆�'):
+        ('神奈川県秦野市', '塔ノ岳山頂'),
+    ('遖丈コ慕恁豎\uf8f0逕ー逕コ', '縺九★繧画ゥ�'):
+        ('福井県池田町', 'かずら橋'),
+    ('遖丞イ。逵悟万螟壽婿蟶�', '諱倶ココ蝮ょ捉霎コ'):
+        ('福岡県喜多方市', '恋人坂周辺'),
+    ('遖丞ウカ逵御シ壽エ・闍・譚セ蟶�', '蠕。螻ア縺ョ譟ソ逡�'):
+        ('福島県会津若松市', '御山の柿畑'),
+    ('遖丞ウカ逵檎ヲ丞ウカ蟶�', '縺、縺ー縺上m隹キ'):
+        ('福島県福島市', 'つばくろ谷'),
+    ('遖丞ウカ逵�', '荳顔ケ∝イ。'):
+        ('福島県', '上繁岡'),
+    ('遖丞ウカ逵�', '蝟懷、壽婿蟶�'):
+        ('福島県', '喜多方市'),
+    ('鄒、鬥ャ逵碁ォ伜エ主ク�', '隕ウ髻ウ螻ア'):
+        ('群馬県高崎市', '観音山'),
+    ('闌ィ蝓守恁隨\uf8f0髢灘ク�', '菴千區螻ア鮗灘�ャ蝨�'):
+        ('茨城県笠間市', '佐白山麓公園'),
+    ('髟キ驥守恁荳玖ォ剰ィェ逕コ', '蜈ォ蟲カ繧ア蜴滓ケソ蜴�'):
+        ('長野県下諏訪町', '八島ケ原湿原'),
+    ('髟キ驥守恁荳顔伐蟶�', '遶懊Ω豐「繝繝\uf8f0'):
+        ('長野県上田市', '竜ヶ沢ダム'),
+    ('髟キ驥守恁譚セ譛ャ蟶ゆケ鈴檮', '荵鈴檮鬮伜次 蝟�莠秘ヮ縺ョ貊�'):
+        ('長野県松本市乗鞍', '乗鞍高原 善五郎の滝'),
+    ('髟キ驥守恁譚セ譛ャ蟶ゆケ鈴檮', '荳企ォ伜慍'):
+        ('長野県松本市乗鞍', '上高地小梨平'),
+    ('髟キ驥守恁遶狗ァ醍伴', '螂ウ逾樊ケ�'):
+        ('長野県立科町', '女神湖'),
+    ('髟キ驥守恁邇区サ晄搗', '貊晁カ企寔關ス'):
+        ('長野県王滝村', '滝越集落'),
+    ('髟キ驥守恁鬟ッ逕ー蟶ゆク頑搗', '鮗サ邵セ縺ョ驥�'):
+        ('長野県飯田市上村', '麻績の里'),
+    ('髟キ驥守恁鬟ッ逕ー蟶ゆク頑搗', '蠎ァ蜈牙ッコ鮗サ邵セ縺ョ驥後遏ウ蝪壽。�'):
+        ('長野県飯田市上村', '座光寺麻績の里\u3000石塚桜'),
+    ('髟キ驥守恁鬧偵Ω譬ケ蟶�', '螟ゥ遶懷キ晏\uf8f0、髦イ'):
+        ('長野県駒ヶ根市', '天竜川堤防'),
+    ('髟キ驥守恁鬧偵Ω譬ケ蟶�', '蜈牙燕蟇コ'):
+        ('長野県駒ヶ根市', '光前寺'),
+    ('髟キ驥守恁鬧偵Ω譬ケ蟶�', '闖�繝主床 蜿、蝓守匳螻ア蜿」'):
+        ('長野県駒ヶ根市', '菅ノ台 古城登山口'),
+    ('髟キ驥守恁鬧偵Ω譬ケ蟶�', '縺ゅ°縺、縺阪�ョ蝪�'):
+        ('長野県駒ヶ根市', 'あかつきの塔'),
+    ('髟キ驥守恁鬧偵Ω譬ケ蟶�', '譴ィ繝取惠'):
+        ('長野県駒ヶ根市', '梨ノ木'),
+    ('髟キ驥守恁鮗サ邵セ譚�', '閨夜ォ伜次'):
+        ('長野県麻績村', '聖高原'),
+    ('鬥吝キ晉恁荳芽ア雁クりゥォ髢鍋伴', '邏ォ髮イ蜃コ螻ア'):
+        ('香川県三豊市詫間町', '紫雲出山'),
+    ('鬥吝キ晉恁隕ウ髻ウ蟇コ蟶ょ、ァ驥主次逕コ', '莠暮未豎\uf8f0'):
+        ('香川県観音寺市大野原町', '井関池'),
+    ('鬥吝キ晉恁隕ウ髻ウ蟇コ蟶�', '螟ァ驥主次逕コ莠暮未豎\uf8f0'):
+        ('香川県観音寺市', '大野原町井関池'),
+}
+
+@app.route("/api/_fix/mojibake", methods=["GET", "POST"])
+def api_fix_mojibake():
+    """Master_Photos の文字化けした Area・Place を、正しい名前に書き戻す。
+    GET は何件当てはまるかを数えるだけ。POST で実際に書き換える。
+    元の値は FixedFrom に残すので、あとから何を変えたか辿れる。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    apply = (request.method == "POST")
+    found, done, rows = 0, 0, []
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            key = (d.get('Area', ''), d.get('Place', ''))
+            fix = _MOJIBAKE_FIX.get(key)
+            if not fix:
+                continue
+            found += 1
+            if len(rows) < 60:
+                rows.append('%s｜%s　→　%s｜%s' % (key[0][:14], key[1][:12], fix[0], fix[1]))
+            if not apply:
+                continue
+            batch.set(doc.reference, {'Area': fix[0], 'Place': fix[1],
+                                      'FixedFrom': '%s｜%s' % key}, merge=True)
+            # 壊れた名前で集めた座標は用済み。消しておけば「集める」で入り直す。
+            try:
+                db.collection(_PLACEGEO_COL).document(placegeo_id(key[0], key[1])).delete()
+            except Exception:
+                pass
+            done += 1
+            n += 1
+            if n >= 300:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if apply and n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if apply and done:
+        # 作品データを読み直させる。索引も作り直す。
+        global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT, _PLACE_PAIRS, _PLACE_PAIRS_AT
+        _PHOTOS, _PHOTOS_AT = None, 0.0
+        _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0
+        _PLACE_PAIRS, _PLACE_PAIRS_AT = None, 0.0
+        # 保存してある索引も消す。残っていると、起き抜けに古い（壊れたままの）
+        # 索引が復元されて、直したことが表に出てこない。
+        try:
+            for ref in db.collection(_SNAP_COLL).list_documents():
+                ref.delete()
+        except Exception as e:
+            print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
+    return jsonify({"ok": True, "table": len(_MOJIBAKE_FIX), "found": found,
+                    "fixed": done, "applied": apply, "rows": rows})
+
 @app.route("/api/_geocode/places/rejudge", methods=["POST"])
 def api_geocode_places_rejudge():
     """すでに集めてある座標を、地図に問い合わせ直さずに判定だけやり直す。
@@ -6030,6 +6187,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
 <div class="btns">
   <button id="rejudge">判定し直す</button>
   <button id="resetbad">取り直しが要るものを消す</button>
+  <button id="moji">文字化けを直す</button>
 </div>
 
 <div id="bar"><i></i></div>
@@ -6181,6 +6339,30 @@ function resetBad() {
 
 $("#run").addEventListener("click", run);
 $("#count").addEventListener("click", showCount);
+
+/* 作品データの文字化けを直す。壊れている (Area, Place) が対応表に載っているものだけ書き換える。 */
+function fixMoji() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#moji").disabled = true;
+  $("#log").textContent = "";
+  fetch("/api/_fix/mojibake", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("直す行はありませんでした（対応表 " + j.table + "件）。"); return null; }
+      if (!confirm("作品データ " + j.found + "件の地名を直します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
+      say("直しています…");
+      return post("/api/_fix/mojibake", {}).then(function (k) {
+        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+        say(k.fixed + "件を直しました。\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+      });
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { $("#moji").disabled = false; });
+}
+
+$("#moji").addEventListener("click", fixMoji);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
