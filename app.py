@@ -13,6 +13,7 @@ import re
 import math
 import random
 import secrets
+import hashlib
 import time
 import urllib.parse
 import urllib.request
@@ -5558,6 +5559,467 @@ def page_import_sapa():
     if not os.environ.get("CHECK_KEY", ""):
         abort(404)
     resp = make_response(_IMPORT_SAPA_PAGE)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
+# ──────────────── 撮影地の座標（Place単位） ────────────────
+# これまで撮影地の座標は Area（市区町村）の文字列からしか引いていなかった。
+# そのため「群馬県前橋市｜覚満淵」は前橋市役所の位置になり、赤城山の上にある
+# 実際の覚満淵とは直線23km・標高差1,300m離れていた。市区町村を引けない Area
+# （誤記や合併で消えた旧町村名）は県の重心まで落ちていて、作品14,704件のうち
+# 2,191件（14.9%）がそうだった。行程の移動時間はこの座標で測っているので、
+# 計画そのものが地理的に成り立っていなかった。
+#
+# ここでは Area と Place をつないだ文字列をそのまま地図に問い合わせ、
+# 撮影地ごとの座標を Firestore に持つ。一度取れば以後は読むだけ。
+# （2026-10-05）
+
+_PLACEGEO_COL = 'PlaceGeo'
+_PLACEGEO = None
+_PLACEGEO_AT = 0.0
+_PLACEGEO_TTL = 6 * 3600
+
+def placegeo_id(area, place):
+    """Area と Place の組から、Firestoreの文書IDを作る。
+    地名には / や . が入りうるので、そのままIDには使えない。"""
+    raw = (str(area or '').strip() + '|' + str(place or '').strip())
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()[:24]
+
+def get_placegeo():
+    """撮影地ごとの座標表を返す。{(area, place): (lat, lng)}
+    使えないと判断したもの（status='ng'）は入れない。"""
+    global _PLACEGEO, _PLACEGEO_AT
+    now = time.time()
+    if _PLACEGEO is not None and (now - _PLACEGEO_AT) < _PLACEGEO_TTL:
+        return _PLACEGEO
+    if not db:
+        return _PLACEGEO if _PLACEGEO is not None else {}
+    out = {}
+    try:
+        for doc in db.collection(_PLACEGEO_COL).stream():
+            d = doc.to_dict() or {}
+            if d.get('status') == 'ng':
+                continue
+            try:
+                out[(d.get('area', ''), d.get('place', ''))] = (float(d['lat']), float(d['lng']))
+            except (KeyError, TypeError, ValueError):
+                continue
+    except Exception as e:
+        print('[WARN] PlaceGeo read failed: %s' % e)
+        return _PLACEGEO if _PLACEGEO is not None else {}
+    _PLACEGEO, _PLACEGEO_AT = out, now
+    print('[INFO] PlaceGeo: %d places' % len(out))
+    return out
+
+def place_latlng(area, place):
+    """撮影地そのものの座標。無ければ None（呼び出し側が市区町村へ落とす）。"""
+    if not place:
+        return None
+    return get_placegeo().get((str(area or '').strip(), str(place or '').strip()))
+
+# ── 地図への問い合わせ ──
+
+def geocode_detail(query):
+    """住所文字列から座標と確からしさを取る。
+    戻り値 {'lat','lng','type','partial','pref','formatted'}。
+    見つからなければ None。問い合わせ自体が断られたら例外を投げる
+    （呼び出し側で打ち切るため。残りを空振りさせても仕方がない）。"""
+    if not GEOCODING_API_KEY:
+        raise RuntimeError('GOOGLE_GEOCODING_API_KEY が設定されていません')
+    url = ('https://maps.googleapis.com/maps/api/geocode/json?address='
+           + urllib.parse.quote(query) + '&language=ja&region=jp&key=' + GEOCODING_API_KEY)
+    with urllib.request.urlopen(url, timeout=10) as res:
+        data = json.loads(res.read())
+    st = data.get('status', '')
+    if st in ('OVER_QUERY_LIMIT', 'REQUEST_DENIED', 'INVALID_REQUEST', 'UNKNOWN_ERROR'):
+        raise RuntimeError('地図からの返事：%s' % st)
+    if st != 'OK' or not data.get('results'):
+        return None
+    r0 = data['results'][0]
+    loc = r0['geometry']['location']
+    pref = ''
+    for c in r0.get('address_components', []):
+        if 'administrative_area_level_1' in (c.get('types') or []):
+            pref = c.get('long_name', '')
+            break
+    return {'lat': float(loc['lat']), 'lng': float(loc['lng']),
+            'type': r0['geometry'].get('location_type', ''),
+            'partial': bool(r0.get('partial_match')),
+            'pref': pref,
+            'formatted': r0.get('formatted_address', '')}
+
+def judge_place_geo(area, pref, got):
+    """取れた座標を使ってよいか決める。
+       ok    … そのまま使う
+       check … 使うが、目で確かめたほうがよい
+       ng    … 使わない（市区町村の座標のままにする）
+    戻り値 (status, reason, km)。km は市区町村の中心からの隔たり。"""
+    if not got:
+        return 'ng', '見つかりませんでした', None
+    city = work_latlng(area, pref)
+    km = (haversine(city[0], city[1], got['lat'], got['lng'])
+          if city else None)
+    if pref and got.get('pref') and got['pref'] != pref:
+        return 'ng', '別の県が返ってきました（%s）' % got['pref'], km
+    if km is not None and km > 60:
+        return 'ng', '市区町村の中心から%.0fkm離れています' % km, km
+    if got.get('partial'):
+        return 'check', '地名が完全には一致していません', km
+    if km is not None and km < 0.2:
+        return 'check', '市区町村の中心と同じ場所です（地名が見つかっていない可能性）', km
+    return 'ok', '', km
+
+# ── 取り込み ──
+
+_PLACE_PAIRS = None
+_PLACE_PAIRS_AT = 0.0
+
+def place_pairs():
+    """作品データから (Area, Place, 件数) を、件数の多い順に並べて返す。
+    件数の多い撮影地から先に片付けたほうが、途中で止めても効き目が大きい。"""
+    global _PLACE_PAIRS, _PLACE_PAIRS_AT
+    now = time.time()
+    if _PLACE_PAIRS is not None and (now - _PLACE_PAIRS_AT) < 3600:
+        return _PLACE_PAIRS
+    cnt = Counter()
+    for d in get_photos():
+        a = (d.get('Area') or '').strip()
+        p = (d.get('Place') or '').strip()
+        if a and p:
+            cnt[(a, p)] += 1
+    _PLACE_PAIRS = [(a, p, n) for (a, p), n in cnt.most_common()]
+    _PLACE_PAIRS_AT = now
+    return _PLACE_PAIRS
+
+@app.route("/api/_geocode/places/run", methods=["POST"])
+def api_geocode_places_run():
+    """(Area, Place) の組をいくつか地図に問い合わせて、座標を書き足す。
+    1回の呼び出しを短く保つため、少しずつ進める。続きは next から。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    body = request.get_json(silent=True) or {}
+    try:
+        offset = max(0, int(body.get('offset', 0)))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = max(1, min(30, int(body.get('limit', 15))))
+    except (TypeError, ValueError):
+        limit = 15
+
+    pairs = place_pairs()
+    col = db.collection(_PLACEGEO_COL)
+    batch = db.batch()
+    asked, writes, skipped = 0, 0, 0
+    tally = {'ok': 0, 'check': 0, 'ng': 0}
+    rows = []
+    i = offset
+    scan_cap = i + limit * 40        # 済みばかり続いても、1回の呼び出しが延びすぎないように
+    err = ''
+    while i < len(pairs) and asked < limit and i < scan_cap:
+        area, place, n = pairs[i]
+        i += 1
+        ref = col.document(placegeo_id(area, place))
+        try:
+            if ref.get().exists:
+                skipped += 1
+                continue
+        except Exception as e:
+            err = '読み取りに失敗しました：%s' % e
+            break
+        pref = extract_pref(area)
+        query = (area + ' ' + place).strip()
+        try:
+            got = geocode_detail(query)
+        except RuntimeError as e:
+            err = str(e)
+            break
+        except Exception as e:
+            got, err = None, '問い合わせに失敗しました：%s' % e
+        asked += 1
+        status, reason, km = judge_place_geo(area, pref, got)
+        tally[status] = tally.get(status, 0) + 1
+        row = {'area': area, 'place': place, 'pref': pref, 'works': n,
+               'query': query, 'status': status, 'reason': reason,
+               'km_from_city': round(km, 2) if km is not None else None,
+               'at': firestore.SERVER_TIMESTAMP}
+        if got:
+            row.update({'lat': got['lat'], 'lng': got['lng'],
+                        'type': got['type'], 'partial': got['partial'],
+                        'got_pref': got['pref'], 'formatted': got['formatted']})
+        batch.set(ref, row)
+        writes += 1
+        rows.append({'area': area, 'place': place, 'status': status,
+                     'reason': reason, 'km': row['km_from_city']})
+        if err:
+            break
+    if writes:
+        try:
+            batch.commit()
+        except Exception as e:
+            return jsonify({"ok": False, "error": "書き込みに失敗しました：%s" % e}), 500
+    return jsonify({"ok": True, "next": i, "total": len(pairs),
+                    "asked": asked, "saved": writes, "skipped": skipped,
+                    "tally": tally, "rows": rows, "error": err})
+
+@app.route("/api/_geocode/places/count", methods=["GET"])
+def api_geocode_places_count():
+    """いくつ片付いたかを数える。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    tally = {'ok': 0, 'check': 0, 'ng': 0}
+    total = 0
+    try:
+        for doc in db.collection(_PLACEGEO_COL).stream():
+            d = doc.to_dict() or {}
+            s = d.get('status', '')
+            tally[s] = tally.get(s, 0) + 1
+            total += 1
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "done": total, "pairs": len(place_pairs()), "tally": tally})
+
+@app.route("/api/_geocode/places/export", methods=["GET"])
+def api_geocode_places_export():
+    """集めた座標を一覧で書き出す。Excelで開いて目で確かめるため。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        abort(500)
+    import csv as _csv
+    from io import StringIO
+    buf = StringIO()
+    w = _csv.writer(buf)
+    w.writerow(['Area', 'Place', '作品数', '判定', '理由', '緯度', '経度',
+                '市区町村中心からkm', '精度', '部分一致', '返ってきた県', '地図の住所'])
+    rows = []
+    try:
+        for doc in db.collection(_PLACEGEO_COL).stream():
+            d = doc.to_dict() or {}
+            rows.append(d)
+    except Exception as e:
+        abort(500)
+    order = {'ng': 0, 'check': 1, 'ok': 2}
+    rows.sort(key=lambda d: (order.get(d.get('status', ''), 9), -(d.get('works') or 0)))
+    for d in rows:
+        w.writerow([d.get('area', ''), d.get('place', ''), d.get('works', ''),
+                    d.get('status', ''), d.get('reason', ''),
+                    d.get('lat', ''), d.get('lng', ''), d.get('km_from_city', ''),
+                    d.get('type', ''), 'はい' if d.get('partial') else '',
+                    d.get('got_pref', ''), d.get('formatted', '')])
+    resp = make_response('﻿' + buf.getvalue())      # Excelで開けるようBOMを付ける
+    resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    resp.headers['Content-Disposition'] = 'attachment; filename="place_geo.csv"'
+    return resp
+
+@app.route("/api/_geocode/places/clear", methods=["POST"])
+def api_geocode_places_clear():
+    """集めた座標をすべて消す。取り直したいときだけ使う。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    deleted = 0
+    try:
+        while True:
+            docs = list(db.collection(_PLACEGEO_COL).limit(400).stream())
+            if not docs:
+                break
+            b = db.batch()
+            for doc in docs:
+                b.delete(doc.reference)
+            b.commit()
+            deleted += len(docs)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    global _PLACEGEO, _PLACEGEO_AT
+    _PLACEGEO, _PLACEGEO_AT = None, 0.0
+    return jsonify({"ok": True, "deleted": deleted})
+
+_GEOCODE_PLACES_PAGE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>撮影地の座標を集める</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",sans-serif;
+      margin:0;padding:24px 16px;background:#faf9f7;color:#1c1917;line-height:1.7}
+ .wrap{max-width:760px;margin:0 auto}
+ h1{font-size:22px;margin:0 0 12px}
+ p{margin:0 0 12px;font-size:15px}
+ label{display:block;font-weight:700;font-size:14px;margin:18px 0 6px}
+ input[type=password]{width:100%;box-sizing:border-box;padding:12px;font-size:15px;
+      border:1px solid #d6d3d1;border-radius:8px}
+ .btns{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+ button{padding:12px 20px;font-size:15px;font-weight:700;border-radius:8px;
+      border:1px solid #d6d3d1;background:#fff;cursor:pointer}
+ button.go{background:#064e3b;border-color:#064e3b;color:#fff}
+ button:disabled{opacity:.45;cursor:not-allowed}
+ #msg{display:none;padding:14px;border-radius:8px;background:#ecfdf5;
+      white-space:pre-wrap;font-size:15px}
+ #msg.ng{background:#fef2f2}
+ #bar{display:none;height:10px;border-radius:5px;background:#e7e5e4;margin:14px 0;overflow:hidden}
+ #bar > i{display:block;height:100%;width:0;background:#059669;transition:width .3s}
+ #log{display:none;margin-top:14px;padding:12px;background:#fff;border:1px solid #e7e5e4;
+      border-radius:8px;font-size:13px;max-height:320px;overflow:auto;white-space:pre-wrap;
+      font-family:ui-monospace,monospace}
+ .note{color:#78716c;font-size:13px}
+ a{color:#065f46}
+</style></head><body><div class="wrap">
+<h1>撮影地の座標を集める</h1>
+<p>作品データの Area と Place をつないだ文字列を地図に問い合わせ、撮影地ごとの座標を集めます。
+これまでは市区町村の座標しか無く、たとえば「前橋市｜覚満淵」は前橋市役所の位置になっていました。
+<b>一度集めれば以後は読むだけです。</b>
+途中で閉じても、次に開いて押せば続きから進みます。同じ撮影地を二度問い合わせることはありません。</p>
+
+<label for="key">CHECK_KEY</label>
+<input id="key" type="password" autocomplete="off" placeholder="Renderの環境変数に入れた値">
+
+<div class="btns">
+  <button id="count">いま何件あるか見る</button>
+  <button id="run" class="go">集める</button>
+  <button id="stop" disabled>止める</button>
+  <button id="csv">一覧を書き出す</button>
+</div>
+
+<div id="bar"><i></i></div>
+<div id="msg"></div>
+<div id="log"></div>
+
+<p class="note" style="margin-top:20px">判定の意味。
+<b>ok</b>＝そのまま使います。
+<b>check</b>＝使いますが、目で確かめたほうがよいもの（地名が完全に一致しなかった、または市区町村の中心と同じ場所だった）。
+<b>ng</b>＝使いません（見つからなかった、別の県が返ってきた、市区町村の中心から60km以上離れていた）。市区町村の座標のままになります。</p>
+<p class="note">出典：地図データ © Google</p>
+</div>
+<script>
+var $ = function (s) { return document.querySelector(s); };
+function key() { return $("#key").value.trim(); }
+function say(t, ng) { var m = $("#msg"); m.style.display = "block"; m.className = ng ? "ng" : ""; m.textContent = t; }
+function log(t) { var o = $("#log"); o.style.display = "block"; o.textContent += t + "\\n"; o.scrollTop = o.scrollHeight; }
+function bar(p) { $("#bar").style.display = "block"; $("#bar > i").style.width = Math.max(0, Math.min(100, p)) + "%"; }
+
+var stopped = false;
+
+function post(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Check-Key": key() },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    if (r.status === 404) { throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません"); }
+    return r.json();
+  });
+}
+
+function showCount() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  fetch("/api/_geocode/places/count", { headers: { "X-Check-Key": key() } })
+    .then(function (r) {
+      if (r.status === 404) { throw new Error("CHECK_KEY が違うか、設定されていません"); }
+      return r.json();
+    })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      var t = j.tally || {};
+      say("撮影地 " + j.pairs + "か所のうち、" + j.done + "か所ぶんの座標があります。\\n"
+        + "ok " + (t.ok || 0) + "／check " + (t.check || 0) + "／ng " + (t.ng || 0));
+      bar(j.pairs ? j.done / j.pairs * 100 : 0);
+    })
+    .catch(function (e) { say(e.message, true); });
+}
+
+/* 1回の呼び出しを短く保ち、続きは next から。
+   途中で閉じても、すでに書けたぶんは残る。 */
+function run() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  stopped = false;
+  $("#run").disabled = true; $("#count").disabled = true; $("#csv").disabled = true;
+  $("#stop").disabled = false;
+  $("#log").textContent = "";
+  log("集め始めます");
+
+  var asked = 0, saved = 0, total = 0;
+  var sum = { ok: 0, check: 0, ng: 0 };
+
+  function step(offset) {
+    if (stopped) { return Promise.resolve({ stopped: true, next: offset }); }
+    return post("/api/_geocode/places/run", { offset: offset, limit: 15 }).then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+      total = j.total;
+      asked += j.asked || 0; saved += j.saved || 0;
+      var t = j.tally || {};
+      sum.ok += t.ok || 0; sum.check += t.check || 0; sum.ng += t.ng || 0;
+      (j.rows || []).forEach(function (r) {
+        if (r.status !== "ok") {
+          log("　" + r.status + "　" + r.area + "｜" + r.place
+            + (r.reason ? "　" + r.reason : ""));
+        }
+      });
+      bar(total ? j.next / total * 100 : 0);
+      say("集めています… " + j.next + " / " + total + "か所まで進みました\\n"
+        + "このひと続きで問い合わせたのは " + asked + "か所"
+        + "（ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng + "）");
+      if (j.error) { throw new Error(j.error); }
+      if (j.next >= total) { return { done: true, next: j.next }; }
+      return step(j.next);
+    });
+  }
+
+  step(0).then(function (r) {
+    if (r && r.stopped) {
+      say("止めました。" + r.next + "か所まで進んでいます。\\nもう一度「集める」を押すと続きから進みます。");
+    } else {
+      say("集め終わりました。\\n問い合わせ " + asked + "か所"
+        + "（ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng + "）\\n"
+        + "「一覧を書き出す」で中身を確かめられます。");
+    }
+  }).catch(function (e) {
+    say(e.message + "\\n（ここまでに書けたぶんは残っています。もう一度押せば続きから進みます）", true);
+  }).then(function () {
+    $("#run").disabled = false; $("#count").disabled = false; $("#csv").disabled = false;
+    $("#stop").disabled = true;
+  });
+}
+
+$("#run").addEventListener("click", run);
+$("#count").addEventListener("click", showCount);
+$("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
+$("#csv").addEventListener("click", function () {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  fetch("/api/_geocode/places/export", { headers: { "X-Check-Key": key() } })
+    .then(function (r) {
+      if (r.status === 404) { throw new Error("CHECK_KEY が違うか、設定されていません"); }
+      return r.blob();
+    })
+    .then(function (b) {
+      var u = URL.createObjectURL(b);
+      var a = document.createElement("a");
+      a.href = u; a.download = "place_geo.csv"; a.click();
+      setTimeout(function () { URL.revokeObjectURL(u); }, 5000);
+    })
+    .catch(function (e) { say(e.message, true); });
+});
+try { var s = sessionStorage.getItem("rmkey"); if (s) { $("#key").value = s; } } catch (e) {}
+$("#key").addEventListener("change", function () {
+  try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
+});
+</script></body></html>
+"""
+
+@app.route("/_geocode-places", methods=["GET"])
+def page_geocode_places():
+    """ブラウザで開く、撮影地の座標を集める画面。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_GEOCODE_PLACES_PAGE)
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Robots-Tag"] = "noindex, nofollow"
