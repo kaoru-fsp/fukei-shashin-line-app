@@ -5635,7 +5635,10 @@ def geocode_detail(query):
         data = json.loads(res.read())
     st = data.get('status', '')
     if st in ('OVER_QUERY_LIMIT', 'REQUEST_DENIED', 'INVALID_REQUEST', 'UNKNOWN_ERROR'):
-        raise RuntimeError('地図からの返事：%s' % st)
+        # Google は断った理由を error_message に書いてくる。
+        # これを捨てると「断られた」としか分からず、原因にたどり着けない。
+        detail = str(data.get('error_message') or '').strip()
+        raise RuntimeError('地図からの返事：%s%s' % (st, ('／' + detail) if detail else ''))
     if st != 'OK' or not data.get('results'):
         return None
     r0 = data['results'][0]
