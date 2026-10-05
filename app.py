@@ -5390,7 +5390,12 @@ function fetchBox(label, bbox) {
       if (res.status !== 200) { throw new Error("HTTP " + res.status); }
       var j;
       try { j = JSON.parse(res.text); } catch (e) { throw new Error("返事を読み取れませんでした"); }
-      if (!j.elements) { throw new Error(j.remark ? String(j.remark).slice(0, 60) : "中身がありません"); }
+      /* 混んでいるとき、Overpass は 200 を返しながら中身を空で返すことがある。
+         高速道路の無い範囲はひとつも無いので、0件は失敗とみなして試し直す。
+         （2026-10-04 夜、関東（西）・甲信 が 0件のまま「取れた」扱いになった） */
+      if (!j.elements || !j.elements.length) {
+        throw new Error(j.remark ? String(j.remark).slice(0, 60) : "中身が空でした");
+      }
       return j.elements;
     }).catch(function (e) {
       log("　" + label + "：" + e.message + " → 間を置いて試し直します");
@@ -5472,37 +5477,61 @@ function run() {
   $("#log").textContent = "";
   log("取得を始めます（" + BOXES.length + "の範囲に分けて聞きます）");
 
-  var queue = BOXES.slice();
-  var okList = [], ngList = [], total = 0;
+  var okList = [], total = 0;
+  var remain = BOXES.slice();      // まだ取れていない範囲
+  var pass = 0, MAX_PASS = 3;
 
-  function nextBox() {
-    if (!queue.length) { return Promise.resolve(); }
-    var b = queue.shift();
-    return fetchBox(b[0], b[1]).then(function (els) {
-      var items = normalise(els);
-      log("　" + b[0] + "：取得 " + items.length + "件 → 登録しています");
-      if (!items.length) { okList.push(b[0] + " 0件"); return; }
-      return sendItems(items).then(function (r) {
-        total += r.saved;
-        okList.push(b[0] + " " + r.saved + "件");
-        log("　" + b[0] + "：登録 " + r.saved + "件／見送り " + r.skipped + "件");
-      });
-    }).catch(function (e) {
-      ngList.push(b[0]);
-      log("　" + b[0] + "：✕ " + e.message + "（この範囲は飛ばします）");
-    }).then(function () {
-      return wait(2000);
-    }).then(nextBox);
+  /* 取れなかった範囲は、ひと回りしたあとで間を置いて試し直す。
+     混雑は波があるので、同じ範囲を続けて叩くより、ほかを回ってから
+     戻ってきたほうが通りやすい。（2026-10-05 追加） */
+  function onePass() {
+    pass += 1;
+    var queue = remain.slice();
+    var failed = [];
+    if (pass > 1) {
+      log("取れなかった " + queue.length + "の範囲を、もう一度回ります（" + pass + "周目）");
+    }
+
+    function nextBox() {
+      if (!queue.length) { return Promise.resolve(); }
+      var b = queue.shift();
+      return fetchBox(b[0], b[1]).then(function (els) {
+        var items = normalise(els);
+        log("　" + b[0] + "：取得 " + items.length + "件 → 登録しています");
+        if (!items.length) {
+          okList.push(b[0] + " 0件");
+          log("　" + b[0] + "：名前の付いたものがありませんでした");
+          return;
+        }
+        return sendItems(items).then(function (r) {
+          total += r.saved;
+          okList.push(b[0] + " " + r.saved + "件");
+          log("　" + b[0] + "：登録 " + r.saved + "件／見送り " + r.skipped + "件");
+        });
+      }).catch(function (e) {
+        failed.push(b);
+        log("　" + b[0] + "：✕ " + e.message + "（この範囲は後回しにします）");
+      }).then(function () {
+        return wait(2000);
+      }).then(nextBox);
+    }
+
+    return nextBox().then(function () {
+      remain = failed;
+      if (!remain.length || pass >= MAX_PASS) { return; }
+      log("　少し待ってから、取れなかった範囲を試し直します");
+      return wait(15000).then(onePass);
+    });
   }
 
-  nextBox().then(function () {
+  onePass().then(function () {
     var msg = "終わりました。登録 " + total + "件。\\n"
       + "取れた範囲：" + (okList.join("、") || "なし");
-    if (ngList.length) {
-      msg += "\\n取れなかった範囲：" + ngList.join("、")
-        + "\\nこの範囲だけ、あとでもう一度押せば追加されます（消さずに足すので重複しません）。";
+    if (remain.length) {
+      msg += "\\n取れなかった範囲：" + remain.map(function (b) { return b[0]; }).join("、")
+        + "\\nこの範囲は、あとでもう一度押せば追加されます（消さずに足すので重複しません）。";
     }
-    say(msg, ngList.length > 0);
+    say(msg, remain.length > 0);
   }).catch(function (e) {
     say(e.message, true);
   }).then(function () {
