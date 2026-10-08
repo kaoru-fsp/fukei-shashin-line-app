@@ -1255,7 +1255,9 @@ for _full in CITY_LATLNG:
 PLAIN_CITY_SORTED = sorted(_plain_prefs, key=len, reverse=True)
 PLAIN_CITY_TO_PREF = {_k: (next(iter(_v)) if len(_v) == 1 else "AMBIGUOUS")
                       for _k, _v in _plain_prefs.items()}
-print(f"[INFO] plain city index: {len(PLAIN_CITY_SORTED)} names", flush=True)
+PLAIN_CITY_PREFS = {_k: sorted(_v) for _k, _v in _plain_prefs.items() if len(_v) >= 2}
+print(f"[INFO] plain city index: {len(PLAIN_CITY_SORTED)} names "
+      f"({len(PLAIN_CITY_PREFS)} ambiguous)", flush=True)
 
 def city_by_plain_name(text):
     """文中にある市区町村名のうち、いちばん長いものを採る。
@@ -1267,6 +1269,30 @@ def city_by_plain_name(text):
                 return "AMBIGUOUS", None, _name
             return _pf, (CITY_LATLNG.get(_pf + _name) or PREF_LATLNG[_pf]), _name
     return None, None, None
+
+def ambiguous_city_prefs(name):
+    """同じ名前の市区町村がある県を並べて返す。問い返しの選択肢に使う。
+
+    まず誌面データから作った表（CITY_TO_PREF_MULTI）を見て、空なら全国の
+    市区町村表（PLAIN_CITY_PREFS）で補う。
+    「府中市」のように、同名の市が複数あっても誌面には片方の県の作品しか
+    無い地名だと前者は空になる。それでも city_by_plain_name は全国表を見て
+    AMBIGUOUS を返すので、「番号でお答えください」と言いながら選択肢が
+    1つも出ない、という状態になっていた。（2026-10-08）"""
+    n = str(name or '').strip()
+    if not n:
+        return []
+    out = list(CITY_TO_PREF_MULTI.get(n) or [])
+    if not out:
+        out = list(PLAIN_CITY_PREFS.get(n) or [])
+    if not out:
+        base = re.sub(r'[市区町村郡]', '', n).strip()
+        if base:
+            for _k, _v in PLAIN_CITY_PREFS.items():
+                if re.sub(r'[市区町村郡]', '', _k).strip() == base:
+                    out = list(_v)
+                    break
+    return out
 
 # 陸続きで隣接する都道府県（県検索を「県内→隣県」に広げるための表）。海上のみで接する組合せは含めない。
 PREF_NEIGHBORS = {
@@ -3946,7 +3972,7 @@ def handle_message(event):
 
         # 同名地名の問い返し
         if area_name == "AMBIGUOUS":
-            prefs = CITY_TO_PREF_MULTI.get(area_display, [])
+            prefs = ambiguous_city_prefs(area_display)
             # キーワード候補があるか確認
             keyword_variants = {
                 '朝日': ('朝焼け', '朝日（風景・被写体）'),
@@ -4040,7 +4066,9 @@ def handle_message(event):
 
         if area_name and area_name in WIDE_PREFS and not city_specified and not city_from_dict:
             msg = TextSendMessage(
-                text=f"{area_name[:-1]}ですか。それは楽しみですね。どのあたりに行かれますか？市町村名や地域名を教えていただけますか。"
+                # 末尾1文字を落として「長野県」→「長野」と呼びかける。
+                # ただし「北海道」は道まで含めて名前なので、落とすと「北海」になる。（2026-10-08 修正）
+                text=f"{area_name if area_name == '北海道' else area_name[:-1]}ですか。それは楽しみですね。どのあたりに行かれますか？市町村名や地域名を教えていただけますか。"
             )
             line_bot_api.reply_message(reply_token, msg)
             return
@@ -6786,6 +6814,516 @@ def api_plan():
     resp = jsonify(out)
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
+
+
+# ──────────────── コンシェルジュ（Web側から呼ぶ入口） ────────────────
+# LINEの handle_message が持っていた「言葉を読み取って撮影地を選ぶ」部分を、
+# 送る文面の組み立てから切り離したもの。中身の判断は handle_message と同じ道具
+# （parse_period / parse_target_area / detect_subject_longest / search_by_place /
+# select_three_points）を使う。つまりLINEとWebで答えがずれない。
+#
+# 違うのは状態の持ち方だけ。LINEは「いま問い返しの途中かどうか」をサーバー側に
+# 覚えさせていた（AMBIGUOUS_PENDING など）。こちらは覚えない。聞き返したいときは
+# 聞く中身を choices に入れて返し、答えは次の呼び出しで pref / subject として
+# 受け取る。画面を持つ側が状態を持つほうが、戻る・やり直すが素直に書ける。
+#                                                              （2026-10-08）
+
+_REF_SITE = "https://reference.fukei-shashin.co.jp"
+
+
+def _conc_spot(label, it):
+    """1件の作品を、画面がそのまま使える形にする。
+    座標は撮影地そのもの（PlaceGeo）を先に見て、無ければ市区町村へ落とす。
+    どちらを使ったかは latlng_from で分かるようにしておく。"""
+    from urllib.parse import quote
+    area = str(it.get('area', '') or '')
+    place = str(it.get('place', '') or '')
+
+    ll = place_latlng(area, place)
+    src = 'place'
+    if not ll:
+        ll = work_latlng(area)
+        src = 'city' if ll else ''
+
+    params = []
+    for k, v in (('area', area), ('place', place),
+                 ('title', it.get('title', '')), ('period', it.get('period', '')),
+                 ('pub', it.get('pub', '')), ('img', it.get('url', '')),
+                 ('winner', it.get('winner', '')), ('award', it.get('award', ''))):
+        if v:
+            params.append("%s=%s" % (k, quote(str(v))))
+
+    ref_loc = place or area
+    map_q = (place + " " + area).strip() if (place or area) else ""
+    return {
+        "label": label,
+        "area": area,
+        "place": place,
+        "title": str(it.get('title', '') or ''),
+        "winner": str(it.get('winner', '') or ''),
+        "award": str(it.get('award', '') or ''),
+        "period": str(it.get('period', '') or ''),
+        "pub": str(it.get('pub', '') or ''),
+        "img": str(it.get('url', '') or ''),
+        "pic": str(it.get('pic', '') or ''),
+        "dnumb": str(it.get('dnumb', '') or ''),
+        "dist_km": round(float(it.get('dist', 0) or 0), 1),
+        "lat": ll[0] if ll else None,
+        "lng": ll[1] if ll else None,
+        "latlng_from": src,
+        "maps": ("https://maps.google.com/maps?q=" + quote(map_q)) if map_q else "",
+        "reference": (_REF_SITE + "/reference?location=" + quote(ref_loc)) if ref_loc else (_REF_SITE + "/reference"),
+        "planner": (_REF_SITE + "/planner?" + "&".join(params)) if params else (_REF_SITE + "/planner"),
+    }
+
+
+def _conc_pack(results):
+    return [_conc_spot(lbl, it) for _emoji, lbl, it in (results or [])]
+
+
+def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
+                     pref=None, subject=None, radius_km=None):
+    """言葉から撮影地を選ぶ。
+
+    text        「どこ行く？」に書かれた言葉（地名・被写体・時期が混ざっていてよい）
+    origin_*     「どこから？」の起点。距離を測るためだけに使う。
+    base_date   「いつ行く？」の日。text に時期が書かれていればそちらが優先。
+    pref        同名地名の聞き返しへの答え（県名）
+    subject     被写体の聞き返しへの答え
+
+    戻り値の status
+      ok        … 候補が出た
+      few       … 出たが少ない（広げ方を choices で返す）
+      ask_pref  … 同じ地名が複数の県にある
+      ask_subject … 「花」のような大きな括りで来た
+      ask_city  … 北海道のように広すぎる
+      author    … 地名でも被写体でもなく、作者名だった
+      info      … 伝えることはあるが候補は出せない
+      none      … 見つからなかった
+    """
+    out = {"status": "none", "message": "", "note": "", "choices": [],
+           "peaks": [], "peaks_text": "", "count": 0, "spots": [], "read": {}}
+
+    t = str(text or "").strip()
+    pp = parse_period(t, today=base_date)
+    if not pp['specified'] and base_date:
+        pp = {'date': base_date, 'specified': True, 'granularity': 'day'}
+    target_date = pp['date']
+    ol = tuple(origin_latlng) if origin_latlng else None
+    on = origin_name or DEFAULT_ORIGIN_NAME
+
+    def _read(area_name=None, area_display=None, subj=None, center=None, rad=None):
+        out["read"] = {
+            "date": target_date.isoformat(),
+            "date_label": period_phrase(pp),
+            "date_specified": bool(pp['specified']),
+            "pref": area_name if area_name not in (None, 'AMBIGUOUS') else None,
+            "area": area_display or None,
+            "subject": subj or None,
+            "center": list(center) if center else None,
+            "radius_km": rad,
+            "origin": list(ol) if ol else None,
+            "origin_name": on,
+        }
+
+    if not t and not subject:
+        out["status"] = "info"
+        out["message"] = "地名（栃木県、美瑛）や被写体（滝、桜）を入れてください。"
+        _read()
+        return out
+
+    # ── 1. 地域を読む ──
+    area_name, area_latlng, area_display = parse_target_area(t)
+
+    # 同名地名の聞き返しに答えが返ってきていれば、ここで確定させる。
+    if pref and area_name == "AMBIGUOUS" and area_display:
+        _city = area_display
+        area_latlng = (CITY_TO_LATLNG.get(_city)
+                       or geocode("%s%s" % (pref, _city))
+                       or PREF_LATLNG.get(pref))
+        area_name, area_display = pref, _city
+    elif pref and not area_name and pref in PREF_LATLNG:
+        area_name, area_latlng, area_display = pref, PREF_LATLNG[pref], pref
+
+    # ── 2. 被写体を読む ──
+    # 地名の部分一致に被写体を取られないよう、見つかった地名を伏せてから探す。
+    # （「茨城」の城、「川越」の川、「海老名」の海を被写体と読まないため）
+    _msg_for_subj = t
+    for _rm in (area_name, area_display):
+        if isinstance(_rm, str) and _rm not in ('', 'AMBIGUOUS', '現在地'):
+            _msg_for_subj = _msg_for_subj.replace(_rm, " ")
+    if area_name in PREF_NEIGHBORS:
+        _short = area_name if area_name == "北海道" else re.sub(r'[都府県]$', '', area_name)
+        _msg_for_subj = _msg_for_subj.replace(_short, " ")
+    _subj = detect_subject_longest(_msg_for_subj)
+
+    if subject and subject in KEYWORD_NORMALIZE:
+        _subj = subject          # 聞き返しへの答えが最優先
+
+    # 被写体が決まったら、その語を落としてから地名を取り直す。
+    if _subj:
+        _msg_wo_subj = t
+        for v in KEYWORD_NORMALIZE.get(_subj, []):
+            _msg_wo_subj = _msg_wo_subj.replace(v, ' ')
+        _msg_wo_subj = re.sub(r'[、,。.・/／｜|\s　]+', ' ', _msg_wo_subj).strip()
+        if len(_msg_wo_subj) >= 2:
+            _a2, _l2, _d2 = parse_target_area(_msg_wo_subj)
+            if _a2 or not pref:
+                area_name, area_latlng, area_display = _a2, _l2, _d2
+
+    search_keyword = _subj
+    if not search_keyword and not (area_name and area_name != 'AMBIGUOUS'):
+        search_keyword = detect_subject_longest(t)
+
+    # ── 3. 「花」のような大きな括りで来たとき ──
+    if not _subj and not subject:
+        _msg_for_cat = re.sub(
+            r'\d{1,2}月(?:\d{1,2}日)?|\d+日後|上旬|中旬|下旬|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末',
+            ' ', t)
+        _cat = detect_category(_msg_for_cat)
+        if _cat:
+            _ccent = ol or SHINJUKU
+            _cnear = on if ol else "東京"
+            RADIUS_CAT = 300
+            _members = SUBJECT_CATEGORIES.get(_cat, [])
+            _read(area_name, area_display, None, _ccent, RADIUS_CAT)
+            _inpeak = category_members_in_peak(_members, _ccent, RADIUS_CAT, target_date)
+            if _inpeak:
+                out["status"] = "ask_subject"
+                out["message"] = ("「%s」で探します。%sから半径%dkm圏内で、いま撮り頃なのはこちらです。"
+                                  % (_cat, _cnear, RADIUS_CAT))
+                out["choices"] = [{"kind": "subject", "value": s, "label": s,
+                                   "note": "撮り頃 %s・%d件" % (pk, n)}
+                                  for s, pk, n in _inpeak[:8]]
+                return out
+            _nexts = category_next_peaks(_members, _ccent, RADIUS_CAT, target_date)
+            if _nexts:
+                out["status"] = "ask_subject"
+                out["message"] = ("%sの周辺では、いま撮り頃の%sは見つかりませんでした。次に近い撮り頃はこちらです。"
+                                  % (_cnear, _cat))
+                out["choices"] = [{"kind": "subject", "value": s, "label": s,
+                                   "note": "%sごろ" % lbl}
+                                  for s, lbl, _d in _nexts[:3]]
+                return out
+            out["status"] = "none"
+            out["message"] = ("%sの周辺では、%sの作品が見つかりませんでした。"
+                              "「桜」「ひまわり」のように具体的な名前でもお試しください。" % (_cnear, _cat))
+            return out
+
+    # ── 4. 地域＋被写体 / 被写体のみ ──
+    if _subj:
+        txt = t
+        for v in KEYWORD_NORMALIZE.get(_subj, []):
+            txt = txt.replace(v, ' ')
+        txt = re.sub(r'(撮り頃|撮りごろ|撮り|見頃|みごろ|時期|いつ|頃|ごろ)', ' ', txt)
+        txt = re.sub(r'\d{1,2}月(?:上旬|中旬|下旬)?\d{0,2}日?|上旬|中旬|下旬|\d+日後|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末', ' ', txt)
+        for _fw in FILLER_WORDS:
+            txt = txt.replace(_fw, ' ')
+        txt = re.sub(r'[、,。.・/／｜|\s　]+', ' ', txt)
+        place_terms = []
+        for tok in txt.split():
+            tok = re.sub(r'^[のはをがでとへもに]+|[のはをがでとへもに]+$', '', tok).strip()
+            if len(tok) >= 2:
+                place_terms.append(tok)
+        place_terms = list(dict.fromkeys(place_terms))
+
+        if place_terms:
+            place_disp = "・".join(place_terms)
+            _read(area_name, place_disp, _subj, None, None)
+            pr = search_by_place(place_terms, base_date=target_date,
+                                 origin_latlng=ol, origin_name=on, subject=_subj)
+            speaks = pr.get('peaks', [])
+            out["peaks"] = speaks
+            out["peaks_text"] = peaks_text(speaks) if speaks else ""
+            out["note"] = famous_spots_note(subject=_subj, region_text=place_disp,
+                                            origin_latlng=ol, base_date=target_date) or ""
+            if pr['status'] in ('not_found', 'off_season'):
+                out["status"] = "none"
+                if pr['status'] == 'off_season':
+                    hint = (peak_reason_text("ちなみに「%s」" % place_disp, _subj, speaks)
+                            if (_subj in SEASONAL_SUBJECTS and speaks)
+                            else "期間を広げると作品が見つかります。")
+                    out["message"] = ("%sに「%s」で撮影された%sの作品は見つかりませんでした。%s"
+                                      % (period_phrase(pp), place_disp, _subj, hint))
+                    out["choices"] = _conc_widen(peak=bool(speaks))
+                else:
+                    out["message"] = ("%sに「%s」で撮影された%sの作品は見つかりませんでした。地域を広げて探せます。"
+                                      % (period_phrase(pp), place_disp, _subj))
+                    out["choices"] = _conc_widen(peak=False)
+                return out
+            out["spots"] = _conc_pack(pr['results'])
+            out["count"] = len(out["spots"])
+            _sfx = ("（撮り頃は%sごろ）" % peaks_text(speaks)) if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+            out["message"] = ("%sに「%s」で撮影された%sの作品はこちらです%s。"
+                              % (period_phrase(pp), place_disp, _subj, _sfx))
+            if out["count"] <= 3:
+                out["status"] = "few"
+                out["choices"] = _conc_widen(peak=(_subj in SEASONAL_SUBJECTS and bool(speaks)))
+            else:
+                out["status"] = "ok"
+            return out
+
+        # 地名なし・被写体のみ → 起点（無ければ新宿）から半径150km
+        center = ol or SHINJUKU
+        rad = float(radius_km) if radius_km else 150.0
+        near_name = on if ol else "東京"
+        _read(None, None, _subj, center, rad)
+        prn = search_by_place([], base_date=target_date, origin_latlng=ol, origin_name=on,
+                              subject=_subj, center_latlng=center, radius_km=rad)
+        speaks = prn.get('peaks', [])
+        out["peaks"] = speaks
+        out["peaks_text"] = peaks_text(speaks) if speaks else ""
+        out["note"] = famous_spots_note(subject=_subj, origin_latlng=ol, base_date=target_date) or ""
+        if prn['status'] == 'in_season':
+            out["spots"] = _conc_pack(prn['results'])
+            out["count"] = len(out["spots"])
+            _sfx = ("（撮り頃は%sごろ）" % peaks_text(speaks)) if (_subj in SEASONAL_SUBJECTS and speaks) else ""
+            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品はこちらです%s。"
+                              % (period_phrase(pp), near_name, int(rad), _subj, _sfx))
+            out["status"] = "few" if out["count"] <= 3 else "ok"
+            if out["status"] == "few":
+                out["choices"] = _conc_widen(peak=(_subj in SEASONAL_SUBJECTS and bool(speaks)))
+            return out
+        out["status"] = "none"
+        if prn['status'] == 'off_season':
+            hint = (peak_reason_text("この圏内", _subj, speaks)
+                    if (_subj in SEASONAL_SUBJECTS and speaks)
+                    else "期間を広げると圏内に作品が見つかります。")
+            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品は見つかりませんでした。%s"
+                              % (period_phrase(pp), near_name, int(rad), _subj, hint))
+            out["choices"] = _conc_widen(peak=bool(speaks))
+        else:
+            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品は見つかりませんでした。地域を広げて探せます。"
+                              % (period_phrase(pp), near_name, int(rad), _subj))
+            out["choices"] = _conc_widen(peak=False)
+        return out
+
+    # ── 5. 同じ地名が複数の県にあるとき ──
+    if area_name == "AMBIGUOUS":
+        prefs = ambiguous_city_prefs(area_display)
+        keyword_variants = {'朝日': ('朝焼け', '朝日（風景・被写体）'),
+                            '桜': ('桜', '桜（花）')}
+        kw_option = (keyword_variants.get(area_display)
+                     or keyword_variants.get(re.sub(r'[市区町村郡]', '', area_display or '').strip()))
+        _read(None, area_display, None, None, None)
+        out["status"] = "ask_pref"
+        out["message"] = "%sは複数の地域にあります。どちらでしょう。" % area_display
+        out["choices"] = [{"kind": "pref", "value": p, "label": "%s%s" % (p, area_display)}
+                          for p in prefs]
+        if kw_option:
+            out["choices"].append({"kind": "subject", "value": kw_option[0], "label": kw_option[1]})
+        return out
+
+    city_specified = any(c in t for c in ["市", "町", "村", "区", "郡"])
+
+    # ── 6. 地域にも被写体にもならない語 → 地点名として探し、だめなら作者名 ──
+    if not area_name and not search_keyword and not city_specified:
+        residual = t
+        for w in ['明日', 'あした', '明後日', 'あさって', '今日', '本日', '今週末', '来週末', '来週', '今週', '週末']:
+            residual = residual.replace(w, '')
+        residual = re.sub(r'\d+日後', '', residual)
+        residual = re.sub(r'\d{1,2}月\d{1,2}日', '', residual)
+        residual = re.sub(r'\d{1,2}月(?:上旬|中旬|下旬)?', '', residual)
+        residual = re.sub(r'上旬|中旬|下旬', '', residual)
+        for w in FILLER_WORDS:
+            residual = residual.replace(w, '')
+        residual = re.sub(r'[、,。.・/／｜|\s　]+', '', residual).strip()
+        if len(residual) >= 2:
+            _read(None, residual, None, None, None)
+            pr = search_by_place(residual, base_date=target_date,
+                                 origin_latlng=ol, origin_name=on)
+            out["note"] = famous_spots_note(region_text=residual, origin_latlng=ol,
+                                            base_date=target_date) or ""
+            if pr['status'] == 'not_found':
+                _per = search_by_person(residual, origin_latlng=ol, origin_name=on)
+                if _per['status'] == 'author':
+                    _n = _per['total']
+                    _more = "（本誌掲載は全%d点）" % _n if _n > len(_per['results']) else ""
+                    out["status"] = "author"
+                    out["message"] = ("%sさんの入選作をご紹介します。%s それぞれの撮影地もあわせてご覧ください。"
+                                      % (_per['display'], _more))
+                    out["spots"] = _conc_pack(_per['results'])
+                    out["count"] = len(out["spots"])
+                    return out
+                if _per['status'] in ('judge', 'listed_only'):
+                    out["status"] = "info"
+                    if _per['status'] == 'judge':
+                        out["message"] = ("%sさんは本誌フォトコンテストの審査員としてご登場の方です。"
+                                          "ご案内しているのは応募作品の撮影地ですので、審査員やプロの方の作品は対象にしておりません。"
+                                          % _per['display'])
+                    else:
+                        out["message"] = ("%sさんの作品は本誌に掲載がありますが、撮影地のご案内の対象にはしておりません。"
+                                          % _per['display'])
+                    return out
+                out["status"] = "none"
+                out["message"] = ("「%s」に合う撮影地は見つかりませんでした。"
+                                  "地域名（県名・市町村名）や被写体（滝・桜・紅葉・星空など）でもお試しください。" % residual)
+                return out
+            out["spots"] = _conc_pack(pr['results'])
+            out["count"] = len(out["spots"])
+            out["peaks"] = pr.get('peaks', [])
+            if pr['status'] == 'in_season':
+                out["status"] = "ok"
+                out["message"] = "%sに「%s」で撮影された作品はこちらです。" % (period_phrase(pp), residual)
+            else:
+                out["status"] = "few"
+                peaks = [c for c in pr.get('peaks', []) if (c // 3 + 1) != target_date.month]
+                if peaks:
+                    out["peaks_text"] = peaks_text(peaks)
+                    out["message"] = ("「%s」は%sの作品が少ないようです。撮り頃は%sあたり。"
+                                      "参考にこれまでの作品をご紹介します。"
+                                      % (residual, period_phrase(pp), peaks_text(peaks)))
+                else:
+                    out["message"] = ("「%s」は%sの作品が見つかりませんでしたが、これまでの作品をご紹介します。"
+                                      % (residual, period_phrase(pp)))
+            return out
+
+    # ── 7. 広すぎる県 ──
+    city_from_dict = any(city in t or re.sub(r'[市区町村郡]', '', city) in t for city in CITY_TO_PREF)
+    if area_name and area_name in WIDE_PREFS and not city_specified and not city_from_dict:
+        _read(area_name, area_display, search_keyword, None, None)
+        out["status"] = "ask_city"
+        out["message"] = ("%sですか。それは楽しみですね。どのあたりに行かれますか。市町村名や地域名を教えてください。"
+                          % (area_name if area_name == "北海道" else area_name[:-1]))
+        return out
+
+    # ── 8. 地域で探す ──
+    _radius = 150 if (city_specified or city_from_dict) else (300 if search_keyword else None)
+    if area_latlng is None and ol:
+        area_latlng = ol
+        if not area_display:
+            area_display = "現在地"
+    _is_bare_pref = (area_name in PREF_NEIGHBORS) and (area_display == area_name)
+    target_city = None if _is_bare_pref else (area_display if (city_specified or city_from_dict) else None)
+    _allowed = {area_name} if (area_name in PREF_NEIGHBORS and not target_city) else None
+    _read(area_name, area_display, search_keyword, area_latlng, _radius)
+
+    results = select_three_points(base_date=target_date, base_latlng=area_latlng,
+                                  radius=_radius, place_name=area_display,
+                                  keyword=search_keyword, target_city=target_city,
+                                  origin_latlng=ol, origin_name=on, allowed_prefs=_allowed)
+
+    if isinstance(results, tuple) and results and results[0] == 'CITY':
+        _, city_base, city_count, results = results
+        if not results:
+            out["status"] = "none"
+            out["message"] = ("%sの前後で%sとその周辺を調べましたが、該当する作品が見つかりませんでした。"
+                              % (period_phrase(pp), city_base))
+            return out
+        out["spots"] = _conc_pack(results)
+        out["count"] = len(out["spots"])
+        if city_count == 0:
+            out["status"] = "few"
+            out["message"] = ("%sの前後で%sを調べましたが該当はありませんでした。%s周辺の候補をご紹介します。"
+                              % (period_phrase(pp), city_base, city_base))
+        elif city_count <= 3:
+            out["status"] = "few"
+            out["message"] = ("%sの前後で%sを調べたところ該当は%d件でした。周辺の候補も合わせてご紹介します。"
+                              % (period_phrase(pp), city_base, city_count))
+        else:
+            out["status"] = "ok"
+            out["message"] = "%sに「%s」で撮影された作品はこちらです。" % (period_phrase(pp), city_base)
+        return out
+
+    if isinstance(results, tuple) and results and results[0] == 'TOO_FEW':
+        _, found_pref, count, few_results = results
+        _disp = area_display or found_pref
+        out["spots"] = _conc_pack(few_results)
+        out["count"] = len(out["spots"])
+        out["status"] = "none" if not few_results else "few"
+        out["choices"] = _conc_widen(peak=False)
+        if count == 0 or not few_results:
+            out["message"] = ("%sに「%s」で撮影された作品は見つかりませんでした。"
+                              % (period_phrase(pp), _disp))
+        else:
+            out["message"] = ("%sの「%s」の作品は%d件でした。もっと広げて探せます。"
+                              % (period_phrase(pp), _disp, count))
+        return out
+
+    results = results or []
+    if len(results) < 2:
+        out["status"] = "none"
+        out["message"] = ("今の時期にぴったりの作品が見つかりませんでした。"
+                          "地域名や被写体（滝・桜・紅葉など）を変えてもう一度お試しください。")
+        return out
+
+    out["status"] = "ok"
+    out["spots"] = _conc_pack(results)
+    out["count"] = len(out["spots"])
+    out["message"] = build_greeting(target_date, area_display, date_specified=pp['specified'])
+    out["note"] = famous_spots_note(subject=search_keyword,
+                                    region_text=(area_display or area_name or ''),
+                                    origin_latlng=ol, base_date=target_date) or ""
+    return out
+
+
+def _conc_widen(peak=False):
+    """候補が足りないときの、次の手。LINEの「もっと広げますか？」にあたる。"""
+    opts = [
+        {"kind": "widen", "value": "area", "label": "地域を広げて探す"},
+        {"kind": "widen", "value": "time", "label": "期間を広げて探す"},
+        {"kind": "widen", "value": "both", "label": "地域と期間の両方を広げる"},
+    ]
+    if peak:
+        opts.append({"kind": "widen", "value": "peak", "label": "撮り頃の時期で探す"})
+    return opts
+
+
+@app.route("/api/concierge", methods=["GET", "OPTIONS"])
+def api_concierge():
+    """「風景撮ろうよ！」の〈どこ行く？〉から呼ばれる入口。
+    別ドメイン（reference.fukei-shashin.co.jp）からの呼び出しなのでCORSを許可する。"""
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    q = (request.args.get("q") or "").strip()
+
+    base = None
+    ds = (request.args.get("date") or "").strip()
+    if ds:
+        try:
+            y, m, d = [int(x) for x in ds.split("-")]
+            base = date(y, m, d)
+        except Exception:
+            base = None
+
+    origin = None
+    try:
+        origin = (float(request.args.get("lat")), float(request.args.get("lng")))
+    except (TypeError, ValueError):
+        origin = None
+
+    try:
+        rad = float(request.args.get("radius")) if request.args.get("radius") else None
+    except ValueError:
+        rad = None
+
+    try:
+        out = concierge_search(
+            q,
+            origin_latlng=origin,
+            origin_name=(request.args.get("origin_name") or "").strip() or None,
+            base_date=base,
+            pref=(request.args.get("pref") or "").strip() or None,
+            subject=(request.args.get("subject") or "").strip() or None,
+            radius_km=rad,
+        )
+        out["query"] = q
+    except Exception:
+        import traceback
+        print("[ERROR] api_concierge: %s" % traceback.format_exc(), flush=True)
+        out = {"status": "none", "query": q, "spots": [], "count": 0, "choices": [],
+               "message": "うまく探せませんでした。言葉を変えてもう一度お試しください。"}
+
+    resp = jsonify(out)
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
 
 
 # ──────────────── 改修前後の答え合わせ用（確認専用） ────────────────
