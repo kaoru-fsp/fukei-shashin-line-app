@@ -2517,7 +2517,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
         f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base,
         fallback=ref_base)
 
-    # 撮影プランナーURL
+    # 撮影ノート（リファレンス側 /planner）のURL
     planner_base = "https://reference.fukei-shashin.co.jp/planner"
     if plan_id:
         # PlanSession方式: 全候補をFirestoreに保存済み、IDとインデックスだけ渡す
@@ -2589,7 +2589,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
             "color": "#1DB446",
             "action": {
                 "type": "uri",
-                "label": "📋 撮影プランナー",
+                "label": "📋 撮影ノート",
                 "uri": planner_uri
             }
         }
@@ -3056,7 +3056,7 @@ def handle_message(event):
                      "日付を添えることもできます（週末 京都、明日 滝）。\n\n"
                      "詳しい使い方は「コマンド」と送ってください。\n\n"
                      # 2026-10-03 /guide へのリンクを外した。
-                     # あのページには改名前の名前（撮影プランナー・候補マップ）と
+                     # あのページには改名前の名前（撮影プランナー・撮影プラン・候補マップ）と
                      # 改定前の料金（PRO 月額990円）が残っていて、いまの案内と食い違う。
                      # マニュアル(/manual)は10月2日に全面改訂済みなので、こちらだけを出す。
                      "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual?openExternalBrowser=1"
@@ -5022,7 +5022,7 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
 @app.route("/api/michinoeki", methods=["GET", "OPTIONS"])
 def api_michinoeki():
     """指定した地点の近くの道の駅を、近い順に返す。
-    撮影プランナー（リファレンス側）から呼ばれるのでCORSを許可する。
+    撮影ノート（リファレンス側 /planner）から呼ばれるのでCORSを許可する。
 
     lat, lng   中心の緯度経度（必須）
     radius     何km以内を探すか（既定50、上限300）
@@ -6460,7 +6460,7 @@ def thin_path(points, step_km=2.0):
 @app.route("/api/michinoeki/route", methods=["POST", "OPTIONS"])
 def api_michinoeki_route():
     """経路沿いの道の駅を、出発地に近い順に返す。
-    撮影プランナー（リファレンス側）から呼ばれるのでCORSを許可する。
+    撮影ノート（リファレンス側 /planner）から呼ばれるのでCORSを許可する。
 
     本文（JSON）
       polyline   Google ルート API の encodedPolyline（必須）
@@ -7301,7 +7301,7 @@ _SWEEP_PAGE = """<!doctype html>
 <div class="checks">
   <label><input type="checkbox" id="m_peaks" checked>撮り頃の被写体（その地点の周りで、いま撮り頃のもの）</label>
   <label><input type="checkbox" id="m_place" checked>地域＋被写体（県名と被写体を指定した検索）</label>
-  <label><input type="checkbox" id="m_three">3地点の選定（撮影プランの下敷きになる処理）</label>
+  <label><input type="checkbox" id="m_three">3地点の選定（AI撮影プランナーの下敷きになる処理）</label>
 </div>
 
 <label for="subjects">被写体（読点か空白で区切る。地域＋被写体で使う）</label>
