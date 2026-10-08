@@ -6882,7 +6882,8 @@ def _conc_pack(results):
 
 
 def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
-                     pref=None, subject=None, radius_km=None):
+                     pref=None, subject=None, radius_km=None,
+                     expand_time=False, wide=False):
     """言葉から撮影地を選ぶ。
 
     text        「どこ行く？」に書かれた言葉（地名・被写体・時期が混ざっていてよい）
@@ -6890,6 +6891,8 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
     base_date   「いつ行く？」の日。text に時期が書かれていればそちらが優先。
     pref        同名地名の聞き返しへの答え（県名）
     subject     被写体の聞き返しへの答え
+    expand_time 期間を広げる（「広げて探す」を押したとき）
+    wide        地域を広げる（同上）
 
     戻り値の status
       ok        … 候補が出た
@@ -7027,11 +7030,12 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                 place_terms.append(tok)
         place_terms = list(dict.fromkeys(place_terms))
 
-        if place_terms:
+        if place_terms and not wide:
             place_disp = "・".join(place_terms)
             _read(area_name, place_disp, _subj, None, None)
             pr = search_by_place(place_terms, base_date=target_date,
-                                 origin_latlng=ol, origin_name=on, subject=_subj)
+                                 origin_latlng=ol, origin_name=on, subject=_subj,
+                                 expand_time=expand_time)
             speaks = pr.get('peaks', [])
             out["peaks"] = speaks
             out["peaks_text"] = peaks_text(speaks) if speaks else ""
@@ -7045,11 +7049,11 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                             else "期間を広げると作品が見つかります。")
                     out["message"] = ("%sに「%s」で撮影された%sの作品は見つかりませんでした。%s"
                                       % (period_phrase(pp), place_disp, _subj, hint))
-                    out["choices"] = _conc_widen(peak=bool(speaks))
+                    out["choices"] = _conc_widen(peaks=speaks, base_date=target_date)
                 else:
-                    out["message"] = ("%sに「%s」で撮影された%sの作品は見つかりませんでした。地域を広げて探せます。"
+                    out["message"] = ("%sに「%s」で撮影された%sの作品は見つかりませんでした。"
                                       % (period_phrase(pp), place_disp, _subj))
-                    out["choices"] = _conc_widen(peak=False)
+                    out["choices"] = _conc_widen()
                 return out
             out["spots"] = _conc_pack(pr['results'])
             out["count"] = len(out["spots"])
@@ -7058,18 +7062,27 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                               % (period_phrase(pp), place_disp, _subj, _sfx))
             if out["count"] <= 3:
                 out["status"] = "few"
-                out["choices"] = _conc_widen(peak=(_subj in SEASONAL_SUBJECTS and bool(speaks)))
+                out["choices"] = _conc_widen(peaks=(speaks if _subj in SEASONAL_SUBJECTS else None), base_date=target_date)
             else:
                 out["status"] = "ok"
             return out
 
-        # 地名なし・被写体のみ → 起点（無ければ新宿）から半径150km
+        # 地名なし・被写体のみ → 起点（無ければ新宿）から半径150km。
+        # 「地域を広げる」を押されたときも、地名の縛りを外してここへ来る。
+        # いまは県→全国と一気に広がる。LINEの市→県→隣県→全国のような
+        # 段階は付けていない。（2026-10-08）
         center = ol or SHINJUKU
-        rad = float(radius_km) if radius_km else 150.0
+        # 「地域を広げる」を押されたら、半径の縛りを外して全国から近い順に見る。
+        rad = None if wide else (float(radius_km) if radius_km else 150.0)
         near_name = on if ol else "東京"
-        _read(None, None, _subj, center, rad)
+        # 文中の「どこを見たか」。半径を外したときは圏内と言えないので言い分ける。
+        _scope = ("全国で" if rad is None
+                  else "%sから半径%dkm圏内で" % (near_name, int(rad)))
+        _scope_in = "全国" if rad is None else "この圏内"
+        _read(None, None, _subj, (None if wide else center), rad)
         prn = search_by_place([], base_date=target_date, origin_latlng=ol, origin_name=on,
-                              subject=_subj, center_latlng=center, radius_km=rad)
+                              subject=_subj, center_latlng=(None if wide else center),
+                              radius_km=rad, expand_time=expand_time)
         speaks = prn.get('peaks', [])
         out["peaks"] = speaks
         out["peaks_text"] = peaks_text(speaks) if speaks else ""
@@ -7078,24 +7091,24 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             out["spots"] = _conc_pack(prn['results'])
             out["count"] = len(out["spots"])
             _sfx = ("（撮り頃は%sごろ）" % peaks_text(speaks)) if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品はこちらです%s。"
-                              % (period_phrase(pp), near_name, int(rad), _subj, _sfx))
+            out["message"] = ("%sに%s撮影された%sの作品はこちらです%s。"
+                              % (period_phrase(pp), _scope, _subj, _sfx))
             out["status"] = "few" if out["count"] <= 3 else "ok"
             if out["status"] == "few":
-                out["choices"] = _conc_widen(peak=(_subj in SEASONAL_SUBJECTS and bool(speaks)))
+                out["choices"] = _conc_widen(peaks=(speaks if _subj in SEASONAL_SUBJECTS else None), base_date=target_date)
             return out
         out["status"] = "none"
         if prn['status'] == 'off_season':
-            hint = (peak_reason_text("この圏内", _subj, speaks)
+            hint = (peak_reason_text(_scope_in, _subj, speaks)
                     if (_subj in SEASONAL_SUBJECTS and speaks)
-                    else "期間を広げると圏内に作品が見つかります。")
-            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品は見つかりませんでした。%s"
-                              % (period_phrase(pp), near_name, int(rad), _subj, hint))
-            out["choices"] = _conc_widen(peak=bool(speaks))
+                    else "期間を広げると作品が見つかります。")
+            out["message"] = ("%sに%s撮影された%sの作品は見つかりませんでした。%s"
+                              % (period_phrase(pp), _scope, _subj, hint))
+            out["choices"] = _conc_widen(peaks=speaks, base_date=target_date)
         else:
-            out["message"] = ("%sに%sから半径%dkm圏内で撮影された%sの作品は見つかりませんでした。地域を広げて探せます。"
-                              % (period_phrase(pp), near_name, int(rad), _subj))
-            out["choices"] = _conc_widen(peak=False)
+            out["message"] = ("%sに%s撮影された%sの作品は見つかりませんでした。"
+                              % (period_phrase(pp), _scope, _subj))
+            out["choices"] = _conc_widen()
         return out
 
     # ── 5. 同じ地名が複数の県にあるとき ──
@@ -7131,7 +7144,8 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
         if len(residual) >= 2:
             _read(None, residual, None, None, None)
             pr = search_by_place(residual, base_date=target_date,
-                                 origin_latlng=ol, origin_name=on)
+                                 origin_latlng=ol, origin_name=on,
+                                 expand_time=expand_time)
             out["note"] = famous_spots_note(region_text=residual, origin_latlng=ol,
                                             base_date=target_date) or ""
             if pr['status'] == 'not_found':
@@ -7199,9 +7213,11 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
     _read(area_name, area_display, search_keyword, area_latlng, _radius)
 
     results = select_three_points(base_date=target_date, base_latlng=area_latlng,
-                                  radius=_radius, place_name=area_display,
-                                  keyword=search_keyword, target_city=target_city,
-                                  origin_latlng=ol, origin_name=on, allowed_prefs=_allowed)
+                                  radius=(None if wide else _radius), place_name=area_display,
+                                  keyword=search_keyword, expand_time=expand_time,
+                                  target_city=(None if wide else target_city),
+                                  origin_latlng=ol, origin_name=on,
+                                  allowed_prefs=(None if wide else _allowed))
 
     if isinstance(results, tuple) and results and results[0] == 'CITY':
         _, city_base, city_count, results = results
@@ -7231,7 +7247,7 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
         out["spots"] = _conc_pack(few_results)
         out["count"] = len(out["spots"])
         out["status"] = "none" if not few_results else "few"
-        out["choices"] = _conc_widen(peak=False)
+        out["choices"] = _conc_widen()
         if count == 0 or not few_results:
             out["message"] = ("%sに「%s」で撮影された作品は見つかりませんでした。"
                               % (period_phrase(pp), _disp))
@@ -7257,15 +7273,25 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
     return out
 
 
-def _conc_widen(peak=False):
-    """候補が足りないときの、次の手。LINEの「もっと広げますか？」にあたる。"""
+def _conc_widen(peaks=None, base_date=None):
+    """候補が足りないときの、次の手。LINEの「もっと広げますか？」にあたる。
+
+    params は、そのまま /api/concierge に足して呼び直すためのもの。
+    押しても何も起きない選択肢を返さないよう、受け口のあるものだけを並べる。"""
     opts = [
-        {"kind": "widen", "value": "area", "label": "地域を広げて探す"},
-        {"kind": "widen", "value": "time", "label": "期間を広げて探す"},
-        {"kind": "widen", "value": "both", "label": "地域と期間の両方を広げる"},
+        {"kind": "widen", "value": "area", "label": "地域を広げて探す",
+         "params": {"wide": "1"}},
+        {"kind": "widen", "value": "time", "label": "期間を広げて探す",
+         "params": {"expand": "1"}},
+        {"kind": "widen", "value": "both", "label": "地域と期間の両方を広げる",
+         "params": {"wide": "1", "expand": "1"}},
     ]
-    if peak:
-        opts.append({"kind": "widen", "value": "peak", "label": "撮り頃の時期で探す"})
+    if peaks:
+        _d, _lbl = next_peak_date(peaks, today=base_date)
+        if _d:
+            opts.append({"kind": "widen", "value": "peak",
+                         "label": "撮り頃（%s）で探す" % _lbl,
+                         "params": {"date": _d.isoformat()}})
     return opts
 
 
@@ -7312,6 +7338,8 @@ def api_concierge():
             pref=(request.args.get("pref") or "").strip() or None,
             subject=(request.args.get("subject") or "").strip() or None,
             radius_km=rad,
+            expand_time=(request.args.get("expand", "") in ("1", "true", "yes")),
+            wide=(request.args.get("wide", "") in ("1", "true", "yes")),
         )
         out["query"] = q
     except Exception:
