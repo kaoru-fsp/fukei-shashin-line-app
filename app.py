@@ -1565,8 +1565,10 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 continue
             lat, lng = PREF_LATLNG[pref]
             dist = haversine(tokyo[0], tokyo[1], lat, lng)  # 既存の絞り込み用(従来通り)
-            wll = work_latlng(d.get('Area'), pref)
-            wlat, wlng = wll if wll else (lat, lng)          # 表示用座標: 市区町村, なければ県重心
+            # 撮影地そのものの座標を先に見る。無ければ市区町村、それも無ければ県重心。
+            # 市区町村の中心で測っていたころは、同じ市の中はどこでも同じ距離になっていた。（2026-10-09）
+            wll = place_latlng(d.get('Area'), d.get('Place')) or work_latlng(d.get('Area'), pref)
+            wlat, wlng = wll if wll else (lat, lng)          # 表示用座標
             disp_dist = haversine(origin[0], origin[1], wlat, wlng)  # 起点→撮影地の実距離
 
             # 指定都道府県がある場合の絞り込み
@@ -1631,7 +1633,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             pool.append(item)
 
             try:
-                place_years[d.get('Area', '')].append(int(d.get('Year')))
+                place_years[spot_key(d.get('Area', ''), d.get('Place', ''))].append(int(d.get('Year')))
             except:
                 pass
 
@@ -1669,9 +1671,15 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 pub = d.get('Published', '')
                 if pub and pub.endswith('N'):
                     continue
+                # ここは1件ごとに座標と距離を出す。以前は上のループの最後の値
+                # （disp_dist / wlat / wlng）が残ったまま全件に入っていた。
+                # いまはこの分岐に入らないので表には出ていないが、
+                # 条件が変われば全件が同じ距離になる。（2026-10-09 修正）
+                _wll2 = place_latlng(d.get('Area'), d.get('Place')) or work_latlng(d.get('Area'), pref)
+                _wlat2, _wlng2 = _wll2 if _wll2 else (lat, lng)
                 item = {
-                    'dist': disp_dist,
-                    'wlatlng': (wlat, wlng),
+                    'dist': haversine(origin[0], origin[1], _wlat2, _wlng2),
+                    'wlatlng': (_wlat2, _wlng2),
                     'pref': pref,
                     'area': d.get('Area', ''),
                     'place': d.get('Place', '') or '',
@@ -1691,7 +1699,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 }
                 pool.append(item)
                 try:
-                    place_years[d.get('Area', '')].append(int(d.get('Year')))
+                    place_years[spot_key(d.get('Area', ''), d.get('Place', ''))].append(int(d.get('Year')))
                 except:
                     pass
 
@@ -1732,15 +1740,16 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             city_count = len(cresults)
             # 周辺候補: 撮影地の重複を避けて補完
             nearby_label = f"{city_base}周辺の撮影地"
-            used_areas = set()
+            used_spots = set()
             for p in nearby_pool:
                 if len(cresults) >= 7:
                     break
-                if p['pic'] in used_pics or p['area'] in used_areas:
+                _sk = spot_key(p['area'], p.get('place'))
+                if p['pic'] in used_pics or _sk in used_spots:
                     continue
                 cresults.append(('📍', nearby_label, p))
                 used_pics.add(p['pic'])
-                used_areas.add(p['area'])
+                used_spots.add(_sk)
             return ('CITY', city_base, city_count, filter_broken_images(cresults))
 
         used_pics = set()
@@ -1758,36 +1767,49 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                     return 'TOO_FEW', target_pref, len(best_pool), filter_broken_images([('🎯', 'ベストマッチ', p) for p in best_pool])
         else:
             best_pool = sorted(pool, key=lambda x: (-x['ascore'], x['dist']))
-        used_areas = set()
-        for p in best_pool:
-            if len(results) >= 7:
+        # 撮影地ごとに分ける。ただし1つの市区町村に偏ると選びようがなくなるので、
+        # まずは1市区町村2件までで並べ、それで3件に満たなければ上限を外して補う。
+        # （以前は市区町村そのものが鍵だったため、日光市からは必ず1件しか出なかった）
+        used_spots = set()
+        _area_n = defaultdict(int)
+        for _pass in (0, 1):
+            for p in best_pool:
+                if len(results) >= 7:
+                    break
+                _sk = spot_key(p['area'], p.get('place'))
+                if _sk in used_spots:
+                    continue
+                if _pass == 0 and _area_n[p['area']] >= 2:
+                    continue
+                results.append(('🎯', 'ベストマッチ', p))
+                used_pics.add(p['pic'])
+                used_spots.add(_sk)
+                _area_n[p['area']] += 1
+            if len(results) >= 3:
                 break
-            if p['area'] in used_areas:
-                continue
-            results.append(('🎯', 'ベストマッチ', p))
-            used_pics.add(p['pic'])
-            used_areas.add(p['area'])
 
         # ✨ 注目・傑作（同県優先、最大2枚）
         recent_cutoff = date.today().year - 5
+        # 直近5年の入選数。撮影地ごとに数える（市区町村ではなく）。
         attention_score = {
-            a: sum(1 for y in ys if y >= recent_cutoff)
-            for a, ys in place_years.items()
+            k: sum(1 for y in ys if y >= recent_cutoff)
+            for k, ys in place_years.items()
         }
-        hot_pool = sorted(pool, key=lambda x: (-attention_score.get(x['area'], 0), -x['ascore']))
+        hot_pool = sorted(pool, key=lambda x: (-attention_score.get(spot_key(x['area'], x.get('place')), 0), -x['ascore']))
         if target_pref and not _expanded:
             hot_cand = [p for p in hot_pool if p['pref'] == target_pref and p['pic'] not in used_pics] or [p for p in hot_pool if p['pic'] not in used_pics]
         else:
             hot_cand = [p for p in hot_pool if p['pic'] not in used_pics]
-        used_areas_hot = set()
+        # ベストマッチで出した撮影地は避ける。同じ場所が2行に並ぶと、選択肢が減る。
         for p in hot_cand:
             if len([r for r in results if r[1] == '注目・傑作']) >= 2:
                 break
-            if p['area'] in used_areas_hot:
+            _sk = spot_key(p['area'], p.get('place'))
+            if _sk in used_spots:
                 continue
             results.append(('✨', '注目・傑作', p))
             used_pics.add(p['pic'])
-            used_areas_hot.add(p['area'])
+            used_spots.add(_sk)
 
         masterpiece = results[0][2] if results else None
         near = results[1][2] if len(results) > 1 else masterpiece
@@ -1894,7 +1916,10 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             if pub and pub.endswith('N'):
                 continue
             pref = extract_pref(area)
-            wll = work_latlng(area, pref)
+            # 撮影地そのものの座標を先に見る。無ければ市区町村、それも無ければ県。
+            # 市区町村の中心から測っていたころは、同じ市の中のどこでも同じ距離になり、
+            # 「板橋から渋峠まで2時間半」のような案内が出ていた。（2026-10-09）
+            wll = place_latlng(area, place) or work_latlng(area, pref)
             cll = wll if wll else (PREF_LATLNG.get(pref) if (pref and pref in PREF_LATLNG) else None)
             if center_latlng and radius_km:
                 if not cll or haversine(center_latlng[0], center_latlng[1], cll[0], cll[1]) > radius_km:
@@ -1954,14 +1979,24 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         pool.sort(key=lambda x: (x.get('cdist', 0), -x['ascore']))
     else:
         pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
-    results, used = [], set()
-    for p in pool:
-        if len(results) >= 7:
+    # 1つの撮影地が7枠を埋めてしまわないようにする。探しているのは作品ではなく場所なので、
+    # 同じ場所の2枚目より、別の場所の1枚目のほうが役に立つ。
+    # それで3件に満たないときだけ、同じ場所の別の作品で補う。（2026-10-09）
+    results, used, used_spots = [], set(), set()
+    for _pass in (0, 1):
+        for p in pool:
+            if len(results) >= 7:
+                break
+            if p['pic'] in used:
+                continue
+            _sk = spot_key(p['area'], p.get('place'))
+            if _pass == 0 and _sk in used_spots:
+                continue
+            results.append(('🎯', 'ベストマッチ', p))
+            used.add(p['pic'])
+            used_spots.add(_sk)
+        if len(results) >= 3:
             break
-        if p['pic'] in used:
-            continue
-        results.append(('🎯', 'ベストマッチ', p))
-        used.add(p['pic'])
     results = filter_broken_images(results)
     if not results:
         return {'status': 'not_found', 'results': []}
@@ -5650,6 +5685,27 @@ def place_latlng(area, place):
     if not place:
         return None
     return get_placegeo().get((str(area or '').strip(), str(place or '').strip()))
+
+
+def spot_key(area, place):
+    """同じ撮影地かどうかを判める鍵。候補を並べるとき、同じ場所を二度出さないために使う。
+
+    これまでは市区町村（Area）を鍵にしていた。日光市の作品はどれも「日光市」なので、
+    中禅寺湖も戦場ヶ原も霧降高原もひとまとめに扱われ、1件しか出せなかった。
+    1,523の市区町村に 4,022 の撮影地が埋もれていたことになる。
+
+    いまは撮影地ごとの座標（PlaceGeo）があるので、まず座標で見る。
+    小数第3位（およそ100m四方）に丸めるので、「覚満淵」「おぼろ沼（覚満淵）」のような
+    表記ゆれも同じ場所としてまとまる。座標が無いものは Place の文字、
+    それも無いものは市区町村に落とす。（2026-10-09）"""
+    a = str(area or '').strip()
+    p = str(place or '').strip()
+    ll = place_latlng(a, p)
+    if ll:
+        return ('g', round(ll[0], 3), round(ll[1], 3))
+    if p:
+        return ('p', a, p)
+    return ('a', a)
 
 # ── 地図への問い合わせ ──
 
