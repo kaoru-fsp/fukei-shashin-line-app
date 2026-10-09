@@ -4539,13 +4539,77 @@ _PLAN_LATE_MIN = 90        # 同じく、これ以上遅れれば「遅い」と
 _PLAN_MAX_LEG_MIN = 240    # 1区間の移動時間の上限(分)。これを超える地点は行程に入れない
 _PLAN_NIGHT_MARGIN = 60    # 日の入り後・日の出前これだけ離れた時間帯を「夜の被写体」とする(分)
 
-def is_night_hour(best_hour, sun_rise, sun_set):
-    """その時間帯が、夜が本番のものかどうか。
+# ── 狙い時刻 ──
+# 被写体によって、本番の時刻の決まり方が違う。
+#
+# 朝焼け・雲海・夕焼け・星は、太陽で決まる。実績の時刻（Hour列の最頻値）は
+# 全期間をならした値なので、夏に撮られた4時台が11月の計画に混ざってしまう。
+# その日・その場所の日の出入りから出すほうが正しい。撮影地ごとの座標があるので、
+# 同じ県でも東西で10分ほど違う日の出入りまで反映できる。
+#
+# 到着は本番の1時間前。準備に30分、余裕に30分。
+# 星だけは別で、日の入の1時間前に着く。暗くなってからでは足元も構図も分からないので、
+# 明るいうちに風景を確認し、準備を整えておく。（2026-10-09）
+#
+#   被写体 : (基準, 本番のずれ(分), 到着の決め方)
+_SUN_TIMING = {
+    '朝焼け': ('rise', -30, 'lead'),
+    '雲海':   ('rise', -30, 'lead'),
+    '夕焼け': ('set',   10, 'lead'),
+    '星':     ('set',   90, 'set-60'),
+    '天の川': ('set',   90, 'set-60'),
+}
+_ARRIVE_LEAD = 60        # 太陽で決まる被写体は、本番の1時間前に着く
+_ARRIVE_LEAD_PLAIN = 30  # そのほかは、これまでどおり30分前
+_SHOOT_MIN = 60          # 本番そのものに見ておく時間(分)
+
+
+def spot_subject(s, subject=None):
+    """その撮影地を代表する被写体。指定があって実績もあれば、それを優先する。"""
+    subs = s.get('subjects')
+    if subject and subs and subject in subs:
+        return subject
+    return subs.most_common(1)[0][0] if subs else ''
+
+
+def spot_timing(s, base_date, subject=None):
+    """その撮影地の (本番の分, 着いていたい分, 太陽で決めたか) を返す。
+    分は、その日の0時からの通算。決められなければ (None, None, False)。"""
+    subj = spot_subject(s, subject)
+    rule = _SUN_TIMING.get(subj)
+    if rule and base_date:
+        anchor_name, off, how = rule
+        rise, sets = sun_times(s['lat'], s['lng'], base_date)
+        anchor = rise if anchor_name == 'rise' else sets
+        if anchor is not None:
+            best = anchor + off
+            if how == 'set-60' and sets is not None:
+                arrive = sets - 60
+            else:
+                arrive = best - _ARRIVE_LEAD
+            return best, arrive, True
+    bh = s['hours'].most_common(1)[0][0] if s.get('hours') else None
+    if bh is None:
+        return None, None, False
+    return bh * 60, bh * 60 - _ARRIVE_LEAD_PLAIN, False
+
+
+def stay_needed(s, arrive, stay_min):
+    """その地点にいる時間。太陽で決まる被写体は、着いてから本番まで待つぶん長くなる。
+    朝焼けなら、日の出1時間半前に着いて、日の出30分前が本番。撮り終えるまで2時間。"""
+    b = s.get('best_min')
+    if s.get('sun_based') and b is not None:
+        return max(stay_min, (b - arrive) + _SHOOT_MIN)
+    return stay_min
+
+
+def is_night_min(best_min, sun_rise, sun_set):
+    """その本番時刻が、夜の撮影かどうか。
     夜明け前(雲海・朝霧・朝焼けなど)は夜ではなく昼の行程に入れる。早発ちの話であって、
     夜の撮影ではないため。ここで夜と呼ぶのは『日の入りのあと』と『深夜0時〜3時』。"""
-    if best_hour is None:
+    if best_min is None:
         return False
-    t = best_hour * 60
+    t = best_min
     if t < 3 * 60:
         return True
     if sun_set is None:
@@ -4613,6 +4677,12 @@ def _spot_view(s, subject=None):
     return {'area': s['area'], 'name': short_area(s['area'], s['pref']),
             'place': place, 'lat': s['lat'], 'lng': s['lng'],
             'subject': subj, 'n': s['n'], 'best_hour': hour,
+            # 本番の時刻。太陽で決まる被写体はその日の日の出入りから、
+            # そのほかは実績の時間帯から。build_plans が先に出しておく。
+            'best_min': s.get('best_min'),
+            'arrive_min': s.get('arrive_min'),
+            'best_time': hhmm(s.get('best_min')) if s.get('best_min') is not None else '',
+            'sun_based': bool(s.get('sun_based')),
             'subjects': [c for c, _ in s['subjects'].most_common(3)],
             'weather': [{'name': w, 'n': k} for w, k in wx],
             'title': work.get('title', ''), 'winner': work.get('winner', ''),
@@ -4621,11 +4691,12 @@ def _spot_view(s, subject=None):
             # その撮影地の受賞作を数点。季節のちがいが並ぶ。
             'works': works}
 
-def _timing(arrive, best_hour):
-    """到着が、その地点で撮られている時間帯に対して早いか遅いかを言葉にする。"""
-    if best_hour is None:
+def _timing(arrive, best_min):
+    """到着が、その地点の本番に対して早いか遅いかを言葉にする。
+    本番は分で受け取る（太陽で決まる被写体は時刻が時間単位に収まらないため）。"""
+    if best_min is None:
         return ''
-    diff = arrive - best_hour * 60
+    diff = arrive - best_min
     if diff < -_PLAN_EARLY_MIN:
         return '早い'
     if diff > _PLAN_LATE_MIN:
@@ -4666,26 +4737,30 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     drop_late=True のときは、間に合わない地点を捨てた組み方を試す。
     stay_over=True は宿泊前提。帰りの移動を勘定に入れず、最後の撮影地で終える。"""
     def fits(s, cur, now):
-        """その地点を次に入れられるか。入れられるなら (移動分, 到着時刻, 待ち分) を返す。
-        着くのが早すぎるときは、その地点で撮られている時間帯に合わせて待つ。
-        夕景の場所に朝着いても仕方がないため。"""
+        """その地点を次に入れられるか。入れられるなら (移動分, 到着時刻, 待ち分, 滞在分) を返す。
+        着くのが早すぎるときは、着いていたい時刻まで待つ。
+        夕景の場所に朝着いても仕方がないため。
+
+        着いていたい時刻は build_plans が先に出している（arrive_min）。
+        朝焼け・雲海・夕焼けは本番の1時間前、そのほかは実績の時間帯の30分前。"""
         move = drive_minutes(haversine(cur[0], cur[1], s['lat'], s['lng']))
         if move > max_leg and s.get('area') != must:   # 1区間が長すぎる
             return None
         arrive = now + move
-        bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
+        tgt = s.get('arrive_min')
         wait = 0
-        if bh is not None and arrive < bh * 60 - 30:
-            wait = (bh * 60 - 30) - arrive
+        if tgt is not None and arrive < tgt:
+            wait = tgt - arrive
             arrive += wait
+        stay = stay_needed(s, arrive, stay_min)
         # 宿泊するなら帰りの移動は要らない。その日の終わりは最後の撮影地。
         home = 0 if stay_over else drive_minutes(
             haversine(s['lat'], s['lng'], origin[0], origin[1]))
-        if arrive + stay_min + home > return_min:      # 帰り着けない（終われない）
+        if arrive + stay + home > return_min:          # 帰り着けない（終われない）
             return None
         if sun_set is not None and arrive > sun_set:   # 着いたときには日が暮れている
             return None
-        return (move, arrive, wait)
+        return (move, arrive, wait, stay)
 
     now, cur = leave_min, origin
     stops, used, drove = [], 0, 0
@@ -4703,15 +4778,15 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                 f = fits(s, cur, now)
                 if not f:
                     continue
-                move, arrive, wait = f
-                bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
+                move, arrive, wait, stay = f
+                bm = s.get('best_min')
                 if order == 'value':
                     home_new = drive_minutes(haversine(s['lat'], s['lng'],
                                                        origin[0], origin[1]))
                     extra = move + wait + (home_new - home_now)   # 余計にかかる時間
-                    gain = (s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bh), 0.7)
+                    gain = (s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bm), 0.7)
                             * wx_weight(s, wx_span(s.get('wx'), arrive,
-                                                   arrive + stay_min)))
+                                                   arrive + stay)))
                     # 走る時間は採点と同じ重み(1.3倍)で見る。ここだけ等倍にしていると、
                     # 採点では割に合わない寄り道を、選ぶ段階で拾ってしまう
                     worth = gain - extra / 60.0 * 1.3
@@ -4719,45 +4794,46 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                         continue
                     key = (-worth, move)
                 else:
-                    late = max(0, arrive - bh * 60) if bh is not None else 0
+                    late = max(0, arrive - bm) if bm is not None else 0
                     key = (move + late + wait * 0.5, -s['n'])
                 if pick is None or key < pick[0]:
-                    pick = (key, s, move, arrive, wait)
+                    pick = (key, s, move, arrive, wait, stay)
             if pick is None:
                 break
-            _, s, move, arrive, wait = pick
+            _, s, move, arrive, wait, stay = pick
             v = _spot_view(s, subject)
-            tm = _timing(arrive, v['best_hour'])
-            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
-                      'drive_min': move, 'stay_min': stay_min,
+            tm = _timing(arrive, v.get('best_min'))
+            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay),
+                      'drive_min': move, 'stay_min': stay,
                       'wait_min': wait, 'timing': tm})
-            _attach_wx(v, s, arrive, stay_min)
+            _attach_wx(v, s, arrive, stay)
             stops.append(v)
-            now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
+            now, cur, used, drove = arrive + stay, (s['lat'], s['lng']), used + 1, drove + move
             rest.remove(s)
     else:
         if order == 'works':
             ordered = sorted(spots, key=lambda s: -s['n'])
         else:
-            ordered = sorted(spots, key=lambda s: ((s['hours'].most_common(1)[0][0]
-                                                    if s['hours'] else 12), -s['n']))
+            ordered = sorted(spots, key=lambda s: (s.get('best_min')
+                                                   if s.get('best_min') is not None
+                                                   else 12 * 60, -s['n']))
         for s in ordered:
             if used >= max_stops:
                 break
             f = fits(s, cur, now)
             if not f:
                 continue
-            move, arrive, wait = f
+            move, arrive, wait, stay = f
             v = _spot_view(s, subject)
-            tm = _timing(arrive, v['best_hour'])
+            tm = _timing(arrive, v.get('best_min'))
             if drop_late and tm == '遅い':
                 continue
-            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay_min),
-                      'drive_min': move, 'stay_min': stay_min,
+            v.update({'arrive': hhmm(arrive), 'leave': hhmm(arrive + stay),
+                      'drive_min': move, 'stay_min': stay,
                       'wait_min': wait, 'timing': tm})
-            _attach_wx(v, s, arrive, stay_min)
+            _attach_wx(v, s, arrive, stay)
             stops.append(v)
-            now, cur, used, drove = arrive + stay_min, (s['lat'], s['lng']), used + 1, drove + move
+            now, cur, used, drove = arrive + stay, (s['lat'], s['lng']), used + 1, drove + move
 
     if not stops:
         return None
@@ -4772,7 +4848,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     out = {'stops': stops, 'back': hhmm(now + home), 'depart': hhmm(start),
            'total_min': (now + home) - start,
            'drive_total_min': drove + home,
-           'stay_total_min': stay_min * len(stops),
+           'stay_total_min': sum(st.get('stay_min', stay_min) for st in stops),
            'stay_over': bool(stay_over),
            'last': {'lat': cur[0], 'lng': cur[1]},
            'last_end': now}
@@ -4782,14 +4858,18 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     # 朝が雨で確定しているときは、早発ちしても朝の光は無い。だから勧めない。
     first = stops[0]
     morning_wet = bool((first.get('wx') or {}).get('wet'))
-    if first['timing'] == '遅い' and first['best_hour'] is not None and not morning_wet:
-        want = first['best_hour'] * 60 - first['drive_min']
+    if first['timing'] == '遅い' and first.get('best_min') is not None and not morning_wet:
+        # 本番に間に合う出発時刻。着いていたい時刻から移動分をさかのぼる。
+        _tgt = first.get('arrive_min')
+        if _tgt is None:
+            _tgt = first['best_min']
+        want = _tgt - first['drive_min']
         if 0 <= want < leave_min and (leave_min - want) <= 4 * 60:
             out['suggest_leave'] = hhmm(want)
 
     # 逆に、朝が雨で光が期待できないなら、遅く出ても同じ行程を回れる。
     # 帰着（宿泊なら撮影終了）までの余りの中で、2時間までずらせることを伝える。
-    if morning_wet and first['best_hour'] is not None and first['best_hour'] <= 9:
+    if morning_wet and first.get('best_min') is not None and first['best_min'] <= 9 * 60:
         slack = return_min - (now + home)
         shift = min(slack, 120)
         if shift >= 30:
@@ -4914,6 +4994,10 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
     for s in spots:
         km = haversine(origin[0], origin[1], s['lat'], s['lng'])
         move = drive_minutes(km)
+        # 狙い時刻はここで1回だけ出す。行程を組むときは候補を何度も見比べるので、
+        # そのたびに日の出入りを計算し直すのは無駄。落とす候補より先に出しておくのは、
+        # 行き先を名指しされた地点（anchor）が、ここから外れても使われるため。
+        s['best_min'], s['arrive_min'], s['sun_based'] = spot_timing(s, base_date, subject)
         if move > max_leg and s is not anchor:         # 片道が遠すぎる
             continue
         # 往復と最低限の滞在が入らない。宿泊するなら帰りは数えない。
@@ -4922,8 +5006,7 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
             continue
         s['km'], s['drive'] = km, move
         s['dir'] = bearing_label(bearing(origin[0], origin[1], s['lat'], s['lng']))
-        bh = s['hours'].most_common(1)[0][0] if s['hours'] else None
-        if is_night_hour(bh, rise, sets) and s is not anchor:
+        if is_night_min(s['best_min'], rise, sets) and s is not anchor:
             night.append(s)                            # 夜が本番の被写体は昼の行程に入れない
         else:
             usable.append(s)
@@ -4958,10 +5041,16 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
                 continue
             v = _spot_view(s, subject)
             home = drive_minutes(haversine(s['lat'], s['lng'], origin[0], origin[1]))
-            start = max(after_min + move, (v['best_hour'] or 20) * 60)
-            if start - (after_min + move) > 4 * 60:
+            # 星は、明るいうちに着いて風景を確認し、準備を整えておく。
+            # 着いていたい時刻は日の入の1時間前、本番はその2時間半後になる。
+            best_t = s.get('best_min') if s.get('best_min') is not None else 20 * 60
+            arr_t = s.get('arrive_min') if s.get('arrive_min') is not None else best_t
+            arrive = max(after_min + move, arr_t)
+            start = max(arrive, best_t)
+            if arrive - (after_min + move) > 4 * 60:
                 continue                  # 待ち時間が長すぎる。同じ日の続きとは言えない
-            v.update({'drive_min': move, 'from_last': move, 'start': hhmm(start),
+            v.update({'drive_min': move, 'from_last': move,
+                      'arrive': hhmm(arrive), 'start': hhmm(start),
                       'back': hhmm(start + 60 if stay_over else start + 60 + home)})
             out.append(v)
             if len(out) >= 3:
