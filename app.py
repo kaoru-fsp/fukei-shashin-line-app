@@ -1995,7 +1995,10 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
     # 1つの撮影地が7枠を埋めてしまわないようにする。探しているのは作品ではなく場所なので、
     # 同じ場所の2枚目より、別の場所の1枚目のほうが役に立つ。
-    # それで3件に満たないときだけ、同じ場所の別の作品で補う。（2026-10-09）
+    # 補うのは、場所が1か所しか見つからなかったときだけ。
+    # はじめ「3件に満たなければ」としていたが、それでは2か所あるときにも
+    # 3枚目を作ろうとして同じ場所が並んだ。2か所あるなら、2か所そのまま出すほうが素直。
+    # 同じ場所を2枚見せる値打ちがあるのは、ほかに選びようが無いときだけ。（2026-10-10）
     results, used, used_spots = [], set(), set()
     for _pass in (0, 1):
         for p in pool:
@@ -2006,10 +2009,15 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             _sk = spot_key(p['area'], p.get('place'))
             if _pass == 0 and _sk in used_spots:
                 continue
-            results.append(('🎯', 'ベストマッチ', p))
+            # 2周目で足したものは、すでに出した撮影地の別の作品。
+            # 同じ名前が並ぶので、別の場所だと思わせないよう名札を分ける。（2026-10-10）
+            if _pass and _sk in used_spots:
+                results.append(('📷', '同じ撮影地の別の作品', p))
+            else:
+                results.append(('🎯', 'ベストマッチ', p))
             used.add(p['pic'])
             used_spots.add(_sk)
-        if len(results) >= 3:
+        if len(used_spots) >= 2:
             break
     results = filter_broken_images(results)
     if not results:
