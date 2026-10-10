@@ -6331,6 +6331,100 @@ def api_fix_mojibake():
     return jsonify({"ok": True, "table": len(_MOJIBAKE_FIX), "found": found,
                     "fixed": done, "applied": apply, "rows": rows})
 
+
+# ──────────────── Area（市区町村）の名前ちがいを直す ────────────────
+# 誌面データの Area 欄に、実在しない市区町村が入っているものがある。
+# 県を取り違えたもの（福岡県喜多方市＝喜多方市は福島県）、字を間違えたもの
+# （三重県松坂市＝正しくは松阪市）など。
+#
+# 撮影地の候補を出すとき、Area は見出しにそのまま出る。座標も引けないので、
+# 距離も狂う。文字化けと同じで、直せば効きがはっきり出る。
+#
+# ここに並べたのは、**いまの値が市区町村として実在せず、直し先は実在する**と
+# 機械で確かめたものだけ。どちらに直すか迷うものは入れていない。
+# Place は見ない。その Area を持つ作品はすべて同じ誤りなので、まとめて直せる。
+#                                                          （2026-10-10）
+_AREA_FIX = {
+    # ── 県の取り違え ──
+    '福岡県喜多方市': '福島県喜多方市',      # 喜多方市は福島県。9通り・17件が同じ誤り
+    '岐阜県米原市': '滋賀県米原市',          # 米原市は滋賀県（醒井渓谷）
+    '栃木県古河市': '茨城県古河市',          # 古河市は茨城県
+    '高知県内子町': '愛媛県内子町',          # 内子町は愛媛県
+    '秋田県八幡平市': '岩手県八幡平市',      # 八幡平市は岩手県
+    '栃木県小谷村': '長野県小谷村',          # 小谷村は長野県（鎌池）
+    # 室堂は立山にある。一覧の「東京都立川市」案は誤り。
+    # 富山県のつもりで市区町村名だけ間違えたものなので、県は動かさない。
+    '富山県立川市': '富山県立山町',
+    # ── 市区町村名の誤記 ──
+    '静岡県伊豆天城市': '静岡県伊豆市',      # 伊豆天城市は無い。旧天城湯ヶ島町は伊豆市
+    '群馬県板倉市': '群馬県板倉町',          # 板倉は町
+    '北海道中富野良町': '北海道中富良野町',  # 「野良」が逆
+    '三重県松坂市': '三重県松阪市',          # 「坂」ではなく「阪」
+    '神奈川県南足利市': '神奈川県南足柄市',  # 夕日の滝は南足柄市
+}
+
+
+@app.route("/api/_fix/area", methods=["GET", "POST"])
+def api_fix_area():
+    """Master_Photos の Area を、実在する市区町村名に書き戻す。
+    GET は何件当てはまるかを数えるだけ。POST で実際に書き換える。
+    元の値は FixedFrom に残すので、あとから何を変えたか辿れる。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    apply = (request.method == "POST")
+    found, done, rows = 0, 0, []
+    hit = Counter()
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            old = d.get('Area', '')
+            new = _AREA_FIX.get(old)
+            if not new:
+                continue
+            found += 1
+            hit[old] += 1
+            place = d.get('Place', '') or ''
+            if len(rows) < 60:
+                rows.append('%s｜%s　→　%s' % (old, place[:14], new))
+            if not apply:
+                continue
+            batch.set(doc.reference, {'Area': new,
+                                      'FixedFrom': '%s｜%s' % (old, place)}, merge=True)
+            # 誤った名前で集めた座標は用済み。消しておけば「集める」で入り直す。
+            try:
+                db.collection(_PLACEGEO_COL).document(placegeo_id(old, place)).delete()
+            except Exception:
+                pass
+            done += 1
+            n += 1
+            if n >= 300:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if apply and n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if apply and done:
+        # 作品データを読み直させる。索引も作り直す。
+        global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT, _PLACE_PAIRS, _PLACE_PAIRS_AT
+        _PHOTOS, _PHOTOS_AT = None, 0.0
+        _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0
+        _PLACE_PAIRS, _PLACE_PAIRS_AT = None, 0.0
+        try:
+            for ref in db.collection(_SNAP_COLL).list_documents():
+                ref.delete()
+        except Exception as e:
+            print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
+
+    return jsonify({"ok": True, "table": len(_AREA_FIX), "found": found,
+                    "fixed": done, "applied": apply,
+                    "by_area": dict(hit), "rows": rows})
+
+
 @app.route("/api/_geocode/places/rejudge", methods=["POST"])
 def api_geocode_places_rejudge():
     """すでに集めてある座標を、地図に問い合わせ直さずに判定だけやり直す。
@@ -6521,6 +6615,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="rejudge">判定し直す</button>
   <button id="resetbad">取り直しが要るものを消す</button>
   <button id="moji">文字化けを直す</button>
+  <button id="areafix">市区町村名を直す</button>
 </div>
 
 <div id="bar"><i></i></div>
@@ -6695,7 +6790,31 @@ function fixMoji() {
     .then(function () { $("#moji").disabled = false; });
 }
 
+/* 実在しない市区町村名（福岡県喜多方市、三重県松坂市 など）を直す。
+   対応表に載っている Area を持つ作品だけを書き換える。 */
+function fixArea() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#areafix").disabled = true;
+  $("#log").textContent = "";
+  fetch("/api/_fix/area", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("直す行はありませんでした（対応表 " + j.table + "件）。"); return null; }
+      if (!confirm("作品データ " + j.found + "件の市区町村名を直します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
+      say("直しています…");
+      return post("/api/_fix/area", {}).then(function (k) {
+        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+        say(k.fixed + "件を直しました。\\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+      });
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { $("#areafix").disabled = false; });
+}
+
 $("#moji").addEventListener("click", fixMoji);
+$("#areafix").addEventListener("click", fixArea);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
