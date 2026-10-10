@@ -6405,6 +6405,34 @@ _AREA_FIX = {
     '北海道中富野良町': '北海道中富良野町',  # 「野良」が逆
     '三重県松坂市': '三重県松阪市',          # 「坂」ではなく「阪」
     '神奈川県南足利市': '神奈川県南足柄市',  # 夕日の滝は南足柄市
+
+    # ── 県名が欠けている・崩れている（Area修正候補_20261003 より） ──
+    '京都市南丹市': '京都府南丹市',          # 28件。「府」が「市」になっている
+    '山内県下関市': '山口県下関市',          # 22件
+    '神奈川山北町': '神奈川県山北町',        #  9件。「県」が抜けている
+    '鹿児島霧島市': '鹿児島県霧島市',        #  6件
+    '静岡沼津市': '静岡県沼津市',            #  2件
+    '北塩原村': '福島県北塩原村',            #  2件。県名ごと抜けている
+    '南阿蘇村': '熊本県南阿蘇村',            #  2件
+    '人吉市': '熊本県人吉市',                #  2件
+    '大阪市鶴見区': '大阪府大阪市鶴見区',    #  1件
+    '金沢県藤沢市': '神奈川県藤沢市',        #  1件
+    '長年茅野市': '長野県茅野市',            #  1件
+    '球磨村': '熊本県球磨村',                #  1件
+    '重兼高島市': '滋賀県高島市',            #  1件
+    # 一覧の案（青森県外ヶ浜町／三重県浜町／京都府福知山）はどれも実在しない。
+    # 正式な表記を当て直した。「外ケ浜」は大きい「ケ」。
+    '青山県外ヶ浜町': '青森県外ケ浜町',
+    '三重御県浜町': '三重県御浜町',
+    '京都県福知山': '京都府福知山市',
+
+    # ── 市区町村ではなく、地域の通称が入っていたもの ──
+    # 裏磐梯は市区町村名ではないので座標が引けず、福島県の重心（実際より
+    # 40kmほど南西）に置かれていた。桧原湖・五色沼・小野川湖はいずれも
+    # 北塩原村にある。Place が空のときは「裏磐梯」を入れておく。
+    # そうすれば「北塩原村 裏磐梯」で地図に引けて、村役場ではなく
+    # 裏磐梯そのものの座標になる。（2026-10-10）
+    '福島県裏磐梯': ('福島県北塩原村', '裏磐梯'),
 }
 
 
@@ -6425,18 +6453,27 @@ def api_fix_area():
         for doc in db.collection('Master_Photos').stream():
             d = doc.to_dict() or {}
             old = d.get('Area', '')
-            new = _AREA_FIX.get(old)
-            if not new:
+            rule = _AREA_FIX.get(old)
+            if not rule:
                 continue
+            # 値は「新しいArea」か、「新しいArea と、Placeが空のときに入れる名前」の組。
+            if isinstance(rule, tuple):
+                new, fill_place = rule
+            else:
+                new, fill_place = rule, None
             found += 1
             hit[old] += 1
             place = d.get('Place', '') or ''
+            upd = {'Area': new, 'FixedFrom': '%s｜%s' % (old, place)}
+            if fill_place and not place.strip():
+                upd['Place'] = fill_place
             if len(rows) < 60:
-                rows.append('%s｜%s　→　%s' % (old, place[:14], new))
+                rows.append('%s｜%s　→　%s｜%s'
+                            % (old, place[:14] or '（なし）', new,
+                               upd.get('Place', place)[:14] or '（なし）'))
             if not apply:
                 continue
-            batch.set(doc.reference, {'Area': new,
-                                      'FixedFrom': '%s｜%s' % (old, place)}, merge=True)
+            batch.set(doc.reference, upd, merge=True)
             # 誤った名前で集めた座標は用済み。消しておけば「集める」で入り直す。
             try:
                 db.collection(_PLACEGEO_COL).document(placegeo_id(old, place)).delete()
