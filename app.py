@@ -6436,6 +6436,86 @@ _AREA_FIX = {
 }
 
 
+def split_area_rest(area):
+    """Area が「県＋市区町村＋余り」の形なら、(県＋市区町村, 余り) に分けて返す。
+    分けられなければ None。
+
+    「福島県北塩原村裏磐梯」のような住所が入っていることがある。住所としては
+    正しいので誤記ではないが、Place が空のとき、この文字列がそのまま候補の
+    見出しに出てしまう。「裏磐梯」は撮影地の名前なので、Place に移したほうが
+    収まりがよく、地図にも引きやすい。（2026-10-10）"""
+    a = str(area or '').strip()
+    pref = extract_pref(a)
+    if not pref or not a.startswith(pref):
+        return None
+    rest = a[len(pref):]
+    if not rest:
+        return None
+    for city in CITY_NAMES_BY_PREF.get(pref, ()):
+        if city and rest.startswith(city) and len(rest) > len(city):
+            tail = rest[len(city):].strip()
+            if tail:
+                return (pref + city, tail)
+    return None
+
+
+@app.route("/api/_fix/area-split", methods=["GET", "POST"])
+def api_fix_area_split():
+    """Area の末尾に付いている字名を、Place へ移す。
+    Place が空のものだけが対象。GET は数えるだけ、POST で書き換える。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    apply = (request.method == "POST")
+    found, done, rows = 0, 0, []
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            old = d.get('Area', '')
+            if (d.get('Place') or '').strip():
+                continue                        # Place があるものには触れない
+            sp = split_area_rest(old)
+            if not sp:
+                continue
+            new_area, new_place = sp
+            found += 1
+            if len(rows) < 60:
+                rows.append('%s｜（なし）　→　%s｜%s' % (old, new_area, new_place))
+            if not apply:
+                continue
+            batch.set(doc.reference, {'Area': new_area, 'Place': new_place,
+                                      'FixedFrom': '%s｜' % old}, merge=True)
+            try:
+                db.collection(_PLACEGEO_COL).document(placegeo_id(old, '')).delete()
+            except Exception:
+                pass
+            done += 1
+            n += 1
+            if n >= 300:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if apply and n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if apply and done:
+        global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT, _PLACE_PAIRS, _PLACE_PAIRS_AT
+        _PHOTOS, _PHOTOS_AT = None, 0.0
+        _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0
+        _PLACE_PAIRS, _PLACE_PAIRS_AT = None, 0.0
+        try:
+            for ref in db.collection(_SNAP_COLL).list_documents():
+                ref.delete()
+        except Exception as e:
+            print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
+
+    return jsonify({"ok": True, "found": found, "fixed": done,
+                    "applied": apply, "rows": rows})
+
+
 @app.route("/api/_fix/area", methods=["GET", "POST"])
 def api_fix_area():
     """Master_Photos の Area を、実在する市区町村名に書き戻す。
@@ -6697,6 +6777,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="resetbad">取り直しが要るものを消す</button>
   <button id="moji">文字化けを直す</button>
   <button id="areafix">市区町村名を直す</button>
+  <button id="areasplit">字名を撮影地名に移す</button>
 </div>
 
 <div id="bar"><i></i></div>
@@ -6895,7 +6976,31 @@ function fixArea() {
 }
 
 $("#moji").addEventListener("click", fixMoji);
+/* Area の末尾に付いている字名（「福島県北塩原村裏磐梯」の「裏磐梯」）を Place へ移す。
+   Place が空のものだけが対象。空のままだと、住所が候補の見出しに出てしまう。 */
+function splitArea() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#areasplit").disabled = true;
+  $("#log").textContent = "";
+  fetch("/api/_fix/area-split", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("移すものはありませんでした。"); return null; }
+      if (!confirm("作品データ " + j.found + "件で、Areaの末尾を撮影地名に移します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
+      say("移しています…");
+      return post("/api/_fix/area-split", {}).then(function (k) {
+        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+        say(k.fixed + "件を移しました。\\n続けて「集める」を押すと、移した地名で座標を取り直します。");
+      });
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { $("#areasplit").disabled = false; });
+}
+
 $("#areafix").addEventListener("click", fixArea);
+$("#areasplit").addEventListener("click", splitArea);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
