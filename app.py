@@ -4444,21 +4444,33 @@ def forecast_for(points, base_date):
     if hit and now - hit[0] < _WX_TTL:
         return hit[1]
 
-    q = urllib.parse.urlencode({
-        'latitude': ','.join(str(a) for a, _ in pts),
-        'longitude': ','.join(str(b) for _, b in pts),
-        'hourly': 'weather_code,precipitation_probability',
-        'timezone': 'Asia/Tokyo',
-        'start_date': base_date.isoformat(),
-        'end_date': base_date.isoformat(),
-    })
-    try:
+    def _ask(hourly):
+        q = urllib.parse.urlencode({
+            'latitude': ','.join(str(a) for a, _ in pts),
+            'longitude': ','.join(str(b) for _, b in pts),
+            'hourly': hourly,
+            'timezone': 'Asia/Tokyo',
+            'start_date': base_date.isoformat(),
+            'end_date': base_date.isoformat(),
+        })
         with urllib.request.urlopen(f"{_WX_URL}?{q}", timeout=_WX_TIMEOUT) as r:
-            raw = json.loads(r.read().decode('utf-8'))
+            return json.loads(r.read().decode('utf-8'))
+
+    # 雲の高さ別の割合まで頼む。取れなければ、これまでの項目だけで取り直す。
+    # 項目名がひとつでも通らないと返事そのものが来ないので、
+    # 増やした項目のせいで天候が丸ごと無くなることのないようにしておく。（2026-10-10）
+    raw = None
+    try:
+        raw = _ask('weather_code,precipitation_probability,cloud_cover,'
+                   'cloud_cover_low,cloud_cover_mid,cloud_cover_high')
     except Exception as e:
-        print(f"[WARN] 予報を取れませんでした: {e}", flush=True)
-        _WX_CACHE[key] = (now, None)
-        return None
+        print(f"[WARN] 雲の高さ別を取れませんでした（通常の項目で取り直します）: {e}", flush=True)
+        try:
+            raw = _ask('weather_code,precipitation_probability')
+        except Exception as e2:
+            print(f"[WARN] 予報を取れませんでした: {e2}", flush=True)
+            _WX_CACHE[key] = (now, None)
+            return None
 
     blocks = raw if isinstance(raw, list) else [raw]   # 1地点だけのときは配列にならない
     out = []
@@ -4470,8 +4482,22 @@ def forecast_for(points, base_date):
             out.append(None)
             continue
         pop = (pop + [0] * 24)[:24]
+
+        # 雲量（％）。空模様の『晴れ・曇り』の3段階では、星景写真に要る
+        # 「どの程度の雲か」が分からないため、数で持っておく。
+        # 雲量そのものは『空に占める割合』で、厚さではない。厚さの代わりに
+        # 高さ別の割合を使う。下層・中層の雲は厚くて星を隠すが、
+        # 高層（巻層雲）は薄曇りで、星は写る。（2026-10-10）
+        def _col(name):
+            v = list(h.get(name) or [])
+            v = (v + [None] * 24)[:24]
+            return [None if c is None else int(c) for c in v]
+
         out.append({'code': [int(c or 0) for c in code[:24]],
-                    'pop': [int(p or 0) for p in pop]})
+                    'pop': [int(p or 0) for p in pop],
+                    'cloud': _col('cloud_cover'),
+                    'cloud_low': _col('cloud_cover_low'),
+                    'cloud_mid': _col('cloud_cover_mid')})
     while len(out) < len(pts):
         out.append(None)
     _WX_CACHE[key] = (now, out)
@@ -4486,6 +4512,19 @@ def wx_span(f, start_min, end_min):
     b = max(a, min(23, int((end_min + 59) // 60)))
     codes = f['code'][a:b + 1] or [0]
     pops = f['pop'][a:b + 1] or [0]
+    clds = [c for c in (f.get('cloud') or [])[a:b + 1] if c is not None]
+    # 厚い雲（下層＋中層）の覆い。重なり方は分からないので、
+    # 互いに無関係に広がっているとみて合わせる。
+    _lo = (f.get('cloud_low') or [])[a:b + 1]
+    _mi = (f.get('cloud_mid') or [])[a:b + 1]
+    thick = []
+    for i in range(max(len(_lo), len(_mi))):
+        lo = _lo[i] if i < len(_lo) else None
+        mi = _mi[i] if i < len(_mi) else None
+        if lo is None and mi is None:
+            continue
+        lo, mi = (lo or 0), (mi or 0)
+        thick.append(100 - (100 - lo) * (100 - mi) / 100.0)
     worst = max(codes, key=lambda c: (c in _WX_THUNDER, c in _WX_SNOW, c in _WX_RAIN,
                                       c in _WX_DRIZZLE, c in _WX_FOG, c))
     pop = max(pops)
@@ -4496,6 +4535,10 @@ def wx_span(f, start_min, end_min):
         'wet': pop >= _WX_WET_POP or (hard and pop >= _WX_WET_POP_HARD),
         'thunder': any(c in _WX_THUNDER for c in codes),
         'fog': any(c in _WX_FOG for c in codes),
+        # その時間帯の平均の雲量（％）。取れなければ None。
+        'cloud': (round(sum(clds) / len(clds)) if clds else None),
+        # そのうち、厚い雲（下層＋中層）の覆い。星を隠すのはこちら。
+        'cloud_thick': (round(sum(thick) / len(thick)) if thick else None),
     }
 
 # 入賞作品に記録されていた天候のうち、雨がかりと呼べるもの
@@ -4514,6 +4557,56 @@ def wx_weight(s, span):
         return 0.7                         # 天候の記録が無い地点は中ほどに置く
     wet = sum(k for w, k in counts.items() if w in _WX_WET_NAMES)
     return max(0.45, min(1.15, 0.45 + 0.9 * (wet / tot)))
+
+# 本番が天気で成立しない被写体。何があれば撮れないかを、被写体ごとに決めておく。
+#   'dry'   … 雨や雪では撮れない。焼けも雲海も、降っていれば出ない
+#   'sky'   … 雨や雪に加えて、空がふさがっていれば撮れない（星・天の川）
+# ここに無い被写体（滝・紅葉など）は、雨でも撮れる。雨のほうが良いものさえある。
+# そちらは wx_weight で重みを下げるだけにとどめ、候補からは外さない。（2026-10-10）
+_SUBJECT_NEEDS = {
+    '朝焼け': 'dry',
+    '夕焼け': 'dry',
+    '雲海':   'dry',
+    '星':     'sky',
+    '天の川': 'sky',
+}
+
+# 星景写真が成立しないとみなす、厚い雲（下層＋中層）の覆い（％）。
+#
+# はじめ「曇りなら外す」としていたが、厳しすぎた。ここで撮るのは天体写真ではなく
+# 星景写真、つまり星空を含めた風景写真である。適度な雲は邪魔にならず、
+# むしろ画になることもある。邪魔になるのは、空がふさがって星が見えないときだけ。
+#
+# 次に雲量（空に占める雲の割合）で見たが、これも足りなかった。雲量は厚さを
+# 表さないので、「薄曇りが全天を覆う（星は写る）」と「厚い雲が全天を覆う
+# （写らない）」が、どちらも100％になってしまう。
+#
+# いまは高さ別の割合を使う。下層・中層の雲は厚くて星を隠し、高層（巻層雲）は
+# 薄曇りで、星は減光しながらも写る。全天が高層雲でも外さないのはそのため。
+# 逆に、厚い雲が8割を超えて広がっていれば、晴れ間に賭けるには分が悪い。
+# 境目は程度の問題で確かなものではないので、数を画面に出して判断に委ねる。（2026-10-10）
+_STAR_THICK_MAX = 80
+_STAR_CLOUD_MAX = 90   # 高さ別が取れないときに、全体の雲量で代える境目
+
+
+def shot_possible(s, span, subject=None):
+    """その撮影地の本番が、その時間帯の空で成立するか。
+    予報が無ければ分からないので成立とみなす（組んだうえで、現地の判断に委ねる）。"""
+    need = _SUBJECT_NEEDS.get(spot_subject(s, subject))
+    if not need or not span:
+        return True
+    if span['wet']:
+        return False
+    if need == 'dry':
+        return True
+    thick = span.get('cloud_thick')
+    if thick is not None:                  # 厚い雲（下層＋中層）がどれだけ広がっているか
+        return thick < _STAR_THICK_MAX
+    cloud = span.get('cloud')
+    if cloud is not None:                  # 高さ別が取れないときは、全体の雲量で代える
+        return cloud < _STAR_CLOUD_MAX
+    return span['sky'] != '曇り'           # それも無ければ、空模様の名前で代える
+
 
 # 雨で足元が悪くなりやすい地形。撮影地の名前から分かる範囲だけを見る。
 # ここに無い場所の地面の状態は、手元のデータからは分からないので言わない。
@@ -5034,9 +5127,39 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         s['work'] = s['works'][0] if s['works'] else {}
 
     fc = forecast_for([(s['lat'], s['lng']) for s in cand], base_date)
+    weather_dropped = []
     if fc:
         for s, f in zip(cand, fc):
             s['wx'] = f
+
+        # その日の空では本番が成立しない撮影地を、候補から外す。
+        # 朝焼けを狙う場所へ、朝が雨の日に案内しても仕方がない。
+        # 名指しされた行き先（anchor）だけは外さない。本人が決めたことなので、
+        # 天気を添えたうえで、行くかどうかは本人に委ねる。（2026-10-10）
+        def _wx_ok(s):
+            if not s.get('sun_based') or s is anchor:
+                return True
+            b0 = s.get('arrive_min')
+            b1 = s.get('best_min')
+            if b0 is None or b1 is None:
+                return True
+            # 見る時間帯。焼けや雲海は準備中の空も含めて見るが、
+            # 星は本番の前後だけを見る。日の入前の雲で落としては意味がない。
+            if _SUBJECT_NEEDS.get(spot_subject(s, subject)) == 'sky':
+                w0, w1 = b1 - 60, b1 + _SHOOT_MIN
+            else:
+                w0, w1 = b0, b1 + _SHOOT_MIN
+            if shot_possible(s, wx_span(s.get('wx'), w0, w1), subject):
+                return True
+            weather_dropped.append({'area': s['area'],
+                                    'subject': spot_subject(s, subject)})
+            return False
+
+        usable = [s for s in usable if _wx_ok(s)]
+        night = [s for s in night if _wx_ok(s)]
+        if weather_dropped:
+            print('[INFO] 天気で本番が成立しない撮影地を %d か所外しました'
+                  % len(weather_dropped), flush=True)
 
     by_dir = defaultdict(list)
     for s in usable:
@@ -5063,6 +5186,14 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
             v.update({'drive_min': move, 'from_last': move,
                       'arrive': hhmm(arrive), 'start': hhmm(start),
                       'back': hhmm(start + 60 if stay_over else start + 60 + home)})
+            # 本番前後の雲量。星景が成立するかは程度の問題なので、
+            # こちらで決めきらず、数を見せて現地の判断に委ねる。（2026-10-10）
+            _nsp = wx_span(s.get('wx'), best_t - 60, best_t + _SHOOT_MIN)
+            if _nsp:
+                if _nsp.get('cloud') is not None:
+                    v['cloud'] = _nsp['cloud']
+                if _nsp.get('cloud_thick') is not None:
+                    v['cloud_thick'] = _nsp['cloud_thick']
             out.append(v)
             if len(out) >= 3:
                 break
@@ -5159,6 +5290,10 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         'sun': {'rise': hhmm(rise), 'set': hhmm(sets)},
         'spots_considered': len(usable),
         'night_considered': len(night),
+        # その日の空では本番が成立せず、候補から外した撮影地。
+        # 「候補が少ない」理由を黙って飲み込まないために返す。
+        'weather_dropped': len(weather_dropped),
+        'weather_dropped_subjects': sorted({d['subject'] for d in weather_dropped if d['subject']}),
         'max_leg_min': max_leg,
         'easy': bool(easy),
         'stay_over': bool(stay_over),
