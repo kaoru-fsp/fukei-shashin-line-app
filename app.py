@@ -6436,14 +6436,30 @@ _AREA_FIX = {
 }
 
 
-def split_area_rest(area):
-    """Area が「県＋市区町村＋余り」の形なら、(県＋市区町村, 余り) に分けて返す。
-    分けられなければ None。
+# Area に地名が並べ書きされていることがある。「京都府福知山市・大江山」の
+# 「・」や、「青森県六ヶ所村、横浜町」の「、」。区切りをそのまま Place に
+# 持ち込むと「・大江山」という撮影地になってしまうので、両端から落とす。
+_AREA_TAIL_STRIP = '・･、，,／/＋+＆&　 \t'
+
+# 全国の市区町村名（県名を外した形）。余りが市区町村そのものだったときの見分けに使う。
+_ALL_CITY_NAMES = set()
+for _list in CITY_NAMES_BY_PREF.values():
+    _ALL_CITY_NAMES |= set(_list)
+
+
+def split_area_parts(area):
+    """Area を「県＋市区町村」と「余り」に分ける。
+    返すのは (県＋市区町村, 撮影地名, 見送る理由)。分けられなければ None。
+    見送る理由が入っていたら、書き換えないほうがよいもの。
 
     「福島県北塩原村裏磐梯」のような住所が入っていることがある。住所としては
     正しいので誤記ではないが、Place が空のとき、この文字列がそのまま候補の
     見出しに出てしまう。「裏磐梯」は撮影地の名前なので、Place に移したほうが
-    収まりがよく、地図にも引きやすい。（2026-10-10）"""
+    収まりがよく、地図にも引きやすい。
+
+    ただし余りが撮影地名でないこともある。「青森県六ヶ所村、横浜町」は
+    市区町村が2つ並んでいるだけで、横浜町は撮影地ではない。これを Place に
+    移すと、撮影地名の欄に町名が入ってしまう。移さずに残す。（2026-10-10）"""
     a = str(area or '').strip()
     pref = extract_pref(a)
     if not pref or not a.startswith(pref):
@@ -6452,11 +6468,28 @@ def split_area_rest(area):
     if not rest:
         return None
     for city in CITY_NAMES_BY_PREF.get(pref, ()):
-        if city and rest.startswith(city) and len(rest) > len(city):
-            tail = rest[len(city):].strip()
-            if tail:
-                return (pref + city, tail)
+        if not city or not rest.startswith(city) or len(rest) <= len(city):
+            continue
+        tail = rest[len(city):].strip(_AREA_TAIL_STRIP)
+        # 「（裏磐梯）」のように丸ごと括られていたら、括弧も外す
+        for _o, _c in (('（', '）'), ('(', ')'), ('「', '」'), ('［', '］'), ('[', ']')):
+            if len(tail) > 2 and tail.startswith(_o) and tail.endswith(_c):
+                tail = tail[1:-1].strip(_AREA_TAIL_STRIP)
+        if not tail:
+            return None                      # 区切りだけだった。余りは無い
+        if tail in _ALL_CITY_NAMES:
+            return (pref + city, tail, '市区町村名が並べ書きされている')
+        return (pref + city, tail, '')
     return None
+
+
+def split_area_rest(area):
+    """Area が「県＋市区町村＋字名」の形なら、(県＋市区町村, 字名) に分けて返す。
+    分けられない、または移すべきでないものは None。"""
+    sp = split_area_parts(area)
+    if not sp or sp[2]:
+        return None
+    return (sp[0], sp[1])
 
 
 @app.route("/api/_fix/area-split", methods=["GET", "POST"])
@@ -6468,7 +6501,8 @@ def api_fix_area_split():
     if not db:
         return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
     apply = (request.method == "POST")
-    found, done, rows = 0, 0, []
+    found, done, rows, skips = 0, 0, [], []
+    skipped = 0
     try:
         batch, n = db.batch(), 0
         for doc in db.collection('Master_Photos').stream():
@@ -6476,10 +6510,17 @@ def api_fix_area_split():
             old = d.get('Area', '')
             if (d.get('Place') or '').strip():
                 continue                        # Place があるものには触れない
-            sp = split_area_rest(old)
+            sp = split_area_parts(old)
             if not sp:
                 continue
-            new_area, new_place = sp
+            new_area, new_place, why = sp
+            if why:
+                # 移すべきでないもの。何を見送ったかは一覧に出す（重複は1行にまとめる）
+                skipped += 1
+                line = '%s　…　見送り（%s）' % (old, why)
+                if line not in skips and len(skips) < 30:
+                    skips.append(line)
+                continue
             found += 1
             if len(rows) < 60:
                 rows.append('%s｜（なし）　→　%s｜%s' % (old, new_area, new_place))
@@ -6513,7 +6554,8 @@ def api_fix_area_split():
             print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
 
     return jsonify({"ok": True, "found": found, "fixed": done,
-                    "applied": apply, "rows": rows})
+                    "applied": apply, "rows": rows,
+                    "skipped": skipped, "skips": skips})
 
 
 @app.route("/api/_fix/area", methods=["GET", "POST"])
