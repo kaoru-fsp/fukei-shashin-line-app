@@ -1887,6 +1887,12 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         return []
 
 # ──────────────── Flex Message 組み立て ────────────────
+# 地域の通称で引くときの決まり。文字で引いて、これに満たなければ地図に頼る。
+# 10kmは、裏磐梯（桧原湖・五色沼・雄国沼）がちょうど収まる広さ。
+# 広げすぎると、山の向こう側（表磐梯）まで混ざる。（2026-10-10）
+_REGION_MIN = 3
+_REGION_RADIUS_KM = 10.0
+
 def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name=None, subject=None, center_latlng=None, radius_km=None, home_latlng=None, expand_time=False):
     """地点名(Place/Area/Title)の自由文検索。
     今の時期に一致する作品があればそれを、無ければ全期間からその地点の作品を返す。
@@ -1981,12 +1987,39 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         print(f"[ERROR] search_by_place failed: {traceback.format_exc()}", flush=True)
         return {'status': 'not_found', 'results': []}
 
+    def _region_fallback(found):
+        """文字で引けなかったときの逃げ道。その言葉を地図で引いて、周りの撮影地を集める。
+
+        「裏磐梯」「奥日光」「尾瀬」のように、通称で呼ばれる地域がある。
+        雄国沼も桧原湖も裏磐梯だが、Area は「福島県喜多方市」「福島県北塩原村」で、
+        Place にも「裏磐梯」とは書かれていない。文字を突き合わせるだけでは、
+        地域まるごとが検索から漏れる。風景写真では、そういう地域こそ要になる。
+
+        撮影地ごとの座標が入ったので、場所で集められるようになった。
+        市区町村の中心しか無かったころは、同じ市の撮影地が全部同じ点にいたので、
+        半径で切っても意味がなかった。（2026-10-10）"""
+        if center_latlng or not place_terms or found >= _REGION_MIN:
+            return None
+        ll = geocode(place_terms[0])
+        if not ll:
+            return None
+        r2 = search_by_place([], base_date=base_date, origin_latlng=origin_latlng,
+                             origin_name=origin_name, subject=subject,
+                             center_latlng=ll, radius_km=_REGION_RADIUS_KM,
+                             home_latlng=home_latlng, expand_time=expand_time)
+        if len(r2.get('results') or []) <= found:
+            return None
+        r2['region'] = place_terms[0]
+        r2['region_radius_km'] = _REGION_RADIUS_KM
+        r2['region_found'] = found     # 文字で引けた件数。0なら「見つからなかった」
+        return r2
+
     if in_season:
         pool, status = in_season, 'in_season'
     elif all_time:
         pool, status = all_time, 'off_season'
     else:
-        return {'status': 'not_found', 'results': []}
+        return _region_fallback(0) or {'status': 'not_found', 'results': []}
     if home_latlng and center_latlng:
         pool.sort(key=lambda x: (x.get('detour', 0), x.get('cdist', 0)))
     elif center_latlng:
@@ -2021,7 +2054,10 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             break
     results = filter_broken_images(results)
     if not results:
-        return {'status': 'not_found', 'results': []}
+        return _region_fallback(0) or {'status': 'not_found', 'results': []}
+    wide = _region_fallback(len(results))
+    if wide:
+        return wide
     peaks = compute_peaks(bin_counter)
     return {'status': status, 'results': results, 'peaks': peaks}
 
@@ -7640,8 +7676,19 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             out["spots"] = _conc_pack(pr['results'])
             out["count"] = len(out["spots"])
             _sfx = ("（撮り頃は%sごろ）" % peaks_text(speaks)) if (_subj in SEASONAL_SUBJECTS and speaks) else ""
-            out["message"] = ("%sに「%s」で撮影された%sの作品はこちらです%s。"
-                              % (period_phrase(pp), place_disp, _subj, _sfx))
+            if pr.get('region'):
+                _km = int(pr.get('region_radius_km') or 10)
+                if pr.get('region_found'):
+                    out["message"] = ("「%s」という地名の%sの作品は%d件でしたので、"
+                                      "その周り%dkm以内まで広げて探しました%s。"
+                                      % (pr['region'], _subj, pr['region_found'], _km, _sfx))
+                else:
+                    out["message"] = ("「%s」という地名の作品は見つかりませんでしたが、"
+                                      "その周り%dkm以内で撮影された%sの作品はこちらです%s。"
+                                      % (pr['region'], _km, _subj, _sfx))
+            else:
+                out["message"] = ("%sに「%s」で撮影された%sの作品はこちらです%s。"
+                                  % (period_phrase(pp), place_disp, _subj, _sfx))
             if out["count"] <= 3:
                 out["status"] = "few"
                 out["choices"] = _conc_widen(peaks=(speaks if _subj in SEASONAL_SUBJECTS else None), base_date=target_date)
@@ -7758,6 +7805,20 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             out["spots"] = _conc_pack(pr['results'])
             out["count"] = len(out["spots"])
             out["peaks"] = pr.get('peaks', [])
+            # 文字で引けず、地図で場所を引いて周りを集めたとき。
+            # 黙って別の探し方に切り替わると、なぜその顔ぶれなのか分からない。
+            if pr.get('region'):
+                out["status"] = "ok"
+                _km = int(pr.get('region_radius_km') or 10)
+                if pr.get('region_found'):
+                    out["message"] = ("「%s」という地名の作品は%d件でしたので、"
+                                      "その周り%dkm以内まで広げて探しました。"
+                                      % (pr['region'], pr['region_found'], _km))
+                else:
+                    out["message"] = ("「%s」という地名の作品は見つかりませんでしたが、"
+                                      "その周り%dkm以内で撮影された作品はこちらです。"
+                                      % (pr['region'], _km))
+                return out
             if pr['status'] == 'in_season':
                 out["status"] = "ok"
                 out["message"] = "%sに「%s」で撮影された作品はこちらです。" % (period_phrase(pp), residual)
