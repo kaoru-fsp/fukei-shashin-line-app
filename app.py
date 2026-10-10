@@ -7029,6 +7029,11 @@ function splitArea() {
     .then(function (j) {
       if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
       (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (j.skipped) {
+        log("");
+        log("　── 移さないもの " + j.skipped + "件 ──");
+        (j.skips || []).forEach(function (s) { log("　" + s); });
+      }
       if (!j.found) { say("移すものはありませんでした。"); return null; }
       if (!confirm("作品データ " + j.found + "件で、Areaの末尾を撮影地名に移します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
       say("移しています…");
