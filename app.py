@@ -1743,18 +1743,32 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             )
             used_pics = set()
             cresults = []
-            # ベストマッチ(市一致): 同一作品のみ除去し、同じ市の作品は複数見せる(撮影地重複を許容)
-            for p in city_pool:
-                if len(cresults) >= 7:
-                    break
-                if p['pic'] in used_pics:
-                    continue
-                cresults.append(('🎯', 'ベストマッチ', p))
-                used_pics.add(p['pic'])
-            city_count = len(cresults)
-            # 周辺候補: 撮影地の重複を避けて補完
-            nearby_label = f"{city_base}周辺の撮影地"
+            # ベストマッチ（市一致）。以前は「同じ市の作品は複数見せる」として撮影地の
+            # 重複を許していた。市区町村しか鍵が無く、絞ると1件しか出せなかったためである。
+            # 撮影地ごとの座標が入ったいまは、ほかの検索と同じ考え方にそろえる——
+            # 別の撮影地を先に出し、同じ撮影地の2枚目は、ほかに選びようが無いときだけ。
+            # （「喜多方」で雄国沼が2枚並んでいた）（2026-10-10）
             used_spots = SpotSet()
+            for _pass in (0, 1):
+                for p in city_pool:
+                    if len(cresults) >= 7:
+                        break
+                    if p['pic'] in used_pics:
+                        continue
+                    _sk = spot_key(p['area'], p.get('place'))
+                    if _pass == 0 and _sk in used_spots:
+                        continue
+                    if _pass and _sk in used_spots:
+                        cresults.append(('📷', '同じ撮影地の別の作品', p))
+                    else:
+                        cresults.append(('🎯', 'ベストマッチ', p))
+                    used_pics.add(p['pic'])
+                    used_spots.add(_sk)
+                if len(used_spots) >= 2:
+                    break
+            city_count = len(cresults)
+            # 周辺候補: 撮影地の重複を避けて補完（市一致で出した撮影地も避ける）
+            nearby_label = f"{city_base}周辺の撮影地"
             for p in nearby_pool:
                 if len(cresults) >= 7:
                     break
