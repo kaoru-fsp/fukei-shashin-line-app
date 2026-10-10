@@ -1754,7 +1754,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
             city_count = len(cresults)
             # 周辺候補: 撮影地の重複を避けて補完
             nearby_label = f"{city_base}周辺の撮影地"
-            used_spots = set()
+            used_spots = SpotSet()
             for p in nearby_pool:
                 if len(cresults) >= 7:
                     break
@@ -1784,7 +1784,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
         # 撮影地ごとに分ける。ただし1つの市区町村に偏ると選びようがなくなるので、
         # まずは1市区町村2件までで並べ、それで3件に満たなければ上限を外して補う。
         # （以前は市区町村そのものが鍵だったため、日光市からは必ず1件しか出なかった）
-        used_spots = set()
+        used_spots = SpotSet()
         _area_n = defaultdict(int)
         for _pass in (0, 1):
             for p in best_pool:
@@ -2032,7 +2032,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     # はじめ「3件に満たなければ」としていたが、それでは2か所あるときにも
     # 3枚目を作ろうとして同じ場所が並んだ。2か所あるなら、2か所そのまま出すほうが素直。
     # 同じ場所を2枚見せる値打ちがあるのは、ほかに選びようが無いときだけ。（2026-10-10）
-    results, used, used_spots = [], set(), set()
+    results, used, used_spots = [], set(), SpotSet()
     for _pass in (0, 1):
         for p in pool:
             if len(results) >= 7:
@@ -5990,15 +5990,64 @@ def spot_key(area, place):
     いまは撮影地ごとの座標（PlaceGeo）があるので、まず座標で見る。
     小数第3位（およそ100m四方）に丸めるので、「覚満淵」「おぼろ沼（覚満淵）」のような
     表記ゆれも同じ場所としてまとまる。座標が無いものは Place の文字、
-    それも無いものは市区町村に落とす。（2026-10-09）"""
+    それも無いものは市区町村に落とす。（2026-10-09）
+
+    鍵には撮影地名も入れる。同じ点が返ってくる別々の場所があるためで、
+    「裏磐梯」と「桧原湖」は地図がまったく同じ座標を返す（地域の代表点が
+    湖の南岸に置かれている）。名前まで見ないと、地域とその中の湖が
+    1つに畳まれ、作品が1枚消える。名前の照合は SpotSet が行う。（2026-10-10）"""
     a = str(area or '').strip()
     p = str(place or '').strip()
     ll = place_latlng(a, p)
     if ll:
-        return ('g', round(ll[0], 3), round(ll[1], 3))
+        return ('g', round(ll[0], 3), round(ll[1], 3), p)
     if p:
         return ('p', a, p)
     return ('a', a)
+
+
+def _spot_name_norm(s):
+    """撮影地名を照合用の形にそろえる（空白・括弧・区切り記号を落とす）。"""
+    return re.sub(r'[\s　（）()「」『』［］\[\]・･,、.。]', '', str(s or ''))
+
+
+def _same_spot_name(x, y):
+    """同じ座標に出てきた2つの撮影地名が、同じ場所を指しているか。
+    「覚満淵」と「おぼろ沼（覚満淵）」は同じ。「裏磐梯」と「桧原湖」は違う。
+    片方に名前が無ければ、座標だけで同じとみなす。"""
+    a, b = _spot_name_norm(x), _spot_name_norm(y)
+    if not a or not b:
+        return True
+    if min(len(a), len(b)) < 2:
+        return a == b                   # 1文字では含み合いが当てにならない
+    return a in b or b in a
+
+
+class SpotSet:
+    """すでに出した撮影地の控え。set と同じ使い方（in／add／len）ができる。
+
+    座標が同じでも名前が別なら別の撮影地として扱う、という照合を入れたいので、
+    ただの set では足りない。座標ごとに出した名前を覚えておき、
+    含み合うかどうかで判める。（2026-10-10）"""
+
+    def __init__(self):
+        self._at = {}        # (丸めた緯度, 経度) → [出した名前]
+        self._plain = set()  # 座標が無いものの鍵
+
+    def __contains__(self, key):
+        if key and key[0] == 'g':
+            return any(_same_spot_name(key[3], n)
+                       for n in self._at.get((key[1], key[2]), ()))
+        return key in self._plain
+
+    def add(self, key):
+        if key and key[0] == 'g':
+            self._at.setdefault((key[1], key[2]), []).append(key[3])
+        else:
+            self._plain.add(key)
+
+    def __len__(self):
+        return sum(len(v) for v in self._at.values()) + len(self._plain)
 
 # ── 地図への問い合わせ ──
 
