@@ -6446,6 +6446,18 @@ _ALL_CITY_NAMES = set()
 for _list in CITY_NAMES_BY_PREF.values():
     _ALL_CITY_NAMES |= set(_list)
 
+_PLACE_WRAP = (('（', '）'), ('(', ')'), ('「', '」'), ('［', '］'), ('[', ']'))
+
+
+def tidy_place(place):
+    """撮影地名の両端から、区切り記号と括りを落とす。
+    「・大江山」→「大江山」、「（裏磐梯）」→「裏磐梯」。"""
+    p = str(place or '').strip().strip(_AREA_TAIL_STRIP)
+    for _o, _c in _PLACE_WRAP:
+        if len(p) > 2 and p.startswith(_o) and p.endswith(_c):
+            p = p[1:-1].strip(_AREA_TAIL_STRIP)
+    return p
+
 
 def split_area_parts(area):
     """Area を「県＋市区町村」と「余り」に分ける。
@@ -6470,11 +6482,7 @@ def split_area_parts(area):
     for city in CITY_NAMES_BY_PREF.get(pref, ()):
         if not city or not rest.startswith(city) or len(rest) <= len(city):
             continue
-        tail = rest[len(city):].strip(_AREA_TAIL_STRIP)
-        # 「（裏磐梯）」のように丸ごと括られていたら、括弧も外す
-        for _o, _c in (('（', '）'), ('(', ')'), ('「', '」'), ('［', '］'), ('[', ']')):
-            if len(tail) > 2 and tail.startswith(_o) and tail.endswith(_c):
-                tail = tail[1:-1].strip(_AREA_TAIL_STRIP)
+        tail = tidy_place(rest[len(city):])
         if not tail:
             return None                      # 区切りだけだった。余りは無い
         if tail in _ALL_CITY_NAMES:
@@ -6556,6 +6564,92 @@ def api_fix_area_split():
     return jsonify({"ok": True, "found": found, "fixed": done,
                     "applied": apply, "rows": rows,
                     "skipped": skipped, "skips": skips})
+
+
+@app.route("/api/_fix/place-tidy", methods=["GET", "POST"])
+def api_fix_place_tidy():
+    """「字名を撮影地名に移す」で入った撮影地名を整える。GET は数えるだけ、POST で書き換える。
+
+    やることは2つ。
+      整える … 両端の区切り記号を落とす。「・大江山」→「大江山」
+      戻す　 … 市区町村名が並べ書きされていたものを、元の Area に戻す。
+               「青森県六ヶ所村｜、横浜町」→「青森県六ヶ所村、横浜町｜（なし）」
+
+    戻すのは、FixedFrom に残した元の値が、いまの Area と撮影地名から
+    組み直せるものだけ。誌面にもともと入っていた撮影地名には触らない。（2026-10-10）"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    apply = (request.method == "POST")
+    n_tidy, n_back, done, rows = 0, 0, 0, []
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            area = str(d.get('Area') or '').strip()
+            place = str(d.get('Place') or '')
+            if not place.strip():
+                continue
+            clean = tidy_place(place)
+            # この作品の Area と撮影地名を繋ぎ直すと、FixedFrom に残した元の値に
+            # 戻るか。戻るなら「字名を撮影地名に移す」が入れたものだと分かる。
+            # 誌面にもともと入っていた撮影地名には、この条件が立たない。
+            fixed_from = str(d.get('FixedFrom') or '')
+            from_split = (fixed_from.endswith('｜')
+                          and fixed_from[:-1] == area + place)
+            back = None
+            if from_split and (not clean or clean in _ALL_CITY_NAMES):
+                # 区切り記号しか無い、または市区町村名が並べ書きされていたもの
+                back = fixed_from[:-1]
+            elif not clean:
+                continue                      # 元の値が辿れない。機械では判断できない
+            if back:
+                n_back += 1
+                line = '戻す　　%s｜%s　→　%s｜（なし）' % (area, place, back)
+                if line not in rows and len(rows) < 60:
+                    rows.append(line)           # 同じ誤りの作品が何枚もあるので1行にまとめる
+                if apply:
+                    batch.set(doc.reference, {'Area': back, 'Place': ''}, merge=True)
+            elif clean != place:
+                n_tidy += 1
+                line = '整える　%s｜%s　→　%s｜%s' % (area, place, area, clean)
+                if line not in rows and len(rows) < 60:
+                    rows.append(line)
+                if apply:
+                    batch.set(doc.reference, {'Place': clean}, merge=True)
+            else:
+                continue
+            if not apply:
+                continue
+            # 直す前の組み合わせで集めた座標は用済み。消しておけば「集める」で入り直す。
+            try:
+                db.collection(_PLACEGEO_COL).document(placegeo_id(area, place)).delete()
+            except Exception:
+                pass
+            done += 1
+            n += 1
+            if n >= 300:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if apply and n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if apply and done:
+        global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT, _PLACE_PAIRS, _PLACE_PAIRS_AT
+        _PHOTOS, _PHOTOS_AT = None, 0.0
+        _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0
+        _PLACE_PAIRS, _PLACE_PAIRS_AT = None, 0.0
+        try:
+            for ref in db.collection(_SNAP_COLL).list_documents():
+                ref.delete()
+        except Exception as e:
+            print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
+
+    return jsonify({"ok": True, "found": n_tidy + n_back, "tidy": n_tidy,
+                    "back": n_back, "fixed": done, "applied": apply, "rows": rows})
 
 
 @app.route("/api/_fix/area", methods=["GET", "POST"])
@@ -6820,6 +6914,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="moji">文字化けを直す</button>
   <button id="areafix">市区町村名を直す</button>
   <button id="areasplit">字名を撮影地名に移す</button>
+  <button id="placetidy">移した地名を整える</button>
 </div>
 
 <div id="bar"><i></i></div>
@@ -6972,6 +7067,45 @@ function resetBad() {
 $("#run").addEventListener("click", run);
 $("#count").addEventListener("click", showCount);
 
+/* 一覧を見てから決めるための2段押し。
+   confirm() は画面を描き直す前に開いてしまうので、一覧を読む前にOKを押すことになる。
+   1回目＝一覧を出すだけ。2回目＝書き換える。（2026-10-10） */
+function preview(id, path, show, after) {
+  var b = $("#" + id);
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (b.dataset.armed === "1") {                       // 2回目＝書き換える
+    b.dataset.armed = "";
+    b.textContent = b.dataset.label;
+    b.className = "";
+    b.disabled = true;
+    say("書き換えています…");
+    post(path, {}).then(function (k) {
+      if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+      say(after(k));
+    }).catch(function (e) {
+      say(e.message, true);
+    }).then(function () { b.disabled = false; });
+    return;
+  }
+  b.disabled = true;
+  $("#log").textContent = "";
+  fetch(path, { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      show(j);
+      if (!j.found) { return; }
+      b.dataset.label = b.dataset.label || b.textContent;
+      b.textContent = "この内容で書き換える（" + j.found + "件）";
+      b.className = "go";
+      b.dataset.armed = "1";
+      say("上の一覧を確かめてから、ボタンをもう一度押してください。\\n"
+        + "やめるときは、押さずにそのままにしてください。元の値は FixedFrom に残します。");
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
+}
+
 /* 作品データの文字化けを直す。壊れている (Area, Place) が対応表に載っているものだけ書き換える。 */
 function fixMoji() {
   if (!key()) { say("CHECK_KEY を入れてください", true); return; }
@@ -7021,33 +7155,36 @@ $("#moji").addEventListener("click", fixMoji);
 /* Area の末尾に付いている字名（「福島県北塩原村裏磐梯」の「裏磐梯」）を Place へ移す。
    Place が空のものだけが対象。空のままだと、住所が候補の見出しに出てしまう。 */
 function splitArea() {
-  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
-  $("#areasplit").disabled = true;
-  $("#log").textContent = "";
-  fetch("/api/_fix/area-split", { headers: { "X-Check-Key": key() } })
-    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
-    .then(function (j) {
-      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
-      (j.rows || []).forEach(function (s) { log("　" + s); });
-      if (j.skipped) {
-        log("");
-        log("　── 移さないもの " + j.skipped + "件 ──");
-        (j.skips || []).forEach(function (s) { log("　" + s); });
-      }
-      if (!j.found) { say("移すものはありませんでした。"); return null; }
-      if (!confirm("作品データ " + j.found + "件で、Areaの末尾を撮影地名に移します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
-      say("移しています…");
-      return post("/api/_fix/area-split", {}).then(function (k) {
-        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
-        say(k.fixed + "件を移しました。\\n続けて「集める」を押すと、移した地名で座標を取り直します。");
-      });
-    })
-    .catch(function (e) { say(e.message, true); })
-    .then(function () { $("#areasplit").disabled = false; });
+  preview("areasplit", "/api/_fix/area-split", function (j) {
+    (j.rows || []).forEach(function (s) { log("　" + s); });
+    if (j.skipped) {
+      log("");
+      log("　── 移さないもの " + j.skipped + "件 ──");
+      (j.skips || []).forEach(function (s) { log("　" + s); });
+    }
+    if (!j.found) { say("移すものはありませんでした。"); }
+  }, function (k) {
+    return k.fixed + "件を移しました。\\n続けて「集める」を押すと、移した地名で座標を取り直します。";
+  });
+}
+
+/* 「字名を撮影地名に移す」で入った撮影地名を整える。
+   両端の区切り記号を落とし、市区町村名が並べ書きされていたものは元に戻す。 */
+function tidyPlace() {
+  preview("placetidy", "/api/_fix/place-tidy", function (j) {
+    (j.rows || []).forEach(function (s) { log("　" + s); });
+    if (!j.found) { say("整えるものはありませんでした。"); return; }
+    log("");
+    log("　整える " + j.tidy + "件／戻す " + j.back + "件");
+  }, function (k) {
+    return k.fixed + "件を直しました（整える " + k.tidy + "／戻す " + k.back + "）。\\n"
+      + "続けて「集める」を押すと、直した地名で座標を取り直します。";
+  });
 }
 
 $("#areafix").addEventListener("click", fixArea);
 $("#areasplit").addEventListener("click", splitArea);
+$("#placetidy").addEventListener("click", tidyPlace);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
