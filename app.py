@@ -6478,27 +6478,43 @@ def split_area_parts(area):
       ・市区町村が並べ書きされたもの　「青森県六ヶ所村、横浜町」の横浜町
       ・かっこ書きの注記　　　　　　　「新潟県魚沼市（旧 湯之谷村）」
       ・合併前の名前　　　　　　　　　「旧」で始まるもの
+      ・行政区　　　　　　　　　　　　「新潟県上越市牧区」の牧区
+      ・県名　　　　　　　　　　　　　「京都府京都市京都府」の京都府
     どれも撮影地の名前ではないので、Place に入れると撮影地が増えてしまう。
     （2026-10-10）"""
     a = str(area or '').strip()
     pref = extract_pref(a)
     if not pref or not a.startswith(pref):
         return None
-    rest = a[len(pref):]
+    rest = a[len(pref):].strip()
     if not rest:
         return None
+    # 全体が市区町村名そのものなら分けない。「埼玉県さいたま市桜区」を
+    # さいたま市＋桜区に割ると、政令指定都市の区が撮影地になってしまう。
+    if (pref + rest) in CITY_LATLNG:
+        return None
     for city in CITY_NAMES_BY_PREF.get(pref, ()):
-        if not city or not rest.startswith(city) or len(rest) <= len(city):
+        if not city or not rest.startswith(city):
             continue
+        # 長い名前から順に見ているので、ここで余りが無ければ市区町村名そのもの。
+        # 短い名前での当たり直しはしない（さいたま市桜区→さいたま市＋桜区を防ぐ）
+        if len(rest) <= len(city):
+            return None
         tail = tidy_place(rest[len(city):])
         if not tail:
             return None                      # 区切りだけだった。余りは無い
         if tail in _ALL_CITY_NAMES:
             return (pref + city, tail, '市区町村名が並べ書きされている')
+        if tail in PREF_LATLNG:
+            return (pref + city, tail, '県名が入っている')
         if wrapped_place(tail):
             return (pref + city, tail, 'かっこ書きの注記')
         if tail.lstrip('　 ').startswith('旧'):
             return (pref + city, tail, '合併前の名前')
+        # 「牧区」「榛原区」は行政の区割り。ただし「藪川地区」「小原地区」は
+        # 地域の呼び名で、撮影地として通る。「地区」で終わるものは移す。
+        if tail.endswith('区') and not tail.endswith('地区'):
+            return (pref + city, tail, '行政区')
         return (pref + city, tail, '')
     return None
 
@@ -6538,12 +6554,13 @@ def api_fix_area_split():
                 # 移すべきでないもの。何を見送ったかは一覧に出す（重複は1行にまとめる）
                 skipped += 1
                 line = '%s　…　見送り（%s）' % (old, why)
-                if line not in skips and len(skips) < 30:
+                if line not in skips and len(skips) < 200:
                     skips.append(line)
                 continue
             found += 1
-            if len(rows) < 60:
-                rows.append('%s｜（なし）　→　%s｜%s' % (old, new_area, new_place))
+            line = '%s｜（なし）　→　%s｜%s' % (old, new_area, new_place)
+            if line not in rows and len(rows) < 400:
+                rows.append(line)               # 同じ Area の作品が何枚もあるので1行にまとめる
             if not apply:
                 continue
             batch.set(doc.reference, {'Area': new_area, 'Place': new_place,
@@ -6614,7 +6631,7 @@ def api_fix_area_split_undo():
                 continue
             found += 1
             line = '%s｜%s　→　%s｜（なし）' % (area, place, old)
-            if line not in rows and len(rows) < 80:
+            if line not in rows and len(rows) < 400:
                 rows.append(line)          # 同じ誤りの作品が何枚もあるので1行にまとめる
             if not apply:
                 continue
