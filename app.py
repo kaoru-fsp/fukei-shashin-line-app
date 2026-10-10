@@ -746,6 +746,20 @@ def geocode(place_name):
 CITY_TO_PREF = {}
 CITY_TO_LATLNG = {}
 CITY_TO_PREF_MULTI = {}
+# ── 会話の途中の状態 ──────────────────────────────────────────
+# LINEで「番号でお答えください」と聞き返したあと、その答えを待っている状態。
+# このプロセスの中だけに持っている。
+#
+# ★ ここが、動かし方（gunicorn）の決め方を縛っている。
+#   プロセスを増やす（--workers 2 以上）と、同じ人の次の発言が別のプロセスに
+#   届きうる。そのプロセスには聞き返した覚えが無いので、番号を送っても効かず、
+#   利用者から見れば「無反応」になる。
+#   同時に捌く数を増やしたいときは、プロセスではなくスレッドを増やすこと。
+#       gunicorn app:app --workers 1 --threads 8
+#   スレッドならこの状態はそのまま共有される。誌面データの写しや索引も
+#   1人分で済むので、使うメモリも増えない。
+#   どうしてもプロセスを増やすなら、その前にこれらを Firestore へ移すこと。
+#                                                       （2026-10-10）
 AMBIGUOUS_PENDING = {}
 EXPAND_PENDING = {}  # 検索拡張待ち  # user_id -> {"city": "小国町", "prefs": ["熊本県", "山形県"]}
 SUBJECT_PENDING = {}  # 地域＋被写体が0件のときの選択待ち
@@ -3275,7 +3289,7 @@ def handle_message(event):
             ch = user_message.strip().translate(str.maketrans("０１２３４５６７８９", "0123456789"))
             m = re.match(r'^(\d+)', ch)
             if not m:
-                del RESULT_PENDING[user_id]  # 番号以外は新規クエリとして続行
+                RESULT_PENDING.pop(user_id, None)  # 番号以外は新規クエリとして続行
             else:
                 opts = pend.get('options', ['time', 'area', 'cancel'])
                 idx = int(m.group(1)) - 1
@@ -3289,7 +3303,7 @@ def handle_message(event):
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text="その番号は今は選べません。他の番号をお選びください。"))
                     return
-                del RESULT_PENDING[user_id]
+                RESULT_PENDING.pop(user_id, None)
                 if action == 'cancel':
                     line_bot_api.reply_message(reply_token, TextSendMessage(
                         text="承知しました。気になる地名や被写体があれば、いつでも送ってください。"))
@@ -3420,7 +3434,7 @@ def handle_message(event):
             sp = SUBJECT_PENDING[user_id]
             ch = user_message.strip()
             if ch in ("1", "１"):
-                del SUBJECT_PENDING[user_id]
+                SUBJECT_PENDING.pop(user_id, None)
                 rr = search_by_place([], base_date=sp['date'], origin_latlng=sp['origin_latlng'],
                                      origin_name=sp['origin_name'], subject=sp['subject'],
                                      center_latlng=sp['place_latlng'], radius_km=100)
@@ -3431,7 +3445,7 @@ def handle_message(event):
                 reply_with_carousel(reply_token, f"「{sp['place_disp']}」の周辺（約100km）で{sp['subject']}の作品をご紹介します。", rr['results'])
                 return
             elif ch in ("2", "２"):
-                del SUBJECT_PENDING[user_id]
+                SUBJECT_PENDING.pop(user_id, None)
                 prn = search_by_place([], base_date=sp['date'], origin_latlng=sp['origin_latlng'], origin_name=sp['origin_name'], subject=sp['subject'])
                 if prn['status'] == 'not_found':
                     line_bot_api.reply_message(reply_token, TextSendMessage(text=f"全国でも{sp['subject']}の作品が見つかりませんでした。"))
@@ -3444,30 +3458,30 @@ def handle_message(event):
                 reply_with_carousel(reply_token, head, prn['results'])
                 return
             elif ch in ("3", "３", "戻る", "もどる"):
-                del SUBJECT_PENDING[user_id]
+                SUBJECT_PENDING.pop(user_id, None)
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="承知しました。地域名や被写体（例：弘前 桜）をお知らせください。"))
                 return
             else:
-                del SUBJECT_PENDING[user_id]  # 番号以外は新規クエリとして続行
+                SUBJECT_PENDING.pop(user_id, None)  # 番号以外は新規クエリとして続行
 
         # 目的地入力待ち（tコマンドで目的地が未確定だったとき）
         if user_id in ROUTE_PENDING:
             rp = ROUTE_PENDING[user_id]
             ch = user_message.strip()
             if ch in ("戻る", "もどる", "キャンセル", "中止", "やめる"):
-                del ROUTE_PENDING[user_id]
+                ROUTE_PENDING.pop(user_id, None)
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="目的地の入力をやめました。地名や被写体（例：弘前 桜）をお知らせください。"))
                 return
             _wc = ambiguous_ward_candidates(ch, rp["origin_latlng"])
             if _wc:
-                del ROUTE_PENDING[user_id]
+                ROUTE_PENDING.pop(user_id, None)
                 ask_ward(reply_token, user_id, ch, _wc, "dest", rp["center"], rp["center_nm"],
                          rp["subject"], rp["radius"], rp["origin_latlng"], rp["origin_name"])
                 return
             _dll, _dnm, _dconf = resolve_place(ch)
             if _dll is not None and _dconf:
-                del ROUTE_PENDING[user_id]
+                ROUTE_PENDING.pop(user_id, None)
                 do_route_search(reply_token, rp["center"], rp["center_nm"], _dll, _dnm,
                                 rp["subject"], rp["radius"], rp["origin_latlng"], rp["origin_name"])
                 return
@@ -3480,7 +3494,7 @@ def handle_message(event):
             wp = WARD_PENDING[user_id]
             ch = user_message.strip()
             if ch in ("戻る", "もどる", "キャンセル", "中止", "やめる"):
-                del WARD_PENDING[user_id]
+                WARD_PENDING.pop(user_id, None)
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text="選択をやめました。地名や被写体（例：弘前 桜）をお知らせください。"))
                 return
@@ -3508,10 +3522,10 @@ def handle_message(event):
             pending = EXPAND_PENDING[user_id]
             choice = user_message.strip()
             if choice in ['4', '４']:
-                del EXPAND_PENDING[user_id]
+                EXPAND_PENDING.pop(user_id, None)
                 line_bot_api.reply_message(reply_token, TextSendMessage(text="別の地域やキーワードを入力してください。"))
                 return
-            del EXPAND_PENDING[user_id]
+            EXPAND_PENDING.pop(user_id, None)
             expand_time = choice in ['1', '１', '3', '３']
             expand_area = choice in ['2', '２', '3', '３']
             _pref = pending.get('pref')
@@ -3751,21 +3765,21 @@ def handle_message(event):
                         break
             if kw_option and choice == kw_num:
                 # 被写体候補を選択
-                del AMBIGUOUS_PENDING[user_id]
+                AMBIGUOUS_PENDING.pop(user_id, None)
                 _amb_keyword = kw_option[0]
                 search_keyword = kw_option[0]
                 _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = None, None, None
             elif resolved_pref:
                 # 地域を確定（番号や県名で選択）
-                del AMBIGUOUS_PENDING[user_id]
+                AMBIGUOUS_PENDING.pop(user_id, None)
                 # ここも手元の表が先。（2026-10-05）
                 latlng = CITY_TO_LATLNG.get(city) or geocode(f"{resolved_pref}{city}") or PREF_LATLNG.get(resolved_pref)
                 _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = resolved_pref, latlng, city
             else:
                 # 番号でも県名でもない → 新規クエリとして処理
-                del AMBIGUOUS_PENDING[user_id]
+                AMBIGUOUS_PENDING.pop(user_id, None)
                 _pp = parse_period(user_message); target_date = _pp['date']
                 area_name, area_latlng, area_display = parse_target_area(user_message)
         else:
@@ -3859,7 +3873,7 @@ def handle_message(event):
                 _i = int(_mnum2.group(1)) - 1
                 _names = _cp.get('names') or []
                 if 0 <= _i < len(_names):
-                    del CATEGORY_PENDING[user_id]
+                    CATEGORY_PENDING.pop(user_id, None)
                     _subj = _names[_i]
                     search_keyword = _subj
                     area_name, area_latlng, area_display = None, None, None
@@ -3868,7 +3882,7 @@ def handle_message(event):
                         text=f"1〜{len(_names)}の番号でお選びください。"))
                     return
             else:
-                del CATEGORY_PENDING[user_id]  # 番号以外は新規クエリとして続行
+                CATEGORY_PENDING.pop(user_id, None)  # 番号以外は新規クエリとして続行
                 
         # 県の略称と同名の市があるケース（静岡・山梨など）。県/府も市も付けず単独略称で送られたら、
         # まず市(狭い)で答え、メニューの「地域を広げる」で市→県→隣県→全国と段階的に広げる（狭→広）。
@@ -8505,5 +8519,11 @@ def page_sweep():
 
 
 if __name__ == "__main__":
+    # 手元で動かすときの入口。本番（Render）はこれを使わず、gunicorn から
+    # app を読み込んで動かす。開発用サーバーは同時アクセスを1件ずつしか
+    # 捌けないので、本番で使ってはいけない。
+    #   Start Command: gunicorn app:app --workers 1 --threads 8 --timeout 300
+    # --workers を1より増やしてはいけない理由は、会話の途中の状態
+    # （AMBIGUOUS_PENDING ほか）のところに書いてある。（2026-10-10）
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
