@@ -7029,6 +7029,13 @@ def api_peak_subjects():
     return resp
 
 
+
+def _cors(resp):
+    """リファレンス側（別ドメイン）から呼ばれる返事に、許可の印をつける。"""
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
+
 def _hhmm_to_min(s, default):
     """『5:30』や『530』『5』を、0時からの分にする。読めなければ default。"""
     t = str(s or '').strip()
@@ -7105,6 +7112,149 @@ def api_plan():
     resp = jsonify(out)
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
+
+
+
+# ──────────────── 実際の所要時間で組み直す ────────────────
+# 行程を組むときの移動時間は見込み（直線距離の1.3倍を時速45km）である。
+# 山道と高速道路が同じ速さで計算されるので、実際とは開く。
+#
+# 「この案で行く」と決まった1案だけ、地図の経路案内で実測した所要時間を
+# もらって組み直す。呼ぶたびに料金がかかるので、押されたときだけ行う。
+#
+# 休憩もここで足す。見込みの段階では入れていなかったので、
+# 長い移動のある案ほど、実際には帰りが遅くなっていた。（2026-10-10）
+
+_BREAK_PER_MIN = 120   # これだけ続けて走ったら
+_BREAK_MIN = 15        # これだけ休む
+
+
+def break_for(drive_min):
+    """その区間に足す休憩（分）。2時間ごとに15分。"""
+    try:
+        return (int(drive_min) // _BREAK_PER_MIN) * _BREAK_MIN
+    except (TypeError, ValueError):
+        return 0
+
+
+@app.route("/api/plan/retime", methods=["POST", "OPTIONS"])
+def api_plan_retime():
+    """実測の移動時間で、行程の時刻を組み直す。
+
+    本文（JSON）
+      leave / return   希望の出発・帰着（"5:00" の形。省略時 5:00 / 20:00）
+      stay_over        宿泊するなら true。帰りの移動を数えない
+      stops            [{name, place, best_min, arrive_min, sun_based, stay_min}]
+      legs             [分]。出発地→1か所目、1→2、… の実測。stops と同じ数
+      home             最後の撮影地→出発地の実測（分）。stay_over なら無視
+
+    狙い時刻の考え方は行程を組むときと同じ。着いていたい時刻（arrive_min）まで
+    待ち、太陽で決まる被写体は本番が終わるまで滞在する。
+    """
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    body = request.get_json(silent=True) or {}
+    stops = body.get("stops") or []
+    legs = body.get("legs") or []
+    if not isinstance(stops, list) or not stops:
+        return jsonify({"error": "stops required"}), 400
+    if len(stops) > 8:
+        return jsonify({"error": "too many stops"}), 400
+    if not isinstance(legs, list) or len(legs) < len(stops):
+        return jsonify({"error": "legs must cover every stop"}), 400
+
+    leave_min = _hhmm_to_min(body.get("leave"), 5 * 60)
+    return_min = _hhmm_to_min(body.get("return"), 20 * 60)
+    stay_over = bool(body.get("stay_over"))
+
+    def _num(v, default=0):
+        try:
+            return int(round(float(v)))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        out_stops = []
+        now = leave_min
+        drive_total = 0
+        break_total = 0
+
+        for i, st in enumerate(stops):
+            move = max(0, _num(legs[i]))
+            brk = break_for(move)
+            arrive = now + move + brk
+            wait = 0
+            tgt = st.get("arrive_min")
+            if tgt is not None:
+                tgt = _num(tgt, None) if tgt is not None else None
+            if tgt is not None and arrive < tgt:
+                wait = tgt - arrive
+                arrive += wait
+
+            best = st.get("best_min")
+            best = _num(best, None) if best is not None else None
+            stay = max(1, _num(st.get("stay_min"), _PLAN_STAY_MIN))
+            if st.get("sun_based") and best is not None:
+                stay = max(stay, (best - arrive) + _SHOOT_MIN)
+
+            out_stops.append({
+                "name": st.get("name", ""),
+                "place": st.get("place", ""),
+                "drive_min": move,
+                "break_min": brk,
+                "arrive": hhmm(arrive),
+                "leave": hhmm(arrive + stay),
+                "stay_min": stay,
+                "wait_min": wait,
+                "timing": _timing(arrive, best),
+                "best_time": hhmm(best) if best is not None else "",
+            })
+            drive_total += move
+            break_total += brk
+            now = arrive + stay
+
+        home = 0 if stay_over else max(0, _num(body.get("home")))
+        home_break = 0 if stay_over else break_for(home)
+        back = now + home + home_break
+        drive_total += home
+        break_total += home_break
+
+        # 1か所目で待つことになるなら、そのぶん遅く出ればよい。行程を組むときと同じ考え方。
+        depart = leave_min + (out_stops[0]["wait_min"] if out_stops else 0)
+        if out_stops:
+            out_stops[0]["wait_min"] = 0
+
+        warnings = []
+        if not stay_over and back > return_min:
+            warnings.append("帰着が希望より%d分遅くなります。" % (back - return_min))
+        late = [s["place"] or s["name"] for s in out_stops if s["timing"] == "遅い"]
+        if late:
+            warnings.append("%s は本番に間に合いません。" % "・".join(late[:2]))
+        if break_total:
+            warnings.append("%d分の休憩を含めています（2時間走るごとに15分）。" % break_total)
+
+        return _cors(jsonify({
+            "depart": hhmm(depart),
+            "back": hhmm(back),
+            "total_min": back - depart,
+            "drive_total_min": drive_total,
+            "break_total_min": break_total,
+            "stay_total_min": sum(s["stay_min"] for s in out_stops),
+            "stops": out_stops,
+            "warnings": warnings,
+            "over_min": max(0, back - return_min) if not stay_over else 0,
+        }))
+    except Exception:
+        import traceback
+        print("[ERROR] api_plan_retime: %s" % traceback.format_exc(), flush=True)
+        return _cors(jsonify({"error": "組み直せませんでした"})), 500
+
 
 
 # ──────────────── コンシェルジュ（Web側から呼ぶ入口） ────────────────
