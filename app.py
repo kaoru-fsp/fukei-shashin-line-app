@@ -6882,6 +6882,207 @@ def api_geocode_places_reset_bad():
     _PLACEGEO, _PLACEGEO_AT = None, 0.0
     return jsonify({"ok": True, "deleted": deleted, "kinds": kinds})
 
+# ──────────────── 一帯の代表点を引き直す ────────────────
+# 地図は、撮影地そのものを見つけられないとき、その一帯の代表点を返してくる。
+# 「長野県松本市安曇 上高地」も「長野県松本市安曇 乗鞍岳」も、同じ1点
+# （乗鞍高原）になっていた。42行が1点に重なり、22の撮影地が区別できない。
+#
+# 判定は「別の県か」「市区町村の中心と同じか」「60km以上離れていないか」しか
+# 見ていないので、県も合っていて市役所とも違うこの点は ok を通ってしまう。
+#
+# いちばん効くのは行程である。上高地と乗鞍岳が同じ点なら、移動0分で続けて
+# 回れることになってしまう。市区町村と字名を落とし、県名と撮影地名だけで
+# 引き直すと、たいていは正しい点が返る。（2026-10-10）
+
+_CATCHALL_MIN = 3      # 同じ点に、これだけの「別もの」が集まっていたら一帯の代表点
+
+
+def _geo_point(d):
+    """その行の座標を、小数第5位（およそ1m）に丸めて返す。"""
+    try:
+        return (round(float(d['lat']), 5), round(float(d['lng']), 5))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _name_clusters(names):
+    """撮影地名を、同じ場所を指すものどうしでまとめる。
+    「曽原湖」「曽原湖付近」「裏磐梯 曽原湖」は1つ。「桧原湖」と「雄国沼」は別。
+    表記ゆれが3通りあるだけの点を、代表点と取り違えないために要る。"""
+    out = []
+    for n in sorted(names, key=len):
+        for c in out:
+            if any(_same_spot_name(n, m) for m in c):
+                c.append(n)
+                break
+        else:
+            out.append([n])
+    return out
+
+
+def catchall_rows():
+    """一帯の代表点に落ちている行を洗い出す。
+    戻り値 (点の数, [(doc_id, area, place, 住所, その点の撮影地名)...])"""
+    groups = {}
+    for doc in db.collection(_PLACEGEO_COL).stream():
+        d = doc.to_dict() or {}
+        if d.get('status') == 'ng':
+            continue
+        k = _geo_point(d)
+        if not k:
+            continue
+        groups.setdefault(k, []).append((doc.id, d))
+    hits, rows = 0, []
+    for k, items in groups.items():
+        names = {str(d.get('place') or '').strip() for _i, d in items}
+        if len(_name_clusters(names)) < _CATCHALL_MIN:
+            continue
+        hits += 1
+        for _id, d in items:
+            rows.append((_id, str(d.get('area') or ''), str(d.get('place') or ''),
+                         str(d.get('formatted') or ''), len(names)))
+    rows.sort(key=lambda r: (-r[4], r[1], r[2]))
+    return hits, rows
+
+
+def geocode_place_alt(area, place, pref=None, avoid=None):
+    """一帯の代表点しか返らなかった撮影地を、別の言い方で引き直す。
+    市区町村と字名を落とし、県名と撮影地名だけで問い合わせる。
+    「長野県松本市安曇 上高地」で見つからなくても「長野県 上高地」なら当たる。
+
+    avoid にいまの点を渡すと、そこから離れた答えが得られた時点で打ち切る。
+    問い合わせは1件ごとに費用がかかるので、むやみに重ねない。"""
+    pref = pref or extract_pref(area)
+    place = str(place or '').strip()
+    tries = [((pref + ' ' + place) if pref else place).strip()]
+    if place and place not in tries:
+        tries.append(place)
+    if _PLACE_SEP.search(place):
+        tail = _PLACE_SEP.split(place)[-1].strip()
+        if tail and tail != place:
+            tries.append(((pref + ' ' + tail) if pref else tail).strip())
+    best, best_q = None, tries[0]
+    for q in tries:
+        if not q:
+            continue
+        got = geocode_detail(q)
+        if not got:
+            continue
+        if best is None or _GEO_RANK.get(got['type'], 0) > _GEO_RANK.get(best['type'], 0):
+            best, best_q = got, q
+        if avoid and _GEO_RANK.get(got['type'], 0) >= 2 and \
+           (round(got['lat'], 5), round(got['lng'], 5)) != avoid:
+            return got, q
+    return best, best_q
+
+
+@app.route("/api/_geocode/places/catchall", methods=["GET"])
+def api_geocode_catchall():
+    """一帯の代表点に落ちている行を数える。書き換えはしない。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    try:
+        hits, rows = catchall_rows()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    tops, seen = [], set()
+    for _id, area, place, formatted, n in rows:
+        if formatted in seen or len(tops) >= 40:
+            continue
+        seen.add(formatted)
+        tops.append('%d か所分が1点に　%s' % (n, formatted[:46]))
+    return jsonify({"ok": True, "points": hits, "found": len(rows),
+                    "ids": [r[0] for r in rows], "rows": tops})
+
+
+@app.route("/api/_geocode/places/catchall/run", methods=["POST"])
+def api_geocode_catchall_run():
+    """渡された行を、県名＋撮影地名で引き直す。1回の呼び出しは少しずつ。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    body = request.get_json(silent=True) or {}
+    ids = body.get('ids') or []
+    if not isinstance(ids, list):
+        return jsonify({"ok": False, "error": "ids が要ります"}), 400
+    ids = [str(x) for x in ids][:20]
+
+    col = db.collection(_PLACEGEO_COL)
+    batch, writes = db.batch(), 0
+    tally = {'直った': 0, 'そのまま': 0, '使わない': 0}
+    rows, err = [], ''
+    for _id in ids:
+        ref = col.document(_id)
+        try:
+            snap = ref.get()
+        except Exception as e:
+            err = '読み取りに失敗しました：%s' % e
+            break
+        if not snap.exists:
+            continue
+        d = snap.to_dict() or {}
+        area = str(d.get('area') or '')
+        place = str(d.get('place') or '')
+        pref = d.get('pref') or extract_pref(area)
+        avoid = _geo_point(d)
+        try:
+            got, query = geocode_place_alt(area, place, pref, avoid)
+        except RuntimeError as e:
+            err = str(e)
+            break
+        except Exception as e:
+            got, query, err = None, '', '問い合わせに失敗しました：%s' % e
+        status, reason, km = judge_place_geo(area, pref, got)
+        moved = bool(got) and (round(got['lat'], 5), round(got['lng'], 5)) != avoid
+        if got and not moved:
+            # 引き直しても同じ点。その撮影地は地図に無い。
+            # ng にすると市区町村の中心に落ちて、かえって遠くなる。点は残し、印だけ付ける。
+            status = 'check' if status == 'ok' else status
+            reason = '引き直しても一帯の代表点しか返りません（撮影地が地図に無い）'
+        if status == 'ng':
+            # 引き直しが外れただけ。もとの点のほうがまだ近いので、戻す。
+            row = dict(d)
+            row['status'] = 'check'
+            row['reason'] = '引き直しは外れました（%s）。もとの点のままです' % reason
+            tally['使わない'] += 1
+            mark = '×'
+        else:
+            row = {'area': area, 'place': place, 'pref': pref,
+                   'works': d.get('works'), 'query': query,
+                   'status': status, 'reason': reason,
+                   'km_from_city': round(km, 2) if km is not None else None,
+                   'at': firestore.SERVER_TIMESTAMP, 'retried': True}
+            if got:
+                row.update({'lat': got['lat'], 'lng': got['lng'],
+                            'type': got['type'], 'partial': got['partial'],
+                            'got_pref': got['pref'], 'formatted': got['formatted']})
+            if moved:
+                tally['直った'] += 1
+                mark = '○'
+            else:
+                tally['そのまま'] += 1
+                mark = '△'
+        batch.set(ref, row)
+        writes += 1
+        rows.append('%s %s｜%s　%s' % (mark, area, place,
+                                      (got or {}).get('formatted', '見つかりませんでした')[:40]))
+        if err:
+            break
+    if writes:
+        try:
+            batch.commit()
+        except Exception as e:
+            return jsonify({"ok": False, "error": "書き込みに失敗しました：%s" % e}), 500
+    if writes:
+        global _PLACEGEO, _PLACEGEO_AT
+        _PLACEGEO, _PLACEGEO_AT = None, 0.0
+    return jsonify({"ok": True, "done": len(ids), "saved": writes,
+                    "tally": tally, "rows": rows, "error": err})
+
+
 @app.route("/api/_geocode/places/export", methods=["GET"])
 def api_geocode_places_export():
     """集めた座標を一覧で書き出す。Excelで開いて目で確かめるため。"""
@@ -6985,6 +7186,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="csv">一覧を書き出す</button>
 </div>
 <div class="btns">
+  <button id="catchall">一帯の代表点を引き直す</button>
   <button id="rejudge">判定し直す</button>
   <button id="resetbad">取り直しが要るものを消す</button>
   <button id="moji">文字化けを直す</button>
@@ -7093,6 +7295,64 @@ function run() {
     $("#run").disabled = false; $("#count").disabled = false; $("#csv").disabled = false;
     $("#stop").disabled = true;
   });
+}
+
+/* 地図が一帯の代表点を返してしまった撮影地を、県名＋撮影地名で引き直す。
+   1回目で件数を出し、2回目で引き直しを始める。地図への問い合わせは1件ずつ費用がかかる。 */
+var catchIds = null;
+function retryCatchall() {
+  var b = $("#catchall");
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (catchIds && catchIds.length) {            // 2回目＝引き直す
+    var ids = catchIds, total = ids.length, at = 0;
+    catchIds = null;
+    b.textContent = b.dataset.label; b.className = "";
+    b.disabled = true; $("#run").disabled = true; $("#stop").disabled = false;
+    stopped = false;
+    var sum = { "直った": 0, "そのまま": 0, "使わない": 0 };
+    function step() {
+      if (stopped || at >= total) { return; }
+      return post("/api/_geocode/places/catchall/run", { ids: ids.slice(at, at + 10) })
+        .then(function (j) {
+          if (!j.ok) { throw new Error(j.error || "引き直せませんでした"); }
+          (j.rows || []).forEach(function (s) { log("　" + s); });
+          Object.keys(sum).forEach(function (k) { sum[k] += (j.tally || {})[k] || 0; });
+          at += 10;
+          bar(100 * at / total);
+          say("引き直しています… " + Math.min(at, total) + "／" + total);
+          if (j.error) { throw new Error(j.error); }
+          return step();
+        });
+    }
+    step().then(function () {
+      say((stopped ? "止めました。" : "引き直しました。") + "\\n"
+        + "直った " + sum["直った"] + "／そのまま " + sum["そのまま"]
+        + "／引き直しが外れた " + sum["使わない"]);
+    }).catch(function (e) { say(e.message, true); })
+      .then(function () {
+        b.disabled = false; $("#run").disabled = false; $("#stop").disabled = true;
+      });
+    return;
+  }
+  b.disabled = true;
+  $("#log").textContent = "";
+  say("数えています…");
+  fetch("/api/_geocode/places/catchall", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("一帯の代表点に落ちているものはありませんでした。"); return; }
+      catchIds = j.ids || [];
+      b.dataset.label = b.dataset.label || b.textContent;
+      b.textContent = "この" + j.found + "件を引き直す";
+      b.className = "go";
+      say(j.points + "か所の点に " + j.found + "件が重なっています。\\n"
+        + "下の一覧を確かめてから、ボタンをもう一度押すと引き直します。\\n"
+        + "地図への問い合わせは1件ずつ費用がかかります。やめるときは押さずにそのままにしてください。");
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
 }
 
 /* 集めた座標はそのままに、判定だけ当て直す。地図には問い合わせない。 */
@@ -7260,6 +7520,7 @@ function undoSplit() {
 $("#areafix").addEventListener("click", fixArea);
 $("#areasplit").addEventListener("click", splitArea);
 $("#splitundo").addEventListener("click", undoSplit);
+$("#catchall").addEventListener("click", retryCatchall);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
