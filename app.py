@@ -4532,6 +4532,10 @@ def _soft_ground(s):
 # 座標は市区町村までしか分からない(誌面データのMapLinkに緯度経度が無いため)。
 # 同じ市内の複数地点は同じ座標になるので、移動時間はあくまで見込みである。
 _PLAN_STAY_MIN = 60        # 1か所あたりの滞在時間(分)
+_WAIT_FREE_MIN = 60        # 本番のための待ちのうち、無駄と見ない分。下の説明を参照
+# 待ちに上限は設けない。いちど「2か所目以降は3時間まで」としてみたところ、
+# 夕方まで間が空く夕焼けの地点が丸ごと消えた。空いた時間は、ほかに寄れる場所が
+# 無いというだけのこと。待ち時間は画面に出るので、長ければ利用者が判断できる。（2026-10-10）
 _PLAN_MAX_STOPS = 4        # 1案に入れる撮影地の上限
 _PLAN_MIN_WORKS = 2        # 実績が1件だけの地域は計画に載せない
 _PLAN_EARLY_MIN = 60       # 撮られている時間帯より、これ以上早く着けば「早い」とする(分)
@@ -4783,7 +4787,14 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                 if order == 'value':
                     home_new = drive_minutes(haversine(s['lat'], s['lng'],
                                                        origin[0], origin[1]))
-                    extra = move + wait + (home_new - home_now)   # 余計にかかる時間
+                    # 現地での待ちは、まるごと無駄ではない。
+                    # 朝焼けなら本番の1時間前に着くが、それは準備のためにそうしている。
+                    # 「撮るために要る時間」まで減点すると、狙い時刻を太陽で決めた
+                    # 朝焼け・夕焼けの地点が軒並み『割に合わない』と判定されてしまう。
+                    # 1時間までは数えず、それを超えた分だけを、走る時間の半分の重みで見る。
+                    # 現地で待つほうが、ハンドルを握り続けるより楽なため。（2026-10-10）
+                    idle = max(0, wait - _WAIT_FREE_MIN)
+                    extra = move + idle * 0.5 + (home_new - home_now)   # 余計にかかる時間
                     gain = (s['n'] * _TIMING_WEIGHT.get(_timing(arrive, bm), 0.7)
                             * wx_weight(s, wx_span(s.get('wx'), arrive,
                                                    arrive + stay)))
@@ -4795,7 +4806,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                     key = (-worth, move)
                 else:
                     late = max(0, arrive - bm) if bm is not None else 0
-                    key = (move + late + wait * 0.5, -s['n'])
+                    key = (move + late + max(0, wait - _WAIT_FREE_MIN) * 0.5, -s['n'])
                 if pick is None or key < pick[0]:
                     pick = (key, s, move, arrive, wait, stay)
             if pick is None:
