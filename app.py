@@ -6450,13 +6450,18 @@ _PLACE_WRAP = (('（', '）'), ('(', ')'), ('「', '」'), ('［', '］'), ('[',
 
 
 def tidy_place(place):
-    """撮影地名の両端から、区切り記号と括りを落とす。
-    「・大江山」→「大江山」、「（裏磐梯）」→「裏磐梯」。"""
-    p = str(place or '').strip().strip(_AREA_TAIL_STRIP)
+    """撮影地名の両端から、区切り記号を落とす。「・大江山」→「大江山」。
+    括弧は外さない。かっこ書きは撮影地名ではなく注記のことが多いため。"""
+    return str(place or '').strip().strip(_AREA_TAIL_STRIP)
+
+
+def wrapped_place(place):
+    """丸ごと括弧で括られているか。「（旧 湯之谷村）」のような注記の見分けに使う。"""
+    p = str(place or '').strip()
     for _o, _c in _PLACE_WRAP:
         if len(p) > 2 and p.startswith(_o) and p.endswith(_c):
-            p = p[1:-1].strip(_AREA_TAIL_STRIP)
-    return p
+            return True
+    return False
 
 
 def split_area_parts(area):
@@ -6469,9 +6474,12 @@ def split_area_parts(area):
     見出しに出てしまう。「裏磐梯」は撮影地の名前なので、Place に移したほうが
     収まりがよく、地図にも引きやすい。
 
-    ただし余りが撮影地名でないこともある。「青森県六ヶ所村、横浜町」は
-    市区町村が2つ並んでいるだけで、横浜町は撮影地ではない。これを Place に
-    移すと、撮影地名の欄に町名が入ってしまう。移さずに残す。（2026-10-10）"""
+    ただし余りが撮影地名でないこともある。移さずに残すのは3通り。
+      ・市区町村が並べ書きされたもの　「青森県六ヶ所村、横浜町」の横浜町
+      ・かっこ書きの注記　　　　　　　「新潟県魚沼市（旧 湯之谷村）」
+      ・合併前の名前　　　　　　　　　「旧」で始まるもの
+    どれも撮影地の名前ではないので、Place に入れると撮影地が増えてしまう。
+    （2026-10-10）"""
     a = str(area or '').strip()
     pref = extract_pref(a)
     if not pref or not a.startswith(pref):
@@ -6487,6 +6495,10 @@ def split_area_parts(area):
             return None                      # 区切りだけだった。余りは無い
         if tail in _ALL_CITY_NAMES:
             return (pref + city, tail, '市区町村名が並べ書きされている')
+        if wrapped_place(tail):
+            return (pref + city, tail, 'かっこ書きの注記')
+        if tail.lstrip('　 ').startswith('旧'):
+            return (pref + city, tail, '合併前の名前')
         return (pref + city, tail, '')
     return None
 
@@ -6566,23 +6578,23 @@ def api_fix_area_split():
                     "skipped": skipped, "skips": skips})
 
 
-@app.route("/api/_fix/place-tidy", methods=["GET", "POST"])
-def api_fix_place_tidy():
-    """「字名を撮影地名に移す」で入った撮影地名を整える。GET は数えるだけ、POST で書き換える。
+@app.route("/api/_fix/area-split-undo", methods=["GET", "POST"])
+def api_fix_area_split_undo():
+    """「字名を撮影地名に移す」が行った書き換えを、まるごと元に戻す。
+    GET は数えるだけ、POST で書き戻す。
 
-    やることは2つ。
-      整える … 両端の区切り記号を落とす。「・大江山」→「大江山」
-      戻す　 … 市区町村名が並べ書きされていたものを、元の Area に戻す。
-               「青森県六ヶ所村｜、横浜町」→「青森県六ヶ所村、横浜町｜（なし）」
-
-    戻すのは、FixedFrom に残した元の値が、いまの Area と撮影地名から
-    組み直せるものだけ。誌面にもともと入っていた撮影地名には触らない。（2026-10-10）"""
+    戻す相手は、次の3つがすべて揃っているものだけ。
+      ・撮影地名が入っている
+      ・FixedFrom が「元のArea｜」の形（＝元は撮影地名が空だった）
+      ・いまの Area と撮影地名を繋ぎ直すと、その元の Area にぴったり戻る
+    この3つが揃うのは、あの処理が入れたものだけ。誌面にもともと入っていた
+    撮影地名には当てはまらないので、触らない。（2026-10-10）"""
     if not _check_key_ok():
         abort(404)
     if not db:
         return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
     apply = (request.method == "POST")
-    n_tidy, n_back, done, rows = 0, 0, 0, []
+    found, done, rows = 0, 0, []
     try:
         batch, n = db.batch(), 0
         for doc in db.collection('Master_Photos').stream():
@@ -6591,38 +6603,22 @@ def api_fix_place_tidy():
             place = str(d.get('Place') or '')
             if not place.strip():
                 continue
-            clean = tidy_place(place)
-            # この作品の Area と撮影地名を繋ぎ直すと、FixedFrom に残した元の値に
-            # 戻るか。戻るなら「字名を撮影地名に移す」が入れたものだと分かる。
-            # 誌面にもともと入っていた撮影地名には、この条件が立たない。
             fixed_from = str(d.get('FixedFrom') or '')
-            from_split = (fixed_from.endswith('｜')
-                          and fixed_from[:-1] == area + place)
-            back = None
-            if from_split and (not clean or clean in _ALL_CITY_NAMES):
-                # 区切り記号しか無い、または市区町村名が並べ書きされていたもの
-                back = fixed_from[:-1]
-            elif not clean:
-                continue                      # 元の値が辿れない。機械では判断できない
-            if back:
-                n_back += 1
-                line = '戻す　　%s｜%s　→　%s｜（なし）' % (area, place, back)
-                if line not in rows and len(rows) < 60:
-                    rows.append(line)           # 同じ誤りの作品が何枚もあるので1行にまとめる
-                if apply:
-                    batch.set(doc.reference, {'Area': back, 'Place': ''}, merge=True)
-            elif clean != place:
-                n_tidy += 1
-                line = '整える　%s｜%s　→　%s｜%s' % (area, place, area, clean)
-                if line not in rows and len(rows) < 60:
-                    rows.append(line)
-                if apply:
-                    batch.set(doc.reference, {'Place': clean}, merge=True)
-            else:
+            if not fixed_from.endswith('｜'):
                 continue
+            old = fixed_from[:-1]
+            if old != area + place:
+                continue
+            sp = split_area_parts(old)
+            if not sp or sp[0] != area:
+                continue
+            found += 1
+            line = '%s｜%s　→　%s｜（なし）' % (area, place, old)
+            if line not in rows and len(rows) < 80:
+                rows.append(line)          # 同じ誤りの作品が何枚もあるので1行にまとめる
             if not apply:
                 continue
-            # 直す前の組み合わせで集めた座標は用済み。消しておけば「集める」で入り直す。
+            batch.set(doc.reference, {'Area': old, 'Place': ''}, merge=True)
             try:
                 db.collection(_PLACEGEO_COL).document(placegeo_id(area, place)).delete()
             except Exception:
@@ -6648,8 +6644,8 @@ def api_fix_place_tidy():
         except Exception as e:
             print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
 
-    return jsonify({"ok": True, "found": n_tidy + n_back, "tidy": n_tidy,
-                    "back": n_back, "fixed": done, "applied": apply, "rows": rows})
+    return jsonify({"ok": True, "found": found, "fixed": done,
+                    "applied": apply, "rows": rows})
 
 
 @app.route("/api/_fix/area", methods=["GET", "POST"])
@@ -6914,7 +6910,7 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="moji">文字化けを直す</button>
   <button id="areafix">市区町村名を直す</button>
   <button id="areasplit">字名を撮影地名に移す</button>
-  <button id="placetidy">移した地名を整える</button>
+  <button id="splitundo">移した地名を元に戻す</button>
 </div>
 
 <div id="bar"><i></i></div>
@@ -7099,7 +7095,7 @@ function preview(id, path, show, after) {
       b.textContent = "この内容で書き換える（" + j.found + "件）";
       b.className = "go";
       b.dataset.armed = "1";
-      say("上の一覧を確かめてから、ボタンをもう一度押してください。\\n"
+      say("下の一覧を確かめてから、ボタンをもう一度押してください。\\n"
         + "やめるときは、押さずにそのままにしてください。元の値は FixedFrom に残します。");
     })
     .catch(function (e) { say(e.message, true); })
@@ -7168,23 +7164,22 @@ function splitArea() {
   });
 }
 
-/* 「字名を撮影地名に移す」で入った撮影地名を整える。
-   両端の区切り記号を落とし、市区町村名が並べ書きされていたものは元に戻す。 */
-function tidyPlace() {
-  preview("placetidy", "/api/_fix/place-tidy", function (j) {
+/* 「字名を撮影地名に移す」が行った書き換えを、まるごと元に戻す。 */
+function undoSplit() {
+  preview("splitundo", "/api/_fix/area-split-undo", function (j) {
     (j.rows || []).forEach(function (s) { log("　" + s); });
-    if (!j.found) { say("整えるものはありませんでした。"); return; }
+    if (!j.found) { say("元に戻すものはありませんでした。"); return; }
     log("");
-    log("　整える " + j.tidy + "件／戻す " + j.back + "件");
+    log("　戻す " + j.found + "件");
   }, function (k) {
-    return k.fixed + "件を直しました（整える " + k.tidy + "／戻す " + k.back + "）。\\n"
-      + "続けて「集める」を押すと、直した地名で座標を取り直します。";
+    return k.fixed + "件を元に戻しました。\\n"
+      + "このあと「字名を撮影地名に移す」を押し直すと、新しい決まりで選び直します。";
   });
 }
 
 $("#areafix").addEventListener("click", fixArea);
 $("#areasplit").addEventListener("click", splitArea);
-$("#placetidy").addEventListener("click", tidyPlace);
+$("#splitundo").addEventListener("click", undoSplit);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
 $("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
