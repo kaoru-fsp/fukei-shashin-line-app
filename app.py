@@ -6115,6 +6115,21 @@ def _pref_match(a, b):
         return True
     return _strip_pref_suffix(a) == _strip_pref_suffix(b)
 
+_FORMATTED_HEAD = re.compile(r'^日本[、,]?\s*')
+_FORMATTED_ZIP = re.compile(r'〒\s*\d{3}[-－]?\d{4}\s*')
+
+
+def is_coarse_point(got):
+    """返ってきた住所が県止まり（またはそれより粗い）か。
+
+    地図は地名を見つけられないと、問い合わせに入れた県の真ん中を返してくる。
+    「青森県 種差海岸」で『日本、青森県』。これを撮影地の座標として使うと、
+    市区町村の中心よりかえって遠くなる。使わずに落とす。（2026-10-10）"""
+    f = str((got or {}).get('formatted') or '')
+    f = _FORMATTED_ZIP.sub('', _FORMATTED_HEAD.sub('', f)).strip()
+    return (not f) or f == '日本' or f in PREF_LATLNG
+
+
 def judge_place_geo(area, pref, got):
     """取れた座標を使ってよいか決める。
        ok    … そのまま使う
@@ -6129,6 +6144,8 @@ def judge_place_geo(area, pref, got):
     意味していなかった。これで要確認が2,375件から数十件に減る。（2026-10-05）"""
     if not got:
         return 'ng', '見つかりませんでした', None
+    if is_coarse_point(got):
+        return 'ng', '県までしか返っていません', None
     city = work_latlng(area, pref)
     km = (haversine(city[0], city[1], got['lat'], got['lng'])
           if city else None)
@@ -6855,7 +6872,7 @@ def api_geocode_places_reset_bad():
         abort(404)
     if not db:
         return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
-    deleted, kinds = 0, {'見つからなかった': 0, '区切り記号つき': 0}
+    deleted, kinds = 0, {'見つからなかった': 0, '区切り記号つき': 0, '県までしか返っていない': 0}
     try:
         batch, n = db.batch(), 0
         for doc in db.collection(_PLACEGEO_COL).stream():
@@ -6863,6 +6880,9 @@ def api_geocode_places_reset_bad():
             why = ''
             if d.get('status') == 'ng' and str(d.get('reason', '')).startswith('見つかりません'):
                 why = '見つからなかった'
+            elif is_coarse_point(d):
+                # 県の真ん中しか返っていない。消して、市区町村つきで入れ直す
+                why = '県までしか返っていない'
             elif _PLACE_SEP.search(str(d.get('place', ''))) and d.get('type') == 'APPROXIMATE':
                 why = '区切り記号つき'
             if not why:
@@ -6968,6 +6988,8 @@ def geocode_place_alt(area, place, pref=None, avoid=None):
         got = geocode_detail(q)
         if not got:
             continue
+        if is_coarse_point(got):
+            continue          # 県の真ん中が返っただけ。市区町村の中心より悪い
         if best is None or _GEO_RANK.get(got['type'], 0) > _GEO_RANK.get(best['type'], 0):
             best, best_q = got, q
         if avoid and _GEO_RANK.get(got['type'], 0) >= 2 and \
