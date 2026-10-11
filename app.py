@@ -7963,11 +7963,13 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             if pr.get('region'):
                 _km = int(pr.get('region_radius_km') or 10)
                 if pr.get('region_found'):
-                    out["message"] = ("「%s」という地名の%sの作品は%d件でしたので、"
+                    # 数えているのは作品の枚数ではなく撮影地の数。名寄せが進むと、
+                    # 作品は何枚もあるのに撮影地は2か所、ということが起きる。（2026-10-11）
+                    out["message"] = ("「%s」という地名で見つかった%sの撮影地は%dか所でしたので、"
                                       "その周り%dkm以内まで広げて探しました%s。"
                                       % (pr['region'], _subj, pr['region_found'], _km, _sfx))
                 else:
-                    out["message"] = ("「%s」という地名の作品は見つかりませんでしたが、"
+                    out["message"] = ("「%s」という地名の撮影地は見つかりませんでしたが、"
                                       "その周り%dkm以内で撮影された%sの作品はこちらです%s。"
                                       % (pr['region'], _km, _subj, _sfx))
             else:
@@ -8095,11 +8097,11 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                 out["status"] = "ok"
                 _km = int(pr.get('region_radius_km') or 10)
                 if pr.get('region_found'):
-                    out["message"] = ("「%s」という地名の作品は%d件でしたので、"
+                    out["message"] = ("「%s」という地名で見つかった撮影地は%dか所でしたので、"
                                       "その周り%dkm以内まで広げて探しました。"
                                       % (pr['region'], pr['region_found'], _km))
                 else:
-                    out["message"] = ("「%s」という地名の作品は見つかりませんでしたが、"
+                    out["message"] = ("「%s」という地名の撮影地は見つかりませんでしたが、"
                                       "その周り%dkm以内で撮影された作品はこちらです。"
                                       % (pr['region'], _km))
                 return out
