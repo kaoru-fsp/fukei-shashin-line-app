@@ -6724,7 +6724,7 @@ def api_fix_pairs():
     if not pairs:
         return jsonify({"ok": True, "table": 0, "found": 0, "fixed": 0,
                         "applied": False, "rows": [], "bad": bad,
-                        "unmatched": []})
+                        "unmatched": [], "clash": []})
     # 同じ組に違う直しが書かれていたら、黙ってどちらかを採らずに知らせる。
     # 「長野県松本市乗鞍｜乗鞍岳」が3通りに分かれることがある。同じ組の作品が
     # 実際には別の場所で撮られていたということで、この表では分けられない。
@@ -6792,7 +6792,7 @@ def api_fix_pairs():
                  for (oa, op) in table if (oa, op) not in seen][:60]
     return jsonify({"ok": True, "table": len(table), "found": found,
                     "fixed": done, "applied": apply, "rows": rows,
-                    "bad": bad, "unmatched": unmatched})
+                    "bad": bad, "unmatched": unmatched, "clash": clash[:40]})
 
 
 @app.route("/api/_fix/area-split", methods=["GET", "POST"])
@@ -7762,6 +7762,11 @@ function fixPairs() {
         log("");
         log("　── 作品データに見当たらない組 " + j.unmatched.length + " ──");
         (j.unmatched).forEach(function (s) { log("　" + s + "　…　字が違っていませんか"); });
+      }
+      if (j.clash && j.clash.length) {
+        log("");
+        log("　── 同じ組に違う直しが書かれています " + j.clash.length + " ──");
+        (j.clash).forEach(function (s) { log("　" + s + "　…　先に書いたほうを使います"); });
       }
       if (j.bad && j.bad.length) {
         log("");
