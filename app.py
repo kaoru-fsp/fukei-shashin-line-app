@@ -6672,19 +6672,28 @@ def split_area_rest(area):
 # 貼り付けてもらい、作品データに反映させる。（2026-10-11）
 
 
-def parse_pair_table(text):
-    """貼り付けられた表を読む。
-    1行につき、はじめの2つが直す前の (Area, Place)、終わりの2つが直したあとの
-    (Area, Place)。間の列は読み飛ばすので、「一覧を書き出す」のCSVに列を2つ
-    足して丸ごと貼り付けられる。タブ区切りでもカンマ区切りでもよい。
+_PAIR_KEY_RE = re.compile(r'^[0-9a-f]{24}$')
 
-    直したあとが空の行は「直さない」とみなして飛ばす。
-    Area だけ、Place だけを書いた行は、書いていないほうをそのまま残す。
-    戻り値 ([(旧Area, 旧Place, 新Area, 新Place)...], [読めなかった行の説明...])"""
+
+def parse_pair_table(text):
+    """貼り付けられた表を読む。2通りの書き方を受ける。
+
+    ① 鍵つき（「一覧を書き出す」のCSVをそのまま使う形）
+       先頭の列が鍵。Area と Place の列をその場で書き換えていただけば、
+       鍵からもとの撮影地を辿れる。直したあとの2列に書いてあれば、そちらを採る。
+
+    ② 鍵なし（4列だけの表）
+       はじめの2つが直す前の (Area, Place)、終わりの2つが直したあと。
+       間の列は読み飛ばす。
+
+    タブ区切りでもカンマ区切りでもよい。直したあとが空で、Area と Place も
+    もとのままの行は「直さない」とみなして飛ばす。
+    戻り値 ([('key', 鍵, 新Area, 新Place) か ('pair', 旧Area, 旧Place, 新Area, 新Place)...],
+            [読めなかった行の説明...])"""
     import csv as _csv
     rows, bad = [], []
     body = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
-    lines = [l for l in body.split('\n')]
+    lines = body.split('\n')
     delim = '\t' if any('\t' in l for l in lines[:5]) else ','
     for ln, raw in enumerate(lines, 1):
         if not raw.strip():
@@ -6692,21 +6701,33 @@ def parse_pair_table(text):
         try:
             f = next(_csv.reader([raw], delimiter=delim))
         except Exception:
-            bad.append('%d行目　読めませんでした' % ln)
+            bad.append('%d行目\u3000読めませんでした' % ln)
             continue
         f = [str(x).strip() for x in f]
+        if f and _PAIR_KEY_RE.match(f[0]):
+            if len(f) < 3:
+                bad.append('%d行目\u3000列が足りません（%d列）' % (ln, len(f)))
+                continue
+            na, np_ = f[1], f[2]
+            if len(f) >= 5 and (f[-2] or f[-1]):      # 直したあとの列に書いてあれば優先
+                na, np_ = (f[-2] or na), (f[-1] or np_)
+            if not na:
+                bad.append('%d行目\u3000Area が空です' % ln)
+                continue
+            rows.append(('key', f[0], na, np_))
+            continue
         if len(f) < 4:
-            bad.append('%d行目　列が足りません（%d列）' % (ln, len(f)))
+            bad.append('%d行目\u3000列が足りません（%d列）' % (ln, len(f)))
             continue
         oa, op, na, np_ = f[0], f[1], f[-2], f[-1]
-        if oa in ('Area', '旧Area') or na in ('Area', '新Area', '直すArea'):
+        if oa in ('Area', '旧Area', '鍵') or na in ('Area', '新Area', '直すArea'):
             continue                       # 見出しの行
         if not na and not np_:
             continue                       # 直しが書かれていない行
         if not oa:
-            bad.append('%d行目　直す前の Area が空です' % ln)
+            bad.append('%d行目\u3000直す前の Area が空です' % ln)
             continue
-        rows.append((oa, op, na or oa, np_ or op))
+        rows.append(('pair', oa, op, na or oa, np_ or op))
     return rows, bad
 
 
@@ -6724,12 +6745,35 @@ def api_fix_pairs():
     if not pairs:
         return jsonify({"ok": True, "table": 0, "found": 0, "fixed": 0,
                         "applied": False, "rows": [], "bad": bad,
-                        "unmatched": [], "clash": []})
-    # 同じ組に違う直しが書かれていたら、黙ってどちらかを採らずに知らせる。
-    # 「長野県松本市乗鞍｜乗鞍岳」が3通りに分かれることがある。同じ組の作品が
-    # 実際には別の場所で撮られていたということで、この表では分けられない。
-    table, clash = {}, []
-    for oa, op, na, np_ in pairs:
+                        "unmatched": [], "clash": [], "lost": []})
+    # 鍵つきの行は、鍵からもとの (Area, Place) を辿る。
+    # 鍵は Area と Place から作ってあるので、直していない行は自分で作り直せる。
+    # 作り直した鍵が一致すれば直されていないということで、読みに行かずに済む。
+    table, clash, lost = {}, [], []
+    looked = 0
+    for r in pairs:
+        if r[0] == 'key':
+            _, k_id, na, np_ = r
+            if placegeo_id(na, np_) == k_id:
+                continue                   # 直されていない行
+            if looked >= 1200:
+                lost.append('%s　…　1回に直せる数を超えました。分けて取り込んでください' % k_id)
+                continue
+            looked += 1
+            try:
+                snap = db.collection(_PLACEGEO_COL).document(k_id).get()
+            except Exception as e:
+                lost.append('%s　…　読み取りに失敗しました（%s）' % (k_id, e))
+                continue
+            if not snap.exists:
+                lost.append('%s｜%s　…　鍵に当たる撮影地がありません（表が古いかもしれません）'
+                            % (na, np_ or '（なし）'))
+                continue
+            d0 = snap.to_dict() or {}
+            oa = str(d0.get('area') or '').strip()
+            op = str(d0.get('place') or '').strip()
+        else:
+            _, oa, op, na, np_ = r
         k = (oa, op)
         if k in table and table[k] != (na, np_):
             clash.append('%s｜%s　→　%s｜%s ／ %s｜%s'
@@ -6737,6 +6781,10 @@ def api_fix_pairs():
                             na, np_ or '（なし）'))
             continue                       # 先に書いてあるほうを残す
         table[k] = (na, np_)
+    if not table:
+        return jsonify({"ok": True, "table": 0, "found": 0, "fixed": 0,
+                        "applied": False, "rows": [], "bad": bad,
+                        "unmatched": [], "clash": clash, "lost": lost})
 
     found, done, rows = 0, 0, []
     seen = set()
@@ -6792,7 +6840,8 @@ def api_fix_pairs():
                  for (oa, op) in table if (oa, op) not in seen][:60]
     return jsonify({"ok": True, "table": len(table), "found": found,
                     "fixed": done, "applied": apply, "rows": rows,
-                    "bad": bad, "unmatched": unmatched, "clash": clash[:40]})
+                    "bad": bad, "unmatched": unmatched, "clash": clash[:40],
+                    "lost": lost[:40]})
 
 
 @app.route("/api/_fix/area-split", methods=["GET", "POST"])
@@ -7306,13 +7355,17 @@ def api_geocode_places_export():
     # 「同じ点の数」と、直しを書き込む空の2列を添える。
     # 手で名寄せするときは、同じ点に重なっているものから片付けるのが早い。
     # 直したら、この表をそのまま「名寄せ表を取り込む」に貼り付けられる。（2026-10-11）
-    w.writerow(['Area', 'Place', '作品数', '判定', '理由', '緯度', '経度',
+    # 先頭の「鍵」は、その行がどの撮影地だったかを指す印。
+    # これがあると、Area と Place をその場で書き換えてもらっても、
+    # どれを直したのか辿れる。触らないでいただく列。（2026-10-11）
+    w.writerow(['鍵', 'Area', 'Place', '作品数', '判定', '理由', '緯度', '経度',
                 '市区町村中心からkm', '精度', '部分一致', '返ってきた県', '地図の住所',
                 '同じ点の数', '直すArea', '直すPlace'])
     rows = []
     try:
         for doc in db.collection(_PLACEGEO_COL).stream():
             d = doc.to_dict() or {}
+            d['_id'] = doc.id
             rows.append(d)
     except Exception as e:
         abort(500)
@@ -7327,7 +7380,8 @@ def api_geocode_places_export():
                              order.get(d.get('status', ''), 9), -(d.get('works') or 0)))
     for d in rows:
         n_at = at.get(_geo_point(d), 0)
-        w.writerow([d.get('area', ''), d.get('place', ''), d.get('works', ''),
+        w.writerow([d.get('_id', ''), d.get('area', ''), d.get('place', ''),
+                    d.get('works', ''),
                     d.get('status', ''), d.get('reason', ''),
                     d.get('lat', ''), d.get('lng', ''), d.get('km_from_city', ''),
                     d.get('type', ''), 'はい' if d.get('partial') else '',
@@ -7419,10 +7473,11 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
 
 <details id="pairbox" style="margin-top:18px">
   <summary style="cursor:pointer;font-weight:700">名寄せ表を取り込む</summary>
-  <p class="note">「一覧を書き出す」で書き出したCSVに、<b>列を2つ足して</b>（直したあとの Area と Place）、
-  表計算から丸ごと貼り付けてください。直しを書いた行だけが対象になります。
-  はじめの2列を直す前の (Area, Place)、終わりの2列を直したあとの (Area, Place) として読みます。
-  Area だけ・Place だけを書いた行は、書いていないほうをそのまま残します。</p>
+  <p class="note">「一覧を書き出す」で書き出したCSVを表計算で開き、<b>Area と Place の列をその場で直して</b>、
+  丸ごと貼り付けてください。直した行だけが対象になります。
+  先頭の「鍵」の列が、どの撮影地だったかを指しています。<b>この列は触らないでください。</b>
+  末尾の「直すArea」「直すPlace」に書いても構いません（書いてあればそちらを採ります）。<br>
+  鍵の無い4列だけの表も読めます。その場合は、はじめの2列が直す前、終わりの2列が直したあとです。</p>
   <textarea id="pairtext" rows="8" spellcheck="false"
     style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:13px"
     placeholder="長野県&#9;乗鞍&#9;長野県松本市安曇&#9;乗鞍高原&#10;長野県松本市乗鞍&#9;乗革岳&#9;長野県松本市安曇&#9;乗鞍岳"></textarea>
@@ -7762,6 +7817,11 @@ function fixPairs() {
         log("");
         log("　── 作品データに見当たらない組 " + j.unmatched.length + " ──");
         (j.unmatched).forEach(function (s) { log("　" + s + "　…　字が違っていませんか"); });
+      }
+      if (j.lost && j.lost.length) {
+        log("");
+        log("　── 辿れなかった行 " + j.lost.length + " ──");
+        (j.lost).forEach(function (s) { log("　" + s); });
       }
       if (j.clash && j.clash.length) {
         log("");
