@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>撮影地の座標を集める</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Kaku Gothic ProN",sans-serif;
+      margin:0;padding:24px 16px;background:#faf9f7;color:#1c1917;line-height:1.7}
+ .wrap{max-width:760px;margin:0 auto}
+ h1{font-size:22px;margin:0 0 12px}
+ p{margin:0 0 12px;font-size:15px}
+ label{display:block;font-weight:700;font-size:14px;margin:18px 0 6px}
+ input[type=password]{width:100%;box-sizing:border-box;padding:12px;font-size:15px;
+      border:1px solid #d6d3d1;border-radius:8px}
+ .btns{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}
+ button{padding:12px 20px;font-size:15px;font-weight:700;border-radius:8px;
+      border:1px solid #d6d3d1;background:#fff;cursor:pointer}
+ button.go{background:#064e3b;border-color:#064e3b;color:#fff}
+ button:disabled{opacity:.45;cursor:not-allowed}
+ #msg{display:none;padding:14px;border-radius:8px;background:#ecfdf5;
+      white-space:pre-wrap;font-size:15px}
+ #msg.ng{background:#fef2f2}
+ #bar{display:none;height:10px;border-radius:5px;background:#e7e5e4;margin:14px 0;overflow:hidden}
+ #bar > i{display:block;height:100%;width:0;background:#059669;transition:width .3s}
+ #log{display:none;margin-top:14px;padding:12px;background:#fff;border:1px solid #e7e5e4;
+      border-radius:8px;font-size:13px;max-height:320px;overflow:auto;white-space:pre-wrap;
+      font-family:ui-monospace,monospace}
+ .note{color:#78716c;font-size:13px}
+ a{color:#065f46}
+</style></head><body><div class="wrap">
+<h1>撮影地の座標を集める</h1>
+<p>作品データの Area と Place をつないだ文字列を地図に問い合わせ、撮影地ごとの座標を集めます。
+これまでは市区町村の座標しか無く、たとえば「前橋市｜覚満淵」は前橋市役所の位置になっていました。
+<b>一度集めれば以後は読むだけです。</b>
+途中で閉じても、次に開いて押せば続きから進みます。同じ撮影地を二度問い合わせることはありません。</p>
+
+<label for="key">CHECK_KEY</label>
+<input id="key" type="password" autocomplete="off" placeholder="Renderの環境変数に入れた値">
+
+<div class="btns">
+  <button id="count">いま何件あるか見る</button>
+  <button id="run" class="go">集める</button>
+  <button id="stop" disabled>止める</button>
+  <button id="csv">一覧を書き出す</button>
+</div>
+<div class="btns">
+  <button id="catchall">一帯の代表点を引き直す</button>
+  <button id="rejudge">判定し直す</button>
+  <button id="resetbad">取り直しが要るものを消す</button>
+  <button id="moji">文字化けを直す</button>
+  <button id="areafix">市区町村名を直す</button>
+  <button id="areasplit">字名を撮影地名に移す</button>
+  <button id="splitundo">移した地名を元に戻す</button>
+</div>
+
+<details id="pairbox" style="margin-top:18px">
+  <summary style="cursor:pointer;font-weight:700">名寄せ表を取り込む</summary>
+  <p class="note">「一覧を書き出す」で書き出したCSVを表計算で開き、<b>Area と Place の列をその場で直して</b>、
+  丸ごと貼り付けてください。直した行だけが対象になります。
+  先頭の「鍵」の列が、どの撮影地だったかを指しています。<b>この列は触らないでください。</b>
+  末尾の「直すArea」「直すPlace」に書いても構いません（書いてあればそちらを採ります）。<br>
+  鍵の無い4列だけの表も読めます。その場合は、はじめの2列が直す前、終わりの2列が直したあとです。</p>
+  <textarea id="pairtext" rows="8" spellcheck="false"
+    style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:13px"
+    placeholder="長野県&#9;乗鞍&#9;長野県松本市安曇&#9;乗鞍高原&#10;長野県松本市乗鞍&#9;乗革岳&#9;長野県松本市安曇&#9;乗鞍岳"></textarea>
+  <div class="btns" style="margin-top:8px">
+    <button id="pairs">この表のとおりに直す</button>
+  </div>
+</details>
+
+<div id="bar"><i></i></div>
+<div id="msg"></div>
+<div id="log"></div>
+
+<p class="note" style="margin-top:20px">判定の意味。
+<b>ok</b>＝そのまま使います。
+<b>check</b>＝使いますが、目で確かめたほうがよいもの（市区町村の中心と同じ場所が返ってきた＝地名が見つかっていない可能性）。
+<b>ng</b>＝使いません（見つからなかった、別の県が30km以上離れて返ってきた、市区町村の中心から60km以上離れていた）。市区町村の座標のままになります。</p>
+<p class="note"><b>判定し直す</b>＝集めた座標はそのままに、判定の決まりだけを当て直します。地図には問い合わせません。
+<b>取り直しが要るものを消す</b>＝見つからなかったものと、区切り記号でつないだ地名で大まかな位置しか返っていないものを消します。そのあと「集める」を押すと、入り直します。</p>
+<p class="note">出典：地図データ © Google</p>
+</div>
+<script>
+var $ = function (s) { return document.querySelector(s); };
+function key() { return $("#key").value.trim(); }
+function say(t, ng) { var m = $("#msg"); m.style.display = "block"; m.className = ng ? "ng" : ""; m.textContent = t; }
+function log(t) { var o = $("#log"); o.style.display = "block"; o.textContent += t + "\n"; o.scrollTop = o.scrollHeight; }
+function bar(p) { $("#bar").style.display = "block"; $("#bar > i").style.width = Math.max(0, Math.min(100, p)) + "%"; }
+
+var stopped = false;
+
+function post(path, body) {
+  return fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Check-Key": key() },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    if (r.status === 404) { throw new Error("CHECK_KEY が違うか、Render の環境変数に設定されていません"); }
+    return r.json();
+  });
+}
+
+function showCount() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  fetch("/api/_geocode/places/count", { headers: { "X-Check-Key": key() } })
+    .then(function (r) {
+      if (r.status === 404) { throw new Error("CHECK_KEY が違うか、設定されていません"); }
+      return r.json();
+    })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      var t = j.tally || {};
+      say("撮影地 " + j.pairs + "か所のうち、" + j.done + "か所ぶんの座標があります。\n"
+        + "ok " + (t.ok || 0) + "／check " + (t.check || 0) + "／ng " + (t.ng || 0));
+      bar(j.pairs ? j.done / j.pairs * 100 : 0);
+    })
+    .catch(function (e) { say(e.message, true); });
+}
+
+/* 1回の呼び出しを短く保ち、続きは next から。
+   途中で閉じても、すでに書けたぶんは残る。 */
+function run() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  stopped = false;
+  $("#run").disabled = true; $("#count").disabled = true; $("#csv").disabled = true;
+  $("#stop").disabled = false;
+  $("#log").textContent = "";
+  log("集め始めます");
+
+  var asked = 0, saved = 0, total = 0;
+  var sum = { ok: 0, check: 0, ng: 0 };
+
+  function step(offset) {
+    if (stopped) { return Promise.resolve({ stopped: true, next: offset }); }
+    return post("/api/_geocode/places/run", { offset: offset, limit: 15 }).then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+      total = j.total;
+      asked += j.asked || 0; saved += j.saved || 0;
+      var t = j.tally || {};
+      sum.ok += t.ok || 0; sum.check += t.check || 0; sum.ng += t.ng || 0;
+      (j.rows || []).forEach(function (r) {
+        if (r.status !== "ok") {
+          log("　" + r.status + "　" + r.area + "｜" + r.place
+            + (r.reason ? "　" + r.reason : ""));
+        }
+      });
+      bar(total ? j.next / total * 100 : 0);
+      say("集めています… " + j.next + " / " + total + "か所まで進みました\n"
+        + "このひと続きで問い合わせたのは " + asked + "か所"
+        + "（ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng + "）");
+      if (j.error) { throw new Error(j.error); }
+      if (j.next >= total) { return { done: true, next: j.next }; }
+      return step(j.next);
+    });
+  }
+
+  step(0).then(function (r) {
+    if (r && r.stopped) {
+      say("止めました。" + r.next + "か所まで進んでいます。\nもう一度「集める」を押すと続きから進みます。");
+    } else {
+      say("集め終わりました。\n問い合わせ " + asked + "か所"
+        + "（ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng + "）\n"
+        + "「一覧を書き出す」で中身を確かめられます。");
+    }
+  }).catch(function (e) {
+    say(e.message + "\n（ここまでに書けたぶんは残っています。もう一度押せば続きから進みます）", true);
+  }).then(function () {
+    $("#run").disabled = false; $("#count").disabled = false; $("#csv").disabled = false;
+    $("#stop").disabled = true;
+  });
+}
+
+/* 地図が一帯の代表点を返してしまった撮影地を、県名＋撮影地名で引き直す。
+   1回目で件数を出し、2回目で引き直しを始める。地図への問い合わせは1件ずつ費用がかかる。 */
+var catchIds = null;
+function retryCatchall() {
+  var b = $("#catchall");
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (catchIds && catchIds.length) {            // 2回目＝引き直す
+    var ids = catchIds, total = ids.length, at = 0;
+    catchIds = null;
+    b.textContent = b.dataset.label; b.className = "";
+    b.disabled = true; $("#run").disabled = true; $("#stop").disabled = false;
+    stopped = false;
+    var sum = { "直った": 0, "そのまま": 0, "使わない": 0 };
+    function step() {
+      if (stopped || at >= total) { return; }
+      return post("/api/_geocode/places/catchall/run", { ids: ids.slice(at, at + 10) })
+        .then(function (j) {
+          if (!j.ok) { throw new Error(j.error || "引き直せませんでした"); }
+          (j.rows || []).forEach(function (s) { log("　" + s); });
+          Object.keys(sum).forEach(function (k) { sum[k] += (j.tally || {})[k] || 0; });
+          at += 10;
+          bar(100 * at / total);
+          say("引き直しています… " + Math.min(at, total) + "／" + total);
+          if (j.error) { throw new Error(j.error); }
+          return step();
+        });
+    }
+    step().then(function () {
+      say((stopped ? "止めました。" : "引き直しました。") + "\n"
+        + "直った " + sum["直った"] + "／そのまま " + sum["そのまま"]
+        + "／引き直しが外れた " + sum["使わない"]);
+    }).catch(function (e) { say(e.message, true); })
+      .then(function () {
+        b.disabled = false; $("#run").disabled = false; $("#stop").disabled = true;
+      });
+    return;
+  }
+  b.disabled = true;
+  $("#log").textContent = "";
+  say("数えています…");
+  fetch("/api/_geocode/places/catchall", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("一帯の代表点に落ちているものはありませんでした。"); return; }
+      catchIds = j.ids || [];
+      b.dataset.label = b.dataset.label || b.textContent;
+      b.textContent = "この" + j.found + "件を引き直す";
+      b.className = "go";
+      say(j.points + "か所の点に " + j.found + "件が重なっています。\n"
+        + "下の一覧を確かめてから、ボタンをもう一度押すと引き直します。\n"
+        + "地図への問い合わせは1件ずつ費用がかかります。やめるときは押さずにそのままにしてください。");
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
+}
+
+/* 集めた座標はそのままに、判定だけ当て直す。地図には問い合わせない。 */
+function rejudge() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#rejudge").disabled = true; $("#run").disabled = true;
+  $("#log").textContent = "";
+  log("判定し直します（地図には問い合わせません）");
+  var seen = 0, changed = 0, sum = { ok: 0, check: 0, ng: 0 };
+  function step(after) {
+    return post("/api/_geocode/places/rejudge", { after: after }).then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+      seen += j.seen || 0; changed += j.changed || 0;
+      var t = j.tally || {};
+      sum.ok += t.ok || 0; sum.check += t.check || 0; sum.ng += t.ng || 0;
+      (j.moved || []).forEach(function (m) { log("　" + m); });
+      say("判定し直しています… " + seen + "か所");
+      if (j.done) { return; }
+      return step(j.after);
+    });
+  }
+  step("").then(function () {
+    say("判定し直しました。\n見た数 " + seen + "／変わった数 " + changed + "\n"
+      + "ok " + sum.ok + "／check " + sum.check + "／ng " + sum.ng);
+  }).catch(function (e) {
+    say(e.message, true);
+  }).then(function () {
+    $("#rejudge").disabled = false; $("#run").disabled = false;
+  });
+}
+
+function resetBad() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (!confirm("取り直しが要るものを消します。消したぶんは「集める」で入り直します。よろしいですか？")) { return; }
+  $("#resetbad").disabled = true;
+  post("/api/_geocode/places/reset-bad", {}).then(function (j) {
+    if (!j.ok) { throw new Error(j.error || "失敗しました"); }
+    var k = j.kinds || {};
+    say((j.deleted || 0) + "か所を消しました。\n"
+      + "　見つからなかったもの " + (k["見つからなかった"] || 0) + "／"
+      + "県までしか返っていない " + (k["県までしか返っていない"] || 0) + "／"
+      + "区切り記号つき " + (k["区切り記号つき"] || 0) + "\n"
+      + "「集める」を押すと、この分だけ入り直します。");
+  }).catch(function (e) {
+    say(e.message, true);
+  }).then(function () { $("#resetbad").disabled = false; });
+}
+
+$("#run").addEventListener("click", run);
+$("#count").addEventListener("click", showCount);
+
+/* 一覧を見てから決めるための2段押し。
+   confirm() は画面を描き直す前に開いてしまうので、一覧を読む前にOKを押すことになる。
+   1回目＝一覧を出すだけ。2回目＝書き換える。（2026-10-10） */
+function preview(id, path, show, after) {
+  var b = $("#" + id);
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  if (b.dataset.armed === "1") {                       // 2回目＝書き換える
+    b.dataset.armed = "";
+    b.textContent = b.dataset.label;
+    b.className = "";
+    b.disabled = true;
+    say("書き換えています…");
+    post(path, {}).then(function (k) {
+      if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+      say(after(k));
+    }).catch(function (e) {
+      say(e.message, true);
+    }).then(function () { b.disabled = false; });
+    return;
+  }
+  b.disabled = true;
+  $("#log").textContent = "";
+  fetch(path, { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      show(j);
+      if (!j.found) { return; }
+      b.dataset.label = b.dataset.label || b.textContent;
+      b.textContent = "この内容で書き換える（" + j.found + "件）";
+      b.className = "go";
+      b.dataset.armed = "1";
+      say("下の一覧を確かめてから、ボタンをもう一度押してください。\n"
+        + "やめるときは、押さずにそのままにしてください。元の値は FixedFrom に残します。");
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
+}
+
+/* 作品データの文字化けを直す。壊れている (Area, Place) が対応表に載っているものだけ書き換える。 */
+function fixMoji() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#moji").disabled = true;
+  $("#log").textContent = "";
+  fetch("/api/_fix/mojibake", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("直す行はありませんでした（対応表 " + j.table + "件）。"); return null; }
+      if (!confirm("作品データ " + j.found + "件の地名を直します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
+      say("直しています…");
+      return post("/api/_fix/mojibake", {}).then(function (k) {
+        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+        say(k.fixed + "件を直しました。\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+      });
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { $("#moji").disabled = false; });
+}
+
+/* 実在しない市区町村名（福岡県喜多方市、三重県松坂市 など）を直す。
+   対応表に載っている Area を持つ作品だけを書き換える。 */
+function fixArea() {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  $("#areafix").disabled = true;
+  $("#log").textContent = "";
+  fetch("/api/_fix/area", { headers: { "X-Check-Key": key() } })
+    .then(function (r) { if (r.status === 404) { throw new Error("CHECK_KEY が違います"); } return r.json(); })
+    .then(function (j) {
+      if (!j.ok) { throw new Error(j.error || "数えられませんでした"); }
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (!j.found) { say("直す行はありませんでした（対応表 " + j.table + "件）。"); return null; }
+      if (!confirm("作品データ " + j.found + "件の市区町村名を直します。元の値は FixedFrom に残します。よろしいですか？")) { return null; }
+      say("直しています…");
+      return post("/api/_fix/area", {}).then(function (k) {
+        if (!k.ok) { throw new Error(k.error || "書き換えに失敗しました"); }
+        say(k.fixed + "件を直しました。\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+      });
+    })
+    .catch(function (e) { say(e.message, true); })
+    .then(function () { $("#areafix").disabled = false; });
+}
+
+$("#moji").addEventListener("click", fixMoji);
+/* Area の末尾に付いている字名（「福島県北塩原村裏磐梯」の「裏磐梯」）を Place へ移す。
+   Place が空のものだけが対象。空のままだと、住所が候補の見出しに出てしまう。 */
+function splitArea() {
+  preview("areasplit", "/api/_fix/area-split", function (j) {
+    (j.rows || []).forEach(function (s) { log("　" + s); });
+    if (j.skipped) {
+      log("");
+      log("　── 移さないもの " + j.skipped + "件 ──");
+      (j.skips || []).forEach(function (s) { log("　" + s); });
+    }
+    if (!j.found) { say("移すものはありませんでした。"); }
+  }, function (k) {
+    return k.fixed + "件を移しました。\n続けて「集める」を押すと、移した地名で座標を取り直します。";
+  });
+}
+
+/* 名寄せ表のとおりに作品データを直す。1回目で件数と一覧、2回目で書き換え。 */
+var pairArmed = false;
+function fixPairs() {
+  var b = $("#pairs");
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  var text = $("#pairtext").value;
+  if (!text.trim()) { say("表を貼り付けてください", true); return; }
+  var go = pairArmed;
+  pairArmed = false;
+  b.textContent = "この表のとおりに直す"; b.className = "";
+  b.disabled = true;
+  if (!go) { $("#log").textContent = ""; }
+  say(go ? "直しています…" : "数えています…");
+  post("/api/_fix/pairs", { text: text, apply: go }).then(function (j) {
+    if (!j.ok) { throw new Error(j.error || "読めませんでした"); }
+    if (!go) {
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (j.unmatched && j.unmatched.length) {
+        log("");
+        log("　── 作品データに見当たらない組 " + j.unmatched.length + " ──");
+        (j.unmatched).forEach(function (s) { log("　" + s + "　…　字が違っていませんか"); });
+      }
+      if (j.lost && j.lost.length) {
+        log("");
+        log("　── 辿れなかった行 " + j.lost.length + " ──");
+        (j.lost).forEach(function (s) { log("　" + s); });
+      }
+      if (j.clash && j.clash.length) {
+        log("");
+        log("　── 同じ組に違う直しが書かれています " + j.clash.length + " ──");
+        (j.clash).forEach(function (s) { log("　" + s + "　…　先に書いたほうを使います"); });
+      }
+      if (j.bad && j.bad.length) {
+        log("");
+        log("　── 読めなかった行 " + j.bad.length + " ──");
+        (j.bad).forEach(function (s) { log("　" + s); });
+      }
+      if (!j.found) { say("当てはまる作品がありませんでした（表 " + j.table + "組）。"); return; }
+      pairArmed = true;
+      b.textContent = "この内容で直す（" + j.found + "件）";
+      b.className = "go";
+      say("表 " + j.table + "組のうち、作品 " + j.found + "件が当てはまりました。\n"
+        + "下の一覧を確かめてから、ボタンをもう一度押してください。元の値は FixedFrom に残します。");
+    } else {
+      say(j.fixed + "件を直しました。\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+    }
+  }).catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
+}
+
+/* 「字名を撮影地名に移す」が行った書き換えを、まるごと元に戻す。 */
+function undoSplit() {
+  preview("splitundo", "/api/_fix/area-split-undo", function (j) {
+    (j.rows || []).forEach(function (s) { log("　" + s); });
+    if (!j.found) { say("元に戻すものはありませんでした。"); return; }
+    log("");
+    log("　戻す " + j.found + "件");
+  }, function (k) {
+    return k.fixed + "件を元に戻しました。\n"
+      + "このあと「字名を撮影地名に移す」を押し直すと、新しい決まりで選び直します。";
+  });
+}
+
+$("#areafix").addEventListener("click", fixArea);
+$("#areasplit").addEventListener("click", splitArea);
+$("#splitundo").addEventListener("click", undoSplit);
+$("#pairs").addEventListener("click", fixPairs);
+$("#pairtext").addEventListener("input", function () {
+  if (pairArmed) {                       // 表を書き換えたら、構えを解く
+    pairArmed = false;
+    $("#pairs").textContent = "この表のとおりに直す";
+    $("#pairs").className = "";
+  }
+});
+$("#catchall").addEventListener("click", retryCatchall);
+$("#rejudge").addEventListener("click", rejudge);
+$("#resetbad").addEventListener("click", resetBad);
+$("#stop").addEventListener("click", function () { stopped = true; $("#stop").disabled = true; });
+$("#csv").addEventListener("click", function () {
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  fetch("/api/_geocode/places/export", { headers: { "X-Check-Key": key() } })
+    .then(function (r) {
+      if (r.status === 404) { throw new Error("CHECK_KEY が違うか、設定されていません"); }
+      return r.blob();
+    })
+    .then(function (b) {
+      var u = URL.createObjectURL(b);
+      var a = document.createElement("a");
+      a.href = u; a.download = "place_geo.csv"; a.click();
+      setTimeout(function () { URL.revokeObjectURL(u); }, 5000);
+    })
+    .catch(function (e) { say(e.message, true); });
+});
+try { var s = sessionStorage.getItem("rmkey"); if (s) { $("#key").value = s; } } catch (e) {}
+$("#key").addEventListener("change", function () {
+  try { sessionStorage.setItem("rmkey", key()); } catch (e) {}
+});
+</script></body></html>
