@@ -4904,7 +4904,22 @@ def _route(origin, spots, leave_min, return_min, subject=None,
     必ず落とすのは『帰り着けない』『日が暮れている』地点だけ。
     撮られている時間帯からのずれは『早い・遅い』として添える。
     drop_late=True のときは、間に合わない地点を捨てた組み方を試す。
-    stay_over=True は宿泊前提。帰りの移動を勘定に入れず、最後の撮影地で終える。"""
+    stay_over=True は宿泊前提。帰りの移動を勘定に入れず、最後の撮影地で終える。
+
+    同じ点にある撮影地は、1本の行程に1か所しか入れない。地図が撮影地を
+    見つけられなかったとき、その一帯の代表点が返ってくる。別々の市区町村が
+    同じ点にぶら下がることがあり（矢板市・那須町・塩谷町がいずれも那須塩原市塩原）、
+    そのまま並べると「移動0分で続けて回れる」という案ができてしまう。
+    どこにあるか分からないものを、続けて回れると約束はできない。（2026-10-11）"""
+    used_pts = set()
+
+    def _pt(s):
+        """その撮影地の点。小数第3位＝およそ100m四方に丸める。"""
+        try:
+            return (round(float(s['lat']), 3), round(float(s['lng']), 3))
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def fits(s, cur, now):
         """その地点を次に入れられるか。入れられるなら (移動分, 到着時刻, 待ち分, 滞在分) を返す。
         着くのが早すぎるときは、着いていたい時刻まで待つ。
@@ -4912,6 +4927,8 @@ def _route(origin, spots, leave_min, return_min, subject=None,
 
         着いていたい時刻は build_plans が先に出している（arrive_min）。
         朝焼け・雲海・夕焼けは本番の1時間前、そのほかは実績の時間帯の30分前。"""
+        if _pt(s) in used_pts:                         # 同じ点の撮影地は1か所まで
+            return None
         move = drive_minutes(haversine(cur[0], cur[1], s['lat'], s['lng']))
         if move > max_leg and s.get('area') != must:   # 1区間が長すぎる
             return None
@@ -4984,6 +5001,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                       'wait_min': wait, 'timing': tm})
             _attach_wx(v, s, arrive, stay)
             stops.append(v)
+            used_pts.add(_pt(s))
             now, cur, used, drove = arrive + stay, (s['lat'], s['lng']), used + 1, drove + move
             rest.remove(s)
     else:
@@ -5009,6 +5027,7 @@ def _route(origin, spots, leave_min, return_min, subject=None,
                       'wait_min': wait, 'timing': tm})
             _attach_wx(v, s, arrive, stay)
             stops.append(v)
+            used_pts.add(_pt(s))
             now, cur, used, drove = arrive + stay, (s['lat'], s['lng']), used + 1, drove + move
 
     if not stops:
@@ -5238,10 +5257,19 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         by_dir[s['dir']].append(s)
     ranked = sorted(by_dir.items(), key=lambda kv: (-sum(x['n'] for x in kv[1]), kv[0]))
 
-    def night_near(dname, last, after_min):
-        """その方角にある『夜の部』の候補を、最後の撮影地からの移動つきで返す。"""
-        out = []
+    def night_near(dname, last, after_min, used_pts=()):
+        """その方角にある『夜の部』の候補を、最後の撮影地からの移動つきで返す。
+        昼に寄った撮影地と同じ点のものは出さない。地図が一帯の代表点しか
+        返していない場所なので、別の撮影地だと言い切れない。（2026-10-11）"""
+        out, seen = [], set(used_pts)
         for s in sorted((x for x in night if x['dir'] == dname), key=lambda x: -x['n']):
+            try:
+                _p = (round(float(s['lat']), 3), round(float(s['lng']), 3))
+            except (KeyError, TypeError, ValueError):
+                _p = None
+            if _p in seen:
+                continue
+            seen.add(_p)
             move = drive_minutes(haversine(last['lat'], last['lng'], s['lat'], s['lng']))
             if move > max_leg:
                 continue
@@ -5281,7 +5309,9 @@ def build_plans(origin_latlng, origin_name, base_date, leave_min, return_min,
         if any(tuple(s['area'] for s in p['stops']) == seq for p in plans):
             return False
         r.update({'direction': dname, 'kind': kind, 'label': label})
-        r['night_options'] = night_near(dname, r['last'], r['last_end'])
+        _day_pts = {(round(float(s['lat']), 3), round(float(s['lng']), 3))
+                    for s in r['stops'] if s.get('lat') is not None}
+        r['night_options'] = night_near(dname, r['last'], r['last_end'], _day_pts)
         r['cautions'] = _plan_cautions(r)
         plans.append(r)
         return True
@@ -6020,9 +6050,20 @@ def spot_key(area, place):
     return ('a', a)
 
 
+_SPOT_NAME_SAME = {'ヶ': 'ケ', 'が': 'ケ', 'ガ': 'ケ', 'ヵ': 'カ', 'ヶ': 'ケ',
+                   'ノ': '', 'の': '', '之': '',
+                   'ー': '', '−': '', '―': '', '－': '', '-': '', 'ｰ': ''}
+
+
 def _spot_name_norm(s):
-    """撮影地名を照合用の形にそろえる（空白・括弧・区切り記号を落とす）。"""
-    return re.sub(r'[\s　（）()「」『』［］\[\]・･,、.。]', '', str(s or ''))
+    """撮影地名を照合用の形にそろえる。
+    空白・括弧・区切り記号を落とし、揺れやすい字をそろえる。
+    「二ヶ領上河原堰」と「二ケ領上河原堰」、「オンネトー」と「オンネト-」は
+    誌面での書き方が違うだけで同じ場所。（2026-10-11）"""
+    t = re.sub(r'[\s　（）()「」『』［］\[\]・･,、.。]', '', str(s or ''))
+    for a, b in _SPOT_NAME_SAME.items():
+        t = t.replace(a, b)
+    return t
 
 
 def _same_spot_name(x, y):
@@ -6164,12 +6205,21 @@ def judge_place_geo(area, pref, got):
 _PLACE_SEP = re.compile(r'[・／/、,･]')
 _GEO_RANK = {'ROOFTOP': 3, 'RANGE_INTERPOLATED': 2, 'GEOMETRIC_CENTER': 2, 'APPROXIMATE': 1}
 
+# 撮影地名ではなく、その人の住まいを指している言葉。地図に問い合わせない。
+# 「山梨県甲州市｜自宅」で引くと、地図は塩山藤木という実在の場所を返してきた。
+# 見ず知らずの誰かの家の近所を撮影地として案内しかねない。
+# 市区町村の座標に落とせば「甲州市のどこか」になり、実態にも合う。（2026-10-11）
+_PRIVATE_PLACE = re.compile(r'自宅|我が家|わが家|自宅付近|拙宅|自室|ベランダ|庭先|自庭')
+
+
 def geocode_place_best(area, place):
     """Area と Place をつないで問い合わせる。戻り値 (結果, 使った文字列)。
 
     『赤城山・覚満淵』のように区切り記号でつないだ地名は、地図が前半だけを拾って
     大まかな位置を返すことがある。実際、覚満淵は4通りの表記のうち3つが
     「赤城山」に落ちていた。区切りの後ろでも問い合わせ、細かいほうを採る。"""
+    if _PRIVATE_PLACE.search(str(place or '')):
+        return None, (area + ' ' + place).strip()   # 住まい。引かずに市区町村へ落とす
     tries = [(area + ' ' + place).strip()]
     if _PLACE_SEP.search(place):
         tail = _PLACE_SEP.split(place)[-1].strip()
@@ -6255,6 +6305,10 @@ def api_geocode_places_run():
             got, err = None, '問い合わせに失敗しました：%s' % e
         asked += 1
         status, reason, km = judge_place_geo(area, pref, got)
+        if _PRIVATE_PLACE.search(place):
+            # 問い合わせていないので「見つかりません」ではない。
+            # 消して入れ直す対象にもしない（何度やっても同じ）
+            status, reason = 'ng', '住まいなので地図に問い合わせません'
         tally[status] = tally.get(status, 0) + 1
         row = {'area': area, 'place': place, 'pref': pref, 'works': n,
                'query': query, 'status': status, 'reason': reason,
@@ -6606,6 +6660,139 @@ def split_area_rest(area):
     if not sp or sp[2]:
         return None
     return (sp[0], sp[1])
+
+
+# ──────────────── 名寄せ表を取り込む ────────────────
+# 撮影地の座標を集めたあと、どうしても機械で直せないものが残る。
+#   誤記      「乗革岳」は「乗鞍岳」。字を見ても分からない
+#   Area が粗い「長野県｜乗鞍」。市区町村が無いと地図が絞り込めない
+#   名寄せ     「乗鞍」「乗鞍高原」「乗鞍高原位ヶ原」は同じ場所
+#
+# どれも誌面と土地を知っている人にしか判じられない。表計算で直した表を
+# 貼り付けてもらい、作品データに反映させる。（2026-10-11）
+
+
+def parse_pair_table(text):
+    """貼り付けられた表を読む。
+    1行につき、はじめの2つが直す前の (Area, Place)、終わりの2つが直したあとの
+    (Area, Place)。間の列は読み飛ばすので、「一覧を書き出す」のCSVに列を2つ
+    足して丸ごと貼り付けられる。タブ区切りでもカンマ区切りでもよい。
+
+    直したあとが空の行は「直さない」とみなして飛ばす。
+    Area だけ、Place だけを書いた行は、書いていないほうをそのまま残す。
+    戻り値 ([(旧Area, 旧Place, 新Area, 新Place)...], [読めなかった行の説明...])"""
+    import csv as _csv
+    rows, bad = [], []
+    body = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
+    lines = [l for l in body.split('\n')]
+    delim = '\t' if any('\t' in l for l in lines[:5]) else ','
+    for ln, raw in enumerate(lines, 1):
+        if not raw.strip():
+            continue
+        try:
+            f = next(_csv.reader([raw], delimiter=delim))
+        except Exception:
+            bad.append('%d行目　読めませんでした' % ln)
+            continue
+        f = [str(x).strip() for x in f]
+        if len(f) < 4:
+            bad.append('%d行目　列が足りません（%d列）' % (ln, len(f)))
+            continue
+        oa, op, na, np_ = f[0], f[1], f[-2], f[-1]
+        if oa in ('Area', '旧Area') or na in ('Area', '新Area', '直すArea'):
+            continue                       # 見出しの行
+        if not na and not np_:
+            continue                       # 直しが書かれていない行
+        if not oa:
+            bad.append('%d行目　直す前の Area が空です' % ln)
+            continue
+        rows.append((oa, op, na or oa, np_ or op))
+    return rows, bad
+
+
+@app.route("/api/_fix/pairs", methods=["POST"])
+def api_fix_pairs():
+    """名寄せ表のとおりに、作品データの Area と Place を書き換える。
+    apply が無ければ数えるだけ。元の値は FixedFrom に残す。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({"ok": False, "error": "Firestoreに繋がっていません"}), 500
+    body = request.get_json(silent=True) or {}
+    apply = bool(body.get('apply'))
+    pairs, bad = parse_pair_table(body.get('text') or '')
+    if not pairs:
+        return jsonify({"ok": True, "table": 0, "found": 0, "fixed": 0,
+                        "applied": False, "rows": [], "bad": bad,
+                        "unmatched": []})
+    # 同じ組に違う直しが書かれていたら、黙ってどちらかを採らずに知らせる。
+    # 「長野県松本市乗鞍｜乗鞍岳」が3通りに分かれることがある。同じ組の作品が
+    # 実際には別の場所で撮られていたということで、この表では分けられない。
+    table, clash = {}, []
+    for oa, op, na, np_ in pairs:
+        k = (oa, op)
+        if k in table and table[k] != (na, np_):
+            clash.append('%s｜%s　→　%s｜%s ／ %s｜%s'
+                         % (oa, op or '（なし）', table[k][0], table[k][1] or '（なし）',
+                            na, np_ or '（なし）'))
+            continue                       # 先に書いてあるほうを残す
+        table[k] = (na, np_)
+
+    found, done, rows = 0, 0, []
+    seen = set()
+    try:
+        batch, n = db.batch(), 0
+        for doc in db.collection('Master_Photos').stream():
+            d = doc.to_dict() or {}
+            oa = str(d.get('Area') or '').strip()
+            op = str(d.get('Place') or '').strip()
+            hit = table.get((oa, op))
+            if not hit:
+                continue
+            na, np_ = hit
+            if na == oa and np_ == op:
+                continue                   # 直す前と同じ。書き換える意味がない
+            seen.add((oa, op))
+            found += 1
+            line = '%s｜%s　→　%s｜%s' % (oa, op or '（なし）', na, np_ or '（なし）')
+            if line not in rows and len(rows) < 400:
+                rows.append(line)          # 同じ組の作品が何枚もあるので1行にまとめる
+            if not apply:
+                continue
+            batch.set(doc.reference, {'Area': na, 'Place': np_,
+                                      'FixedFrom': '%s｜%s' % (oa, op)}, merge=True)
+            # 直す前の組で集めた座標は用済み。消しておけば「集める」で入り直す。
+            try:
+                db.collection(_PLACEGEO_COL).document(placegeo_id(oa, op)).delete()
+            except Exception:
+                pass
+            done += 1
+            n += 1
+            if n >= 300:
+                batch.commit()
+                batch, n = db.batch(), 0
+        if apply and n:
+            batch.commit()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    if apply and done:
+        global _PHOTOS, _PHOTOS_AT, _PEAK_INDEX, _PEAK_INDEX_AT, _PLACE_PAIRS, _PLACE_PAIRS_AT
+        _PHOTOS, _PHOTOS_AT = None, 0.0
+        _PEAK_INDEX, _PEAK_INDEX_AT = None, 0.0
+        _PLACE_PAIRS, _PLACE_PAIRS_AT = None, 0.0
+        try:
+            for ref in db.collection(_SNAP_COLL).list_documents():
+                ref.delete()
+        except Exception as e:
+            print('[WARN] 索引の消去に失敗: %s' % e, flush=True)
+
+    # 表に書いたのに、作品データに見当たらなかった組。字の打ち違いの見つけ口になる。
+    unmatched = ['%s｜%s' % (oa, op or '（なし）')
+                 for (oa, op) in table if (oa, op) not in seen][:60]
+    return jsonify({"ok": True, "table": len(table), "found": found,
+                    "fixed": done, "applied": apply, "rows": rows,
+                    "bad": bad, "unmatched": unmatched})
 
 
 @app.route("/api/_fix/area-split", methods=["GET", "POST"])
@@ -7116,8 +7303,12 @@ def api_geocode_places_export():
     from io import StringIO
     buf = StringIO()
     w = _csv.writer(buf)
+    # 「同じ点の数」と、直しを書き込む空の2列を添える。
+    # 手で名寄せするときは、同じ点に重なっているものから片付けるのが早い。
+    # 直したら、この表をそのまま「名寄せ表を取り込む」に貼り付けられる。（2026-10-11）
     w.writerow(['Area', 'Place', '作品数', '判定', '理由', '緯度', '経度',
-                '市区町村中心からkm', '精度', '部分一致', '返ってきた県', '地図の住所'])
+                '市区町村中心からkm', '精度', '部分一致', '返ってきた県', '地図の住所',
+                '同じ点の数', '直すArea', '直すPlace'])
     rows = []
     try:
         for doc in db.collection(_PLACEGEO_COL).stream():
@@ -7125,14 +7316,23 @@ def api_geocode_places_export():
             rows.append(d)
     except Exception as e:
         abort(500)
-    order = {'ng': 0, 'check': 1, 'ok': 2}
-    rows.sort(key=lambda d: (order.get(d.get('status', ''), 9), -(d.get('works') or 0)))
+    at = Counter()
     for d in rows:
+        k = _geo_point(d)
+        if k and d.get('status') != 'ng':
+            at[k] += 1
+    order = {'ng': 0, 'check': 1, 'ok': 2}
+    # 同じ点に重なっているものが先。その中は点ごとにまとめ、作品数の多い順。
+    rows.sort(key=lambda d: (-at.get(_geo_point(d), 0), _geo_point(d) or (0, 0),
+                             order.get(d.get('status', ''), 9), -(d.get('works') or 0)))
+    for d in rows:
+        n_at = at.get(_geo_point(d), 0)
         w.writerow([d.get('area', ''), d.get('place', ''), d.get('works', ''),
                     d.get('status', ''), d.get('reason', ''),
                     d.get('lat', ''), d.get('lng', ''), d.get('km_from_city', ''),
                     d.get('type', ''), 'はい' if d.get('partial') else '',
-                    d.get('got_pref', ''), d.get('formatted', '')])
+                    d.get('got_pref', ''), d.get('formatted', ''),
+                    n_at if n_at >= 2 else '', '', ''])
     resp = make_response('﻿' + buf.getvalue())      # Excelで開けるようBOMを付ける
     resp.headers['Content-Type'] = 'text/csv; charset=utf-8'
     resp.headers['Content-Disposition'] = 'attachment; filename="place_geo.csv"'
@@ -7216,6 +7416,20 @@ _GEOCODE_PLACES_PAGE = """<!doctype html>
   <button id="areasplit">字名を撮影地名に移す</button>
   <button id="splitundo">移した地名を元に戻す</button>
 </div>
+
+<details id="pairbox" style="margin-top:18px">
+  <summary style="cursor:pointer;font-weight:700">名寄せ表を取り込む</summary>
+  <p class="note">「一覧を書き出す」で書き出したCSVに、<b>列を2つ足して</b>（直したあとの Area と Place）、
+  表計算から丸ごと貼り付けてください。直しを書いた行だけが対象になります。
+  はじめの2列を直す前の (Area, Place)、終わりの2列を直したあとの (Area, Place) として読みます。
+  Area だけ・Place だけを書いた行は、書いていないほうをそのまま残します。</p>
+  <textarea id="pairtext" rows="8" spellcheck="false"
+    style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:13px"
+    placeholder="長野県&#9;乗鞍&#9;長野県松本市安曇&#9;乗鞍高原&#10;長野県松本市乗鞍&#9;乗革岳&#9;長野県松本市安曇&#9;乗鞍岳"></textarea>
+  <div class="btns" style="margin-top:8px">
+    <button id="pairs">この表のとおりに直す</button>
+  </div>
+</details>
 
 <div id="bar"><i></i></div>
 <div id="msg"></div>
@@ -7415,6 +7629,7 @@ function resetBad() {
     var k = j.kinds || {};
     say((j.deleted || 0) + "か所を消しました。\\n"
       + "　見つからなかったもの " + (k["見つからなかった"] || 0) + "／"
+      + "県までしか返っていない " + (k["県までしか返っていない"] || 0) + "／"
       + "区切り記号つき " + (k["区切り記号つき"] || 0) + "\\n"
       + "「集める」を押すと、この分だけ入り直します。");
   }).catch(function (e) {
@@ -7526,6 +7741,46 @@ function splitArea() {
   });
 }
 
+/* 名寄せ表のとおりに作品データを直す。1回目で件数と一覧、2回目で書き換え。 */
+var pairArmed = false;
+function fixPairs() {
+  var b = $("#pairs");
+  if (!key()) { say("CHECK_KEY を入れてください", true); return; }
+  var text = $("#pairtext").value;
+  if (!text.trim()) { say("表を貼り付けてください", true); return; }
+  var go = pairArmed;
+  pairArmed = false;
+  b.textContent = "この表のとおりに直す"; b.className = "";
+  b.disabled = true;
+  if (!go) { $("#log").textContent = ""; }
+  say(go ? "直しています…" : "数えています…");
+  post("/api/_fix/pairs", { text: text, apply: go }).then(function (j) {
+    if (!j.ok) { throw new Error(j.error || "読めませんでした"); }
+    if (!go) {
+      (j.rows || []).forEach(function (s) { log("　" + s); });
+      if (j.unmatched && j.unmatched.length) {
+        log("");
+        log("　── 作品データに見当たらない組 " + j.unmatched.length + " ──");
+        (j.unmatched).forEach(function (s) { log("　" + s + "　…　字が違っていませんか"); });
+      }
+      if (j.bad && j.bad.length) {
+        log("");
+        log("　── 読めなかった行 " + j.bad.length + " ──");
+        (j.bad).forEach(function (s) { log("　" + s); });
+      }
+      if (!j.found) { say("当てはまる作品がありませんでした（表 " + j.table + "組）。"); return; }
+      pairArmed = true;
+      b.textContent = "この内容で直す（" + j.found + "件）";
+      b.className = "go";
+      say("表 " + j.table + "組のうち、作品 " + j.found + "件が当てはまりました。\\n"
+        + "下の一覧を確かめてから、ボタンをもう一度押してください。元の値は FixedFrom に残します。");
+    } else {
+      say(j.fixed + "件を直しました。\\n続けて「集める」を押すと、直した地名で座標を取り直します。");
+    }
+  }).catch(function (e) { say(e.message, true); })
+    .then(function () { b.disabled = false; });
+}
+
 /* 「字名を撮影地名に移す」が行った書き換えを、まるごと元に戻す。 */
 function undoSplit() {
   preview("splitundo", "/api/_fix/area-split-undo", function (j) {
@@ -7542,6 +7797,14 @@ function undoSplit() {
 $("#areafix").addEventListener("click", fixArea);
 $("#areasplit").addEventListener("click", splitArea);
 $("#splitundo").addEventListener("click", undoSplit);
+$("#pairs").addEventListener("click", fixPairs);
+$("#pairtext").addEventListener("input", function () {
+  if (pairArmed) {                       // 表を書き換えたら、構えを解く
+    pairArmed = false;
+    $("#pairs").textContent = "この表のとおりに直す";
+    $("#pairs").className = "";
+  }
+});
 $("#catchall").addEventListener("click", retryCatchall);
 $("#rejudge").addEventListener("click", rejudge);
 $("#resetbad").addEventListener("click", resetBad);
