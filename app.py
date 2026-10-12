@@ -4790,9 +4790,35 @@ def _window_bins(base_date, expand=False):
     offs = {'上旬': 0, '中旬': 1, '下旬': 2}
     return {(m - 1) * 3 + offs.get(j, 1) for m, j in half_month_window(base_date, expand)}
 
+_GUN_HEAD = re.compile(r'^[^郡]+郡(?=.)')
+
+
+def display_area(area):
+    """画面に出すための市区町村名。郡と大字を落とす。
+
+    元データは「長野県下高井郡山ノ内町平穏」のように細かく持つほうがよい。
+    地図に問い合わせるとき、大字まであると絞り込みが効くからである。
+    一方、候補の副題に出すには長い。「長野県山ノ内町」まで縮める。
+
+    市区町村の表に照らして切る。表は長い名前から並べてあるので、
+    「さいたま市桜区」は区まで残り、「山ノ内町平穏」は町で切れる。
+    「郡山市」の郡を落とさないよう、郡の前に1文字以上あるときだけ外す。
+    （2026-10-12）"""
+    a = str(area or '').strip()
+    pref = extract_pref(a)
+    if not pref or not a.startswith(pref):
+        return a
+    rest = a[len(pref):]
+    for city in CITY_NAMES_BY_PREF.get(pref, ()):
+        if city and city in rest:
+            return pref + _GUN_HEAD.sub('', city)
+    return a
+
+
 def short_area(area, pref=None):
-    """『埼玉県秩父市』から『秩父市』のように、県名を落とした呼び名にする。"""
-    a = str(area or '')
+    """『埼玉県秩父市』から『秩父市』のように、県名を落とした呼び名にする。
+    郡と大字も落とす。画面に出すための名前なので、短いほうがよい。"""
+    a = display_area(area)
     p = str(pref or '')
     return a[len(p):] if p and a.startswith(p) else a
 
@@ -5471,6 +5497,86 @@ def api_michinoeki():
         "notice": "道の駅は施設により営業時間や利用のルールが異なります。"
                   "ご利用の際は事前に各施設のWEBサイトなどでご確認ください。",
         "source": "出典：国土交通省ウェブサイト「道の駅」一覧、Wikidata",
+    })
+    resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+    return resp
+
+
+@app.route("/api/places/near", methods=["GET", "OPTIONS"])
+def api_places_near():
+    """指定した地点の近くの撮影地を、近い順に返す。
+    撮影ダイアリーの「位置を直す」画面から呼ばれるのでCORSを許可する。
+
+    写真の位置はあてにならないことがある。林の中や谷では衛星が届かず、
+    レンズ交換式のカメラはそもそも位置を持たないものが多い。
+    かわりに緯度経度を手で入れてもらうのは、写真を撮る方に向かない。
+
+    そこで、手元にある撮影地の表から近いものを出して、名前を選んでもらう。
+    表はすでにメモリに載っている（get_placegeo）ので、
+    呼び出しごとにFirestoreを読みに行く費用はかからない。
+
+    同じ撮影地名が複数のAreaにあるときは、いちばん近いものだけを残す。
+    「桧原湖」が3行並ぶと、どれを選べばよいか分からなくなるため。
+
+    lat, lng   中心の緯度経度（必須）
+    radius     何km以内を探すか（既定5、上限50）
+    limit      最大何件返すか（既定8、上限30）
+                                                          （2026-10-12）
+    """
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    try:
+        lat = float(request.args.get("lat", ""))
+        lng = float(request.args.get("lng", ""))
+    except ValueError:
+        return jsonify({"error": "lat/lng required"}), 400
+    try:
+        radius = float(request.args.get("radius", "5"))
+    except ValueError:
+        radius = 5.0
+    radius = max(0.1, min(50.0, radius))
+    try:
+        limit = int(request.args.get("limit", "8"))
+    except ValueError:
+        limit = 8
+    limit = max(1, min(30, limit))
+
+    near = []
+    for (area, place), (plat, plng) in get_placegeo().items():
+        if not place:
+            continue              # 市区町村どまりの座標。撮影地の候補にはしない
+        d = haversine(lat, lng, plat, plng)
+        if d <= radius:
+            near.append((d, area, place, plat, plng))
+    near.sort(key=lambda x: x[0])
+
+    seen, places = set(), []
+    for d, a, p, la, ln in near:
+        name = _spot_name_norm(p)
+        if name in seen:
+            continue              # 同じ撮影地名は、いちばん近いものだけ
+        seen.add(name)
+        places.append({
+            "place": p,
+            "area": a,
+            "area_disp": display_area(a),
+            "lat": la,
+            "lng": ln,
+            "m": int(round(d * 1000)),
+        })
+        if len(places) >= limit:
+            break
+
+    resp = jsonify({
+        "places": places,
+        "total_in_radius": len(near),
+        "radius_km": radius,
     })
     resp.headers["Access-Control-Allow-Origin"] = "https://reference.fukei-shashin.co.jp"
     return resp
@@ -7760,6 +7866,9 @@ def _conc_spot(label, it):
     return {
         "label": label,
         "area": area,
+        # 画面に出す市区町村名。郡と大字を落としたもの。
+        # 地図への問い合わせや行き先の受け渡しには area（細かいほう）を使う。
+        "area_disp": display_area(area),
         "place": place,
         "title": str(it.get('title', '') or ''),
         "winner": str(it.get('winner', '') or ''),
@@ -8299,6 +8408,7 @@ def _check_items(results):
             "pic": it.get("pic", ""),
             "title": it.get("title", ""),
             "area": it.get("area", ""),
+            "area_disp": display_area(it.get("area", "")),
             "place": it.get("place", ""),
             "winner": it.get("winner", ""),
             "award": it.get("award", ""),
