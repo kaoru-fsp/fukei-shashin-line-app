@@ -1931,13 +1931,27 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     subject_exclude = subject_exclude_for(subject) if subject else []
     place_terms = place_query if isinstance(place_query, (list, tuple)) else [place_query]
     place_terms = [t for t in place_terms if t]
+    # 表記の揺れをそろえた形。「華厳滝」と「華厳の滝」、「二ヶ領」と「二ケ領」は、
+    # 誌面の書き方と入力のあいだで必ず食い違う。字面で当たらなかったときの
+    # 二の矢として使う。1文字では当たりすぎるので2文字から。（2026-10-16）
+    place_norms = [n for n in (_spot_name_norm(t) for t in place_terms) if len(n) >= 2]
     try:
         for d in get_photos():
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
             if place_terms and not any(t in place or t in area or t in title for t in place_terms):
-                continue
+                # 字面で当たらなければ、揺れをそろえた形でもう一度見る。
+                # そろえた形は行ごとに覚えておく。毎回作ると14,700件ぶんかかるが、
+                # 一度作れば以後はただの文字列の照合で済む。
+                nz = d.get('_norm')
+                if nz is None:
+                    nz = '\x01'.join((_spot_name_norm(place),
+                                      _spot_name_norm(area),
+                                      _spot_name_norm(title)))
+                    d['_norm'] = nz
+                if not any(n in nz for n in place_norms):
+                    continue
             if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', ''), exclude=subject_exclude):
                 continue
             if d.get('Winner') in excl_authors:
@@ -5902,13 +5916,17 @@ def get_place_names():
                                                           （2026-10-16）"""
     global _PLACE_NAMES, _PLACE_NAMES_AT
     now = time.time()
-    if _PLACE_NAMES is not None and (now - _PLACE_NAMES_AT) < _PLACEGEO_TTL:
+    if _PLACE_NAMES and (now - _PLACE_NAMES_AT) < _PLACEGEO_TTL:
         return _PLACE_NAMES
     out = set()
     for area, place in get_placegeo().keys():
         if place:
             out.add(_spot_name_norm(place))
-    _PLACE_NAMES, _PLACE_NAMES_AT = out, now
+    # 空のまま覚え込まない。座標の表を読めなかったときに空で覚えると、
+    # 6時間ものあいだ「どの撮影地名も知らない」状態になり、
+    # 「華厳滝」がまた割れはじめる。読めるまで、毎回やり直す。（2026-10-16）
+    if out:
+        _PLACE_NAMES, _PLACE_NAMES_AT = out, now
     return out
 
 
