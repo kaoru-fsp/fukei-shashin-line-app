@@ -8009,6 +8009,24 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
         _msg_for_subj = _msg_for_subj.replace(_short, " ")
     _subj = detect_subject_longest(_msg_for_subj)
 
+    """被写体の語で終わる撮影地名を、割らないようにする。
+
+       「華厳滝」は「滝」が最長一致するので、そのままだと
+       地名「華厳」＋被写体「滝」に割れる。そんな撮影地は無いので空振りする。
+       白糸の滝・吹割の滝・袋田の滝、鳴子峡の「峡」なども同じ目に遭う。
+
+       入れられた言葉がそのまま撮影地名として在るなら、割らずに
+       「6. 地点名として探す」へ落とす。（2026-10-16）"""
+    _whole_place = False
+    if _subj and not subject:
+        _body = re.sub(r'[\s　]+', '', t)
+        try:
+            if len(_body) > 1 and _spot_name_norm(_body) in get_place_names():
+                _whole_place = True
+                _subj = None
+        except Exception:
+            pass              # 表が読めなくても、これまでどおりの振る舞いに落とす
+
     if subject and subject in KEYWORD_NORMALIZE:
         _subj = subject          # 聞き返しへの答えが最優先
 
@@ -8024,11 +8042,12 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                 area_name, area_latlng, area_display = _a2, _l2, _d2
 
     search_keyword = _subj
-    if not search_keyword and not (area_name and area_name != 'AMBIGUOUS'):
+    if (not search_keyword and not _whole_place
+            and not (area_name and area_name != 'AMBIGUOUS')):
         search_keyword = detect_subject_longest(t)
 
     # ── 3. 「花」のような大きな括りで来たとき ──
-    if not _subj and not subject:
+    if not _subj and not subject and not _whole_place:
         _msg_for_cat = re.sub(
             r'\d{1,2}月(?:\d{1,2}日)?|\d+日後|上旬|中旬|下旬|明日|あした|明後日|あさって|今日|本日|来週末|今週末|来週|今週|週末',
             ' ', t)
