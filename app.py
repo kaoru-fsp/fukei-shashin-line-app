@@ -2466,6 +2466,22 @@ def extract_subject(text):
             return cs, before
     canon, var = detect_subject_longest_variant(t)
     if canon:
+        """被写体の語で終わる撮影地名を、割らないようにする。
+
+        「華厳滝」は「滝」が最長一致するので、そのままだと
+        地名「華厳」＋被写体「滝」に割れてしまう。そんな撮影地は無いので0件になる。
+        白糸の滝・吹割の滝・袋田の滝、鳴子峡の「峡」なども同じ目に遭う。
+
+        そこで、入れられた言葉がそのまま撮影地名として在るなら、割らない。
+        「滝」一語のときに割らなくなっては困るので、
+        被写体の語より長いときだけ見る。（2026-10-16）"""
+        body = t.strip()
+        if len(body) > len(var):
+            try:
+                if _spot_name_norm(body) in get_place_names():
+                    return None, t
+            except Exception:
+                pass          # 表が読めなくても、これまでどおりの振る舞いに落とす
         return canon, t.replace(var, ' ', 1)
     return None, t
 
@@ -5873,6 +5889,28 @@ def get_placegeo():
     _PLACEGEO, _PLACEGEO_AT = out, now
     print('[INFO] PlaceGeo: %d places' % len(out))
     return out
+
+_PLACE_NAMES = None
+_PLACE_NAMES_AT = 0.0
+
+def get_place_names():
+    """撮影地名を、照合用の形にそろえて集めたもの。
+    「華厳滝」「華厳の滝」「華厳ノ滝」はどれも同じ形になる。
+
+    被写体の語で終わる撮影地名を割らないために使う。
+    座標の表（get_placegeo）から作るので、呼び出しごとの費用はかからない。
+                                                          （2026-10-16）"""
+    global _PLACE_NAMES, _PLACE_NAMES_AT
+    now = time.time()
+    if _PLACE_NAMES is not None and (now - _PLACE_NAMES_AT) < _PLACEGEO_TTL:
+        return _PLACE_NAMES
+    out = set()
+    for area, place in get_placegeo().keys():
+        if place:
+            out.add(_spot_name_norm(place))
+    _PLACE_NAMES, _PLACE_NAMES_AT = out, now
+    return out
+
 
 def place_latlng(area, place):
     """撮影地そのものの座標。無ければ None（呼び出し側が市区町村へ落とす）。"""
