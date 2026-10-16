@@ -2056,31 +2056,58 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
     # 1つの撮影地が7枠を埋めてしまわないようにする。探しているのは作品ではなく場所なので、
     # 同じ場所の2枚目より、別の場所の1枚目のほうが役に立つ。
-    # 補うのは、場所が1か所しか見つからなかったときだけ。
-    # はじめ「3件に満たなければ」としていたが、それでは2か所あるときにも
-    # 3枚目を作ろうとして同じ場所が並んだ。2か所あるなら、2か所そのまま出すほうが素直。
-    # 同じ場所を2枚見せる値打ちがあるのは、ほかに選びようが無いときだけ。（2026-10-10）
-    results, used, used_spots = [], set(), SpotSet()
-    for _pass in (0, 1):
-        for p in pool:
-            if len(results) >= 7:
-                break
-            if p['pic'] in used:
-                continue
-            _sk = spot_key(p['area'], p.get('place'))
-            if _pass == 0 and _sk in used_spots:
-                continue
-            # 2周目で足したものは、すでに出した撮影地の別の作品。
-            # 同じ名前が並ぶので、別の場所だと思わせないよう名札を分ける。（2026-10-10）
-            if _pass and _sk in used_spots:
-                results.append(('📷', '同じ撮影地の別の作品', p))
-            else:
-                results.append(('🎯', 'ベストマッチ', p))
-            used.add(p['pic'])
-            used_spots.add(_sk)
-        if len(used_spots) >= 2:
+    #
+    # ただし、当たった撮影地が少ないときは、同じ場所の2枚目で埋める。
+    # 以前は「2か所あれば2か所そのまま」としていたが、それでは足りなかった。
+    # 「華厳滝」は日光の華厳の滝だけで7作品あるのに、当たった撮影地が
+    # 2か所だったせいで2件しか出せず、そのあと「周り10km以内まで広げて
+    # 探しました」と言って戦場ヶ原や千手ヶ浜を並べていた。
+    # 探している滝そのものが1枚しか出ないのでは、見つからなかったのと
+    # 見分けがつかない。3件そろうまでは、同じ場所から足す。（2026-10-16）
+    #
+    # 画像の壊れたものを落とすのは選んだあとなので、落とすと枠が空く。
+    # 空いたぶんは選び直す。「白糸の滝」は7か所に当たっていたのに
+    # 4件しか出なかった。落としたあと、詰め直していなかった。（2026-10-16）
+    PICK = 7
+    results, used = [], set()
+
+    def _fill():
+        """撮影地ごとに1枚ずつ(0周目)、それで3件に満たなければ同じ場所の2枚目で(1周目)。
+        すでに出した撮影地の控えは、そのつど results から作り直す。
+        画像が壊れていて消えた撮影地は、また1枚目から選べるようにするため。"""
+        spots = SpotSet()
+        for _e, _l, _it in results:
+            spots.add(spot_key(_it['area'], _it.get('place')))
+        for _pass in (0, 1):
+            for p in pool:
+                if len(results) >= PICK:
+                    return
+                if p['pic'] in used:
+                    continue
+                _sk = spot_key(p['area'], p.get('place'))
+                if _pass == 0 and _sk in spots:
+                    continue
+                # 2周目で足したものは、すでに出した撮影地の別の作品。
+                # 同じ名前が並ぶので、別の場所だと思わせないよう名札を分ける。（2026-10-10）
+                if _pass and _sk in spots:
+                    results.append(('📷', '同じ撮影地の別の作品', p))
+                else:
+                    results.append(('🎯', 'ベストマッチ', p))
+                used.add(p['pic'])
+                spots.add(_sk)
+            if len(results) >= _REGION_MIN:
+                return
+
+    for _round in range(4):
+        _before = len(results)
+        _fill()
+        if len(results) == _before:          # もう足せるものが無い
             break
-    results = filter_broken_images(results)
+        _kept = filter_broken_images(results)
+        _done = (len(_kept) == len(results))  # 落ちたものが無ければ、これで決まり
+        results = _kept
+        if _done:
+            break
     if not results:
         return _region_fallback(0) or {'status': 'not_found', 'results': []}
     wide = _region_fallback(len(results))
@@ -8786,6 +8813,147 @@ def page_sweep():
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Robots-Tag"] = "noindex, nofollow"
     return resp
+
+
+# ──────────────── 撮影地の取りこぼしを調べる（確認専用） ────────────────
+# 「白糸の滝はデータに10作品あるのに4件しか出ない」というとき、
+# 文字で当たっていないのか、画像がサーバに無いのか、風景写真祭の作品なのか、
+# 作者を伏せているのかが、表の画面からは見分けられない。
+# 検索と同じ順に同じ判定をかけて、落ちた理由をそのまま返す。（2026-10-16）
+
+_PLACE_AUDIT_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>撮影地の取りこぼし調べ</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer}
+ button:disabled{background:#94a3b8;cursor:default}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
+ th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+ tr.ng{background:#fef2f2} .why{color:#b91c1c;white-space:nowrap}
+ .ok{color:#047857;white-space:nowrap}
+ .sum{margin:0 0 12px;font-size:14px} .sum b{font-size:16px}
+</style></head><body>
+<h1>撮影地の取りこぼし調べ</h1>
+<p class="lead">その地名で当たる作品を1行ずつ並べ、検索結果に出ないものは理由を出します。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" autocomplete="off" placeholder="鍵を貼り付けてください">
+  <label>調べる地名</label>
+  <input id="q" type="text" placeholder="白糸の滝" value="白糸の滝">
+  <button id="go">調べる</button>
+</div>
+<div id="out"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+$('#go').onclick=async()=>{
+  const key=$('#k').value.trim(), q=$('#q').value.trim();
+  if(!key||!q){alert('鍵と地名を入れてください');return;}
+  $('#go').disabled=true; $('#out').innerHTML='<div class="box">調べています…</div>';
+  try{
+    const r=await fetch('/api/_place-audit?q='+encodeURIComponent(q),
+                        {headers:{'X-Check-Key':key}});
+    if(!r.ok){$('#out').innerHTML='<div class="box">返ってきませんでした（'+r.status+'）。鍵を確かめてください。</div>';return;}
+    const j=await r.json();
+    if(!j.ok){$('#out').innerHTML='<div class="box">'+esc(j.error||'失敗しました')+'</div>';return;}
+    let h='<div class="box"><p class="sum">「'+esc(j.q)+'」で当たった作品 <b>'+j.total+'</b> 件</p>';
+    for(const [k2,v] of Object.entries(j.counts||{})) h+='<div>'+esc(k2)+'：'+v+' 件</div>';
+    h+='</div><div class="box" style="overflow:auto"><table><tr>'
+      +'<th>どうなるか</th><th>市区町村</th><th>撮影地</th><th>作品名</th>'
+      +'<th>作者</th><th>賞</th><th>旬</th><th>掲載</th><th>画像</th></tr>';
+    for(const r2 of j.rows){
+      h+='<tr'+(r2.why?' class="ng"':'')+'>'
+        +'<td class="'+(r2.why?'why':'ok')+'">'+esc(r2.why||'出る')+'</td>'
+        +'<td>'+esc(r2.area)+'</td><td>'+esc(r2.place)+'</td><td>'+esc(r2.title)+'</td>'
+        +'<td>'+esc(r2.winner)+'</td><td>'+esc(r2.award)+'</td>'
+        +'<td>'+esc(r2.month)+'/'+esc(r2.day)+'</td><td>'+esc(r2.published)+'</td>'
+        +'<td><a href="'+esc(r2.url)+'" target="_blank" rel="noopener">'+esc(r2.pic)+'</a></td></tr>';
+    }
+    $('#out').innerHTML=h+'</table></div>';
+  }catch(e){ $('#out').innerHTML='<div class="box">'+esc(e)+'</div>'; }
+  finally{ $('#go').disabled=false; }
+};
+</script></body></html>"""
+
+
+@app.route("/_place-audit", methods=["GET"])
+def page_place_audit():
+    """ブラウザで開く確認画面。鍵はこの画面の入力欄で受け取り、
+    ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_PLACE_AUDIT_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
+@app.route("/api/_place-audit", methods=["GET"])
+def api_place_audit():
+    """その地名で当たる作品を1行ずつ返し、検索結果に出ないものは理由を添える。
+    判定の順は search_by_place と同じにしてある。"""
+    if not _check_key_ok():
+        abort(404)
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "調べる地名がありません"}), 400
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    qn = _spot_name_norm(q)
+    rows, counts = [], Counter()
+    try:
+        for d in get_photos():
+            place = d.get('Place', '') or ''
+            area = d.get('Area', '') or ''
+            title = d.get('Title', '') or ''
+            hit = (q in place or q in area or q in title)
+            if not hit and len(qn) >= 2:
+                hit = qn in '\x01'.join((_spot_name_norm(place),
+                                         _spot_name_norm(area),
+                                         _spot_name_norm(title)))
+            if not hit:
+                continue
+            pub = str(d.get('Published', '') or '')
+            pic = d.get('PicFileName', '') or ''
+            url = view_image_url(pub, pic)
+            if d.get('Winner') in excl_authors:
+                why = "作者を伏せている"
+            elif is_area_blocked(place, area, blocked_areas):
+                why = "この地域を伏せている"
+            elif not has_valid_image(pic):
+                why = "画像のファイル名が無い"
+            elif pub.endswith('N'):
+                why = "風景写真祭の作品（検索の対象外）"
+            elif not image_available(url):
+                why = "画像がサーバにない"
+            else:
+                why = ""
+            counts[why or "出る"] += 1
+            rows.append({"area": area, "place": place, "title": title,
+                         "winner": d.get('Winner', '') or '',
+                         "award": d.get('AwardRank', '') or '',
+                         "month": d.get('Month', '') or '',
+                         "day": d.get('Day', '') or '',
+                         "published": pub, "pic": pic, "url": url, "why": why})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    rows.sort(key=lambda r: (r["why"] != "", r["area"], r["place"]))
+    return jsonify({"ok": True, "q": q, "total": len(rows),
+                    "counts": dict(counts), "rows": rows})
 
 
 if __name__ == "__main__":
