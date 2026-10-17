@@ -8956,6 +8956,204 @@ def api_place_audit():
                     "counts": dict(counts), "rows": rows})
 
 
+# ──────────────── 撮影地の一斉点検（確認専用） ────────────────
+# 「華厳滝が見つからない」は、人が思いついて入れてみるまで分からなかった。
+# 偶然に頼るのをやめて、こちらから先に見つけにいくための仕掛け。
+#
+# 作品数の多い撮影地から順に、その撮影地名で実際に検索を走らせ、
+# その撮影地そのものが結果に出てくるかを見る。出てこなければ名前を挙げる。
+# 検索は本番と同じ concierge_search を通すので、画面での見え方とずれない。
+#                                                          （2026-10-17）
+
+_SWEEP_NAMES = None
+_SWEEP_NAMES_AT = 0.0
+
+
+def _sweep_place_list():
+    """点検する撮影地を、作品数の多い順に並べたもの。
+
+    数えるのは「案内に出せる作品」だけ。風景写真祭の作品しか無い撮影地や、
+    画像の無い作品しか無い撮影地は、出てこなくて当たり前なので数に入れない。
+    入れてしまうと、直す必要のないものが一覧を埋めてしまう。"""
+    global _SWEEP_NAMES, _SWEEP_NAMES_AT
+    now = time.time()
+    if _SWEEP_NAMES and (now - _SWEEP_NAMES_AT) < _PLACEGEO_TTL:
+        return _SWEEP_NAMES
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    cnt = Counter()
+    for d in get_photos():
+        place = d.get('Place', '') or ''
+        if not place:
+            continue
+        area = d.get('Area', '') or ''
+        if d.get('Winner') in excl_authors:
+            continue
+        if is_area_blocked(place, area, blocked_areas):
+            continue
+        if not has_valid_image(d.get('PicFileName')):
+            continue
+        if str(d.get('Published', '') or '').endswith('N'):
+            continue
+        cnt[(area, place)] += 1
+    out = [{"area": a, "place": p, "works": n}
+           for (a, p), n in cnt.most_common()]
+    if out:
+        _SWEEP_NAMES, _SWEEP_NAMES_AT = out, now
+    return out
+
+
+@app.route("/api/_place-sweep", methods=["GET"])
+def api_place_sweep():
+    """撮影地名で検索して、その撮影地そのものが出てくるかを見る。
+    offset から limit 件ぶんだけ調べて返す。画面から少しずつ呼ぶ。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = min(20, max(1, int(request.args.get("limit", 10))))
+    except ValueError:
+        return jsonify({"ok": False, "error": "offset か limit が数ではありません"}), 400
+
+    names = _sweep_place_list()
+    total = len(names)
+    rows = []
+    for item in names[offset:offset + limit]:
+        place, area, works = item["place"], item["area"], item["works"]
+        want = _spot_name_norm(place)
+        row = {"place": place, "area": display_area(area), "works": works}
+        try:
+            res = concierge_search(place)
+        except Exception as e:
+            row.update({"verdict": "ng", "why": "検索が落ちた（%s）" % e,
+                        "status": "", "count": 0, "got": []})
+            rows.append(row)
+            continue
+        spots = res.get("spots") or []
+        got = [str(s.get("place") or s.get("area_disp") or "") for s in spots]
+        row["status"] = res.get("status", "")
+        row["count"] = len(spots)
+        row["got"] = got[:5]
+        hit = any(want and want in _spot_name_norm(g) for g in got)
+        if res.get("status") == "none" or not spots:
+            row.update({"verdict": "ng", "why": "見つからない"})
+        elif res.get("region"):
+            row.update({"verdict": "ng", "why": "周りへ逸れた（%skm に広げた）"
+                        % res.get("region_radius_km", "")})
+        elif not hit:
+            row.update({"verdict": "ng", "why": "別の撮影地が出た"})
+        elif res.get("status") in ("ask_pref", "ask_subject", "ask_city"):
+            row.update({"verdict": "warn", "why": "聞き返しになった"})
+        else:
+            row.update({"verdict": "ok", "why": ""})
+        rows.append(row)
+
+    return jsonify({"ok": True, "total": total, "offset": offset,
+                    "next": offset + len(rows), "rows": rows})
+
+
+_PLACE_SWEEP_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>撮影地の一斉点検</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer;margin-right:8px}
+ button.stop{background:#b91c1c}
+ button:disabled{background:#94a3b8;cursor:default}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
+ th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+ tr.ng{background:#fef2f2} tr.warn{background:#fffbeb}
+ .why{color:#b91c1c;white-space:nowrap} .wy2{color:#b45309;white-space:nowrap}
+ .sum b{font-size:17px} .prog{color:#475569;font-size:13px}
+ .got{color:#64748b}
+</style></head><body>
+<h1>撮影地の一斉点検</h1>
+<p class="lead">作品数の多い撮影地から順に、その名前で検索し、その撮影地そのものが出てくるかを見ます。出てこなかったものだけを並べます。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" autocomplete="off" placeholder="鍵を貼り付けてください">
+  <label>いくつ調べるか（多い順に）</label>
+  <input id="n" type="number" value="300" min="10" max="4000" step="10">
+  <button id="go">点検する</button>
+  <button id="halt" class="stop" style="display:none">止める</button>
+  <span id="prog" class="prog"></span>
+</div>
+<div id="sum"></div>
+<div class="box" style="overflow:auto">
+  <table id="t"><tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>
+  <th>作品</th><th>出てきたもの</th></tr></table>
+</div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let stop=false;
+$('#halt').onclick=()=>{stop=true;};
+$('#go').onclick=async()=>{
+  const key=$('#k').value.trim(); const want=parseInt($('#n').value,10)||300;
+  if(!key){alert('鍵を入れてください');return;}
+  stop=false; $('#go').disabled=true; $('#halt').style.display='';
+  $('#t').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
+    +'<th>作品</th><th>出てきたもの</th></tr>';
+  let off=0, ok=0, ng=0, warn=0, total=null;
+  while(!stop && off<want){
+    let j;
+    try{
+      const r=await fetch('/api/_place-sweep?offset='+off+'&limit=10',
+                          {headers:{'X-Check-Key':key}});
+      if(!r.ok){$('#prog').textContent='返ってきませんでした（'+r.status+'）。鍵を確かめてください。';break;}
+      j=await r.json();
+      if(!j.ok){$('#prog').textContent=j.error||'失敗しました';break;}
+    }catch(e){ $('#prog').textContent=String(e); break; }
+    if(total===null) total=j.total;
+    for(const r2 of j.rows){
+      if(r2.verdict==='ok'){ok++;continue;}
+      if(r2.verdict==='warn')warn++; else ng++;
+      const cls=r2.verdict==='warn'?'warn':'ng';
+      const wc=r2.verdict==='warn'?'wy2':'why';
+      $('#t').insertAdjacentHTML('beforeend','<tr class="'+cls+'">'
+        +'<td class="'+wc+'">'+esc(r2.why)+'</td>'
+        +'<td><b>'+esc(r2.place)+'</b></td><td>'+esc(r2.area)+'</td>'
+        +'<td>'+r2.works+'</td>'
+        +'<td class="got">'+esc((r2.got||[]).join('／'))+'</td></tr>');
+    }
+    off=j.next;
+    $('#prog').textContent=off+' 件まで調べました（全 '+total+' 件中）';
+    $('#sum').innerHTML='<div class="box"><p class="sum">通った <b>'+ok+'</b> ／ '
+      +'出てこなかった <b style="color:#b91c1c">'+ng+'</b> ／ '
+      +'聞き返し <b style="color:#b45309">'+warn+'</b></p></div>';
+    if(j.next>=j.total)break;
+  }
+  $('#go').disabled=false; $('#halt').style.display='none';
+  if(stop)$('#prog').textContent+='（止めました）';
+};
+</script></body></html>"""
+
+
+@app.route("/_place-sweep", methods=["GET"])
+def page_place_sweep():
+    """ブラウザで開く一斉点検の画面。鍵はこの画面の入力欄で受け取り、
+    ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_PLACE_SWEEP_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
 if __name__ == "__main__":
     # 手元で動かすときの入口。本番（Render）はこれを使わず、gunicorn から
     # app を読み込んで動かす。開発用サーバーは同時アクセスを1件ずつしか
