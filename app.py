@@ -9135,8 +9135,13 @@ def api_place_sweep():
             ("周辺:%skm" % rd["radius_km"]) if rd.get("radius_km") else "",
         ) if x) or "地名のまま"
         hit = any(want and want in _spot_name_norm(g) for g in got)
+        # 当たったかどうかを先に見る。自分が出たうえで近所も添えているのは
+        # 正しい姿で、「逸れた」ではない。順を逆にしていたため、直った後の
+        # ほうが数が増えて見えていた。（2026-10-17）
         if res.get("status") == "none" or not spots:
             row.update({"verdict": "ng", "why": "見つからない"})
+        elif hit:
+            row.update({"verdict": "ok", "why": ""})
         elif res.get("region"):
             row.update({"verdict": "ng", "why": "周りへ逸れた（%skm に広げた）"
                         % res.get("region_radius_km", "")})
