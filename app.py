@@ -395,9 +395,21 @@ def half_month_window(base_date, expand=False):
 def view_image_url(published, pic_filename):
     return "/".join([SERVER_BASE, VIEW_DIR, str(published)[:4], str(published), str(pic_filename)])
 
+# 画像が無いことを示す書き方。誌面データを起こした人も時期も違うので、
+# 同じ意味でも字が揃っていない。「なし」「無し」「ナシ」、拡張子の有無、
+# 大文字小文字。見落とすと、画像の出ないカードが案内に混じる。
+# 「無し.jpg」が素通りしていたのを、布瀬の点検で見つけた。（2026-10-17）
+_NO_IMAGE_NAMES = {
+    'なし', 'なし.jpg', 'なし.jpeg', 'なし.png',
+    '無し', '無し.jpg', '無し.jpeg', '無し.png',
+    '無', '無.jpg', 'ナシ', 'ナシ.jpg',
+    'default.jpg', 'none', 'none.jpg', 'null', '-', '―', '－', '',
+}
+
+
 def has_valid_image(pic_filename):
     fn = str(pic_filename or '').strip()
-    return fn and fn not in ('なし.jpg', 'default.jpg', 'なし', 'none', '')
+    return bool(fn) and fn.lower() not in _NO_IMAGE_NAMES
 
 # ── 壊れた画像(サーバに実体が無い/エラーページ)の除外 ──
 VERIFY_IMAGES = True          # 問題があれば False で無効化
@@ -9073,6 +9085,7 @@ def _sweep_place_list():
     except Exception:
         excl_authors, blocked_areas = set(), []
     cnt = Counter()
+    season = defaultdict(Counter)
     for d in get_photos():
         place = d.get('Place', '') or ''
         if not place:
@@ -9087,8 +9100,21 @@ def _sweep_place_list():
         if str(d.get('Published', '') or '').endswith('N'):
             continue
         cnt[(area, place)] += 1
-    out = [{"area": a, "place": p, "works": n}
-           for (a, p), n in cnt.most_common()]
+        # その撮影地の旬も覚えておく。点検を今日の日付で一律に回すと、
+        # 旬が今でない撮影地は「いま撮り頃のものを先に出す」仕掛けに
+        # 押し出されて、名前の不具合と見分けがつかなくなる。
+        # 「深沢」が八甲田に負けていたのはこれだった。（2026-10-17）
+        try:
+            _mo = int(d.get('Month'))
+            if 1 <= _mo <= 12:
+                season[(area, place)][_mo] += 1
+        except Exception:
+            pass
+    out = []
+    for (a, p), n in cnt.most_common():
+        _ms = season.get((a, p))
+        _mo = _ms.most_common(1)[0][0] if _ms else 0
+        out.append({"area": a, "place": p, "works": n, "month": _mo})
     if out:
         _SWEEP_NAMES, _SWEEP_NAMES_AT = out, now
     return out
@@ -9113,8 +9139,13 @@ def api_place_sweep():
         place, area, works = item["place"], item["area"], item["works"]
         want = _spot_name_norm(place)
         row = {"place": place, "area": display_area(area), "works": works}
+        # その撮影地の旬の真ん中で測る。旬が合わないせいで出てこないのは
+        # 名前の不具合ではないので、分けておかないと見分けられない。
+        _mo = item.get("month") or 0
+        _base = date(date.today().year, _mo, 15) if 1 <= _mo <= 12 else None
+        row["month"] = ("%d月ごろ" % _mo) if _mo else ""
         try:
-            res = concierge_search(place)
+            res = concierge_search(place, base_date=_base)
         except Exception as e:
             row.update({"verdict": "ng", "why": "検索が落ちた（%s）" % e,
                         "status": "", "count": 0, "got": []})
@@ -9196,7 +9227,7 @@ _PLACE_SWEEP_HTML = """<!doctype html>
 <div id="sum"></div>
 <div class="box" style="overflow:auto">
   <table id="t"><tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>
-  <th>作品</th><th>どう読まれたか</th><th>出てきたもの</th></tr></table>
+  <th>作品</th><th>旬</th><th>どう読まれたか</th><th>出てきたもの</th></tr></table>
 </div>
 <script>
 const $=s=>document.querySelector(s);
@@ -9208,7 +9239,7 @@ $('#go').onclick=async()=>{
   if(!key){alert('鍵を入れてください');return;}
   stop=false; $('#go').disabled=true; $('#halt').style.display='';
   $('#t').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
-    +'<th>作品</th><th>どう読まれたか</th><th>出てきたもの</th></tr>';
+    +'<th>作品</th><th>旬</th><th>どう読まれたか</th><th>出てきたもの</th></tr>';
   let off=0, ok=0, ng=0, warn=0, total=null;
   while(!stop && off<want){
     let j;
@@ -9229,6 +9260,7 @@ $('#go').onclick=async()=>{
         +'<td class="'+wc+'">'+esc(r2.why)+'</td>'
         +'<td><b>'+esc(r2.place)+'</b></td><td>'+esc(r2.area)+'</td>'
         +'<td>'+r2.works+'</td>'
+        +'<td class="got">'+esc(r2.month)+'</td>'
         +'<td class="got">'+esc(r2.read)+'</td>'
         +'<td class="got">'+esc((r2.got||[]).join('／'))+'</td></tr>');
     }
