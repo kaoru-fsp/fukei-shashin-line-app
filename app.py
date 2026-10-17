@@ -9036,6 +9036,15 @@ def api_place_sweep():
         row["status"] = res.get("status", "")
         row["count"] = len(spots)
         row["got"] = got[:5]
+        rd = res.get("read") or {}
+        # どう読まれたか。これが分からないと、同じ「出てこない」でも
+        # 被写体に割られたのか、県名に吸われたのかが見分けられない。
+        row["read"] = "／".join(x for x in (
+            ("被写体:" + rd["subject"]) if rd.get("subject") else "",
+            ("県:" + rd["pref"]) if rd.get("pref") else "",
+            ("市区町村:" + rd["area"]) if rd.get("area") else "",
+            ("周辺:%skm" % rd["radius_km"]) if rd.get("radius_km") else "",
+        ) if x) or "地名のまま"
         hit = any(want and want in _spot_name_norm(g) for g in got)
         if res.get("status") == "none" or not spots:
             row.update({"verdict": "ng", "why": "見つからない"})
@@ -9093,7 +9102,7 @@ _PLACE_SWEEP_HTML = """<!doctype html>
 <div id="sum"></div>
 <div class="box" style="overflow:auto">
   <table id="t"><tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>
-  <th>作品</th><th>出てきたもの</th></tr></table>
+  <th>作品</th><th>どう読まれたか</th><th>出てきたもの</th></tr></table>
 </div>
 <script>
 const $=s=>document.querySelector(s);
@@ -9105,7 +9114,7 @@ $('#go').onclick=async()=>{
   if(!key){alert('鍵を入れてください');return;}
   stop=false; $('#go').disabled=true; $('#halt').style.display='';
   $('#t').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
-    +'<th>作品</th><th>出てきたもの</th></tr>';
+    +'<th>作品</th><th>どう読まれたか</th><th>出てきたもの</th></tr>';
   let off=0, ok=0, ng=0, warn=0, total=null;
   while(!stop && off<want){
     let j;
@@ -9126,6 +9135,7 @@ $('#go').onclick=async()=>{
         +'<td class="'+wc+'">'+esc(r2.why)+'</td>'
         +'<td><b>'+esc(r2.place)+'</b></td><td>'+esc(r2.area)+'</td>'
         +'<td>'+r2.works+'</td>'
+        +'<td class="got">'+esc(r2.read)+'</td>'
         +'<td class="got">'+esc((r2.got||[]).join('／'))+'</td></tr>');
     }
     off=j.next;
