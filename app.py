@@ -7975,6 +7975,23 @@ def _conc_pack(results):
     return [_conc_spot(lbl, it) for _emoji, lbl, it in (results or [])]
 
 
+def strip_time_words(s):
+    """時期や言い回しの語を落として、地名だけを残す。
+    「6. 地点名として探す」でやっていた削り方を、入口でも使えるように切り出した。
+                                                          （2026-10-17）"""
+    r = str(s or "")
+    for w in ['明日', 'あした', '明後日', 'あさって', '今日', '本日',
+              '今週末', '来週末', '来週', '今週', '週末']:
+        r = r.replace(w, '')
+    r = re.sub(r'\d+日後', '', r)
+    r = re.sub(r'\d{1,2}月\d{1,2}日', '', r)
+    r = re.sub(r'\d{1,2}月(?:上旬|中旬|下旬)?', '', r)
+    r = re.sub(r'上旬|中旬|下旬', '', r)
+    for w in FILLER_WORDS:
+        r = r.replace(w, '')
+    return re.sub(r'[、,。.・/／｜|\s　]+', '', r).strip()
+
+
 def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                      pref=None, subject=None, radius_km=None,
                      expand_time=False, wide=False):
@@ -8029,8 +8046,31 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
         _read()
         return out
 
+    """── 0. そのまま撮影地の名前として在るか ──
+
+       入れられた言葉が撮影地の表にそのまま在るなら、県名・市区町村名の
+       読み取りも、地図への問い合わせも当てにしない。その名前で探すのが正しい。
+
+       一斉点検で出てこなかった34件のうち、ほとんどがここで外れていた。
+         「福島潟」  新潟の撮影地なのに「福島」が県名に吸われ、福島県内を探していた
+         「八千穂高原」 「八千穂村」という市区町村に丸められていた
+         「吉野山」   「吉野町」に丸められていた
+         「市場町」   「町」の一字で市区町村名と見なされ、地点名として探す道が
+                     塞がれ、地図に聞きに行って東京あたりを返されていた
+       いずれも撮影地の表には在る名前で、素直に照合すれば当たる。（2026-10-17）"""
+    _exact_place = ""
+    if not pref and not subject:
+        _cand = strip_time_words(t)
+        try:
+            if len(_cand) >= 2 and _spot_name_norm(_cand) in get_place_names():
+                _exact_place = _cand
+        except Exception:
+            pass              # 表が読めなくても、これまでどおりの振る舞いに落とす
+
     # ── 1. 地域を読む ──
     area_name, area_latlng, area_display = parse_target_area(t)
+    if _exact_place:
+        area_name, area_latlng, area_display = None, None, None
 
     # 同名地名の聞き返しに答えが返ってきていれば、ここで確定させる。
     if pref and area_name == "AMBIGUOUS" and area_display:
@@ -8062,8 +8102,10 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
 
        入れられた言葉がそのまま撮影地名として在るなら、割らずに
        「6. 地点名として探す」へ落とす。（2026-10-16）"""
-    _whole_place = False
-    if _subj and not subject:
+    _whole_place = bool(_exact_place)
+    if _whole_place:
+        _subj = None
+    elif _subj and not subject:
         _body = re.sub(r'[\s　]+', '', t)
         try:
             if len(_body) > 1 and _spot_name_norm(_body) in get_place_names():
@@ -8253,7 +8295,10 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             out["choices"].append({"kind": "subject", "value": kw_option[0], "label": kw_option[1]})
         return out
 
-    city_specified = any(c in t for c in ["市", "町", "村", "区", "郡"])
+    # 「市場町」「上宝町」のように、撮影地名そのものに市区町村の字が入ることがある。
+    # 一字あるだけで市区町村名と見なすと、地点名として探す道（6.）が塞がれ、
+    # 地図に聞きに行って見当違いの場所を返す。表に在る名前なら、そうはしない。
+    city_specified = (not _exact_place) and any(c in t for c in ["市", "町", "村", "区", "郡"])
 
     # ── 6. 地域にも被写体にもならない語 → 地点名として探し、だめなら作者名 ──
     if not area_name and not search_keyword and not city_specified:
