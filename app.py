@@ -1940,18 +1940,36 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             place = d.get('Place', '') or ''
             area = d.get('Area', '') or ''
             title = d.get('Title', '') or ''
-            if place_terms and not any(t in place or t in area or t in title for t in place_terms):
-                # 字面で当たらなければ、揺れをそろえた形でもう一度見る。
-                # そろえた形は行ごとに覚えておく。毎回作ると14,700件ぶんかかるが、
-                # 一度作れば以後はただの文字列の照合で済む。
-                nz = d.get('_norm')
-                if nz is None:
-                    nz = '\x01'.join((_spot_name_norm(place),
-                                      _spot_name_norm(area),
-                                      _spot_name_norm(title)))
-                    d['_norm'] = nz
-                if not any(n in nz for n in place_norms):
-                    continue
+            # どこに当たったかを覚えておく。2=撮影地名そのもの、1=市区町村名か作品名。
+            #
+            # 「深沢」で探すと青森の八甲田山が出ていた。青森市の市区町村名に
+            # 「駒込深沢」が入っているためで、あきる野市の撮影地「深沢」より
+            # 賞が上だと、そちらが枠を埋めてしまう。「大谷町」で八王子、
+            # 「黒滝」で奈良県黒滝村が出ていたのも同じ。
+            # 撮影地名そのものに当たったものを先に出す。（2026-10-17）
+            _pl = 0
+            if place_terms:
+                if any(t in place for t in place_terms):
+                    _pl = 2
+                elif any((t in area or t in title) for t in place_terms):
+                    _pl = 1
+                else:
+                    # 字面で当たらなければ、揺れをそろえた形でもう一度見る。
+                    # そろえた形は行ごとに覚えておく。毎回作ると14,700件ぶんかかるが、
+                    # 一度作れば以後はただの文字列の照合で済む。
+                    nz = d.get('_norm')
+                    if nz is None:
+                        nz = '\x01'.join((_spot_name_norm(place),
+                                          _spot_name_norm(area),
+                                          _spot_name_norm(title)))
+                        d['_norm'] = nz
+                    _np, _na, _nt = nz.split('\x01')
+                    if any(n in _np for n in place_norms):
+                        _pl = 2
+                    elif any((n in _na or n in _nt) for n in place_norms):
+                        _pl = 1
+                    else:
+                        continue
             if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', ''), exclude=subject_exclude):
                 continue
             if d.get('Winner') in excl_authors:
@@ -2000,6 +2018,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                 'url': view_image_url(pub, d.get('PicFileName', '')),
                 'base_name': base_name, 'maplink': d.get('MapLink', ''),
                 'dnumb': str(d.get('dNumb', '')), 'matched_kw': None, '_year': year,
+                '_pl': _pl,
             }
             all_time.append(item)
             try:
@@ -2053,7 +2072,8 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
     elif center_latlng:
         pool.sort(key=lambda x: (x.get('cdist', 0), -x['ascore']))
     else:
-        pool.sort(key=lambda x: (-x['ascore'], -x.get('_year', 0)))
+        # 撮影地名そのものに当たったものが先。次に賞の重み、最後に新しさ。
+        pool.sort(key=lambda x: (-x.get('_pl', 0), -x['ascore'], -x.get('_year', 0)))
     # 1つの撮影地が7枠を埋めてしまわないようにする。探しているのは作品ではなく場所なので、
     # 同じ場所の2枚目より、別の場所の1枚目のほうが役に立つ。
     #
@@ -2112,6 +2132,24 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
         return _region_fallback(0) or {'status': 'not_found', 'results': []}
     wide = _region_fallback(len(results))
     if wide:
+        """文字で当たったものは、先に残す。
+
+           これまでは周りから集めたもので丸ごと置き換えていたので、
+           探している撮影地そのものが結果から消えていた。
+           「円原川」で円原の伏流水やモネの池だけが出ていたのはこれ。
+           広げるのは足りないぶんを補うためで、追い出すためではない。
+                                                          （2026-10-17）"""
+        if results:
+            _seen = {it['pic'] for _e, _l, it in results}
+            _merged = list(results)
+            for _r in (wide.get('results') or []):
+                if len(_merged) >= 7:
+                    break
+                if _r[2]['pic'] in _seen:
+                    continue
+                _merged.append(_r)
+                _seen.add(_r[2]['pic'])
+            wide['results'] = _merged
         return wide
     peaks = compute_peaks(bin_counter)
     return {'status': status, 'results': results, 'peaks': peaks}
@@ -8214,6 +8252,9 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             out["count"] = len(out["spots"])
             _sfx = ("（撮り頃は%sごろ）" % peaks_text(speaks)) if (_subj in SEASONAL_SUBJECTS and speaks) else ""
             if pr.get('region'):
+                # 点検の画面がこれを見て「周りへ逸れた」と判める。（2026-10-17）
+                out["region"] = pr['region']
+                out["region_radius_km"] = pr.get('region_radius_km')
                 _km = int(pr.get('region_radius_km') or 10)
                 if pr.get('region_found'):
                     # 数えているのは作品の枚数ではなく撮影地の数。名寄せが進むと、
@@ -8350,6 +8391,9 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
             # 文字で引けず、地図で場所を引いて周りを集めたとき。
             # 黙って別の探し方に切り替わると、なぜその顔ぶれなのか分からない。
             if pr.get('region'):
+                # 点検の画面がこれを見て「周りへ逸れた」と判める。（2026-10-17）
+                out["region"] = pr['region']
+                out["region_radius_km"] = pr.get('region_radius_km')
                 out["status"] = "ok"
                 _km = int(pr.get('region_radius_km') or 10)
                 if pr.get('region_found'):
