@@ -407,6 +407,30 @@ _NO_IMAGE_NAMES = {
 }
 
 
+# 撮影地の位置について、利用者に伝えておくこと。
+#
+# 道路沿いや峠の途中など、名前の付けようがない場所で撮られた作品は多い。
+# 撮影者が撮影地を伏せていることもある。どちらも誌面データの不備ではなく、
+# 風景写真というものの性質なので、欠落としてではなく、そういうものとして断る。
+#
+# 文言はここ一か所に置く。LINEのカルーセル、Webの候補、撮影プランと、
+# 出る先がいくつもあるので、別々に書くと言うことが食い違う。（2026-10-18）
+PLACE_NOTICE = (
+    "提示される撮影地は必ずしも実際に撮影されたポイントを正確に示すものではありません。"
+    "詳細な撮影ポイントが公開されていない場合は該当する市区町村のおおよその中心が示されています。"
+)
+
+
+def place_note_for(area_disp):
+    """撮影地名が分からない1件に添える、その場の短い断り。
+    全体の断り（PLACE_NOTICE）は出しっぱなしにせず、
+    当てはまるものにだけ添える。断りは、他と違うときにだけ意味を持つ。"""
+    where = str(area_disp or "").strip()
+    if not where:
+        return "撮影ポイントは公開されていません。おおよその場所を示しています。"
+    return "撮影ポイントは公開されていません。地図は%sのおおよその中心を指しています。" % where
+
+
 def has_valid_image(pic_filename):
     fn = str(pic_filename or '').strip()
     return bool(fn) and fn.lower() not in _NO_IMAGE_NAMES
@@ -8066,7 +8090,9 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
       none      … 見つからなかった
     """
     out = {"status": "none", "message": "", "note": "", "choices": [],
-           "peaks": [], "peaks_text": "", "count": 0, "spots": [], "read": {}}
+           "peaks": [], "peaks_text": "", "count": 0, "spots": [], "read": {},
+           # 撮影地の位置についての断り。画面の末尾に小さく出す。（2026-10-18）
+           "notice": PLACE_NOTICE}
 
     t = str(text or "").strip()
     pp = parse_period(t, today=base_date)
@@ -9475,6 +9501,9 @@ def api_facets_live():
         sp = _conc_spot("候補", item)
         sp["works"] = s["n"]
         sp["subjects"] = r["subjects"][:3]
+        # 撮影地名が無いものには、その場で断る。
+        sp["place_known"] = bool(r["place"])
+        sp["place_note"] = "" if r["place"] else place_note_for(sp.get("area_disp"))
         top.append(sp)
 
     out = {
@@ -9482,10 +9511,14 @@ def api_facets_live():
         "date": base.isoformat(), "km": int(km),
         "base_works": len(rows), "works": len(now),
         "spots": len(spots),
+        # 撮影地名が記録されていない作品。市区町村までしか分からないので、
+        # 行き先として出しても「どこへ行けばいいか」が伝わらない。
+        "noplace": sum(1 for r in now if not r["place"]),
         "picked": {"subject": picked_subj, "pref": sel_pref,
                    "city": sel_city, "place": sel_place},
         "subjects": subjects, "prefs": prefs, "cities": cities, "places": places,
         "top": top,
+        "notice": PLACE_NOTICE,
     }
     resp = jsonify(out)
     resp.headers["Access-Control-Allow-Origin"] = _REF_SITE
@@ -9525,6 +9558,7 @@ _FACETS_HTML = """<!doctype html>
  .sum b{font-size:19px} .ms{color:#78716c;font-size:12px}
  .card{border:1px solid #e7e5e4;border-radius:11px;padding:12px 14px;margin-bottom:9px}
  .card h3{margin:0 0 3px;font-size:17px} .card p{margin:0;font-size:13px;color:#57534e}
+ .card p.note{margin-top:5px;color:#b45309}
 </style></head><body>
 <h1>絞り込みの試作</h1>
 <p class="lead">いつ・どこから・どこまでだけで引いた全体から、選べる軸を出します。押すたびに件数が変わり、0件になったものは薄くなります。</p>
@@ -9598,11 +9632,14 @@ async function load(){
     if((j.cities||[]).length) h+='<div class="box"><h2>市区町村</h2>'+chipsHtml(j.cities,'city','area')+'</div>';
     if((j.places||[]).length) h+='<div class="box"><h2>撮影地（'+j.places.length+'）</h2>'
       +chipsHtml(j.places,'place','area')+'</div>';
-    h+='<div class="box"><h2>候補3件</h2>'+(j.top||[]).map(s=>
+    const tops=j.top||[];
+    h+='<div class="box"><h2>候補（'+tops.length+'件）</h2>'+(tops.length?tops.map(s=>
       '<div class="card"><h3>'+esc(s.place||s.area_disp)+'</h3>'
       +'<p>'+esc(s.area_disp)+'　'+esc((s.subjects||[]).join('・'))+'　作品'+s.works+'件</p>'
-      +'<p>作品「'+esc(s.title)+'」'+esc(s.winner)+'／'+esc(s.award)+'　'+s.dist_km+'km</p></div>'
-    ).join('')+'</div>';
+      +'<p>作品「'+esc(s.title)+'」'+esc(s.winner)+'／'+esc(s.award)+'　'+s.dist_km+'km</p>'
+      +(s.place_note?'<p class="note">'+esc(s.place_note)+'</p>':'')+'</div>'
+    ).join(''):'<p class="ms">候補がありません。</p>')+'</div>';
+    if(j.notice) h+='<div class="box"><p class="ms">'+esc(j.notice)+'</p></div>';
     $('#out').innerHTML=h;
   }catch(e){ $('#out').innerHTML='<div class="box">'+esc(e)+'</div>'; }
   finally{ $('#go').disabled=false; }
