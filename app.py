@@ -9484,7 +9484,16 @@ def api_facets_live():
             spots[k] = {"best": r, "n": (cur["n"] + 1) if cur else 1}
         else:
             cur["n"] += 1
-    ranked = sorted(spots.values(), key=lambda s: (-s["best"]["ascore"], -s["n"],
+    """並べる順は、作品数 → 賞 → 近さ。
+
+       はじめは賞の高さをいちばんにしていた。その結果、196か所の中から選ばれた
+       3か所が、作品2件・1件・1件になった。1枚だけ賞を取った場所が上に来て、
+       何度も撮られている場所が下に沈んでいた。
+
+       ここで出すのは行き先であって、名作の一覧ではない。何度も撮られている場所は、
+       それだけ撮りどころがあり、通いやすく、季節の幅もあるということ。
+       賞は捨てず、作品数が同じときに効かせる。（2026-10-18）"""
+    ranked = sorted(spots.values(), key=lambda s: (-s["n"], -s["best"]["ascore"],
                                                    s["best"]["dist"]))
     top = []
     for s in ranked[:3]:
@@ -9537,14 +9546,22 @@ _FACETS_HTML = """<!doctype html>
 <meta name="robots" content="noindex,nofollow">
 <title>絞り込みの試作</title>
 <style>
+ /* 文字の大きさ。15pxを下限にする（index.css で決めた基準と同じ）。
+    とくに注意書きは、読めなければ置いた意味が無い。本文より大きくする。 */
  body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:18px;
-      background:#fafaf9;color:#1c1917;font-size:15px;line-height:1.7}
- h1{font-size:18px;margin:0 0 4px} p.lead{color:#57534e;font-size:13px;margin:0 0 16px}
- h2{font-size:15px;margin:0 0 9px}
+      background:#fafaf9;color:#1c1917;font-size:16px;line-height:1.8}
+ h1{font-size:20px;margin:0 0 6px} p.lead{color:#57534e;font-size:15px;margin:0 0 16px}
+ h2{font-size:17px;margin:0 0 10px}
  .box{background:#fff;border:1px solid #e7e5e4;border-radius:12px;padding:15px;margin-bottom:14px}
- .cols{display:flex;gap:12px;flex-wrap:wrap}
- .col{flex:1 1 150px}
- label{display:block;font-size:13px;color:#57534e;margin-bottom:4px}
+ /* 日付の枠。iOSのSafariは type="date" を自前の部品として描くので、
+    幅の指定が効かず枠からはみ出す。appearance-none で止めると効くように
+    なるが、カレンダーの絵も消えるので、こちらで置く。（2026-10-18） */
+ .datewrap{position:relative;margin-bottom:10px}
+ .datewrap input{appearance:none;-webkit-appearance:none;margin:0;padding-right:44px}
+ .datewrap svg{position:absolute;right:13px;top:50%;transform:translateY(-50%);pointer-events:none}
+ .pair{display:flex;gap:8px}
+ .pair input{flex:1 1 0;min-width:0}
+ label{display:block;font-size:15px;color:#57534e;margin-bottom:5px}
  input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #d6d3d1;
        border-radius:8px;font-size:16px;margin-bottom:10px}
  button{font-family:inherit;cursor:pointer}
@@ -9555,22 +9572,31 @@ _FACETS_HTML = """<!doctype html>
  .chip.area{border-color:#d6d3d1;background:#fff;color:#292524}
  .chip.off{border-color:#e7e5e4;background:#f5f5f4;color:#78716c;cursor:default}
  .chip.on{border-color:#047857;background:#047857;color:#fff;font-weight:700}
- .sum b{font-size:19px} .ms{color:#78716c;font-size:12px}
+ .sum b{font-size:21px} .ms{color:#57534e;font-size:15px}
+ /* 注意書き。本文より大きく、色も薄くしない。読めなければ置いた意味が無い。 */
+ .notice{margin:0;color:#292524;font-size:17px;line-height:1.9}
  .card{border:1px solid #e7e5e4;border-radius:11px;padding:12px 14px;margin-bottom:9px}
- .card h3{margin:0 0 3px;font-size:17px} .card p{margin:0;font-size:13px;color:#57534e}
+ .card h3{margin:0 0 4px;font-size:19px} .card p{margin:0;font-size:15px;color:#44403c}
  .card .tag{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;
-            background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:12px}
+            background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:15px}
 </style></head><body>
 <h1>絞り込みの試作</h1>
 <p class="lead">いつ・どこから・どこまでだけで引いた全体から、選べる軸を出します。押すたびに件数が変わり、0件になったものは薄くなります。</p>
 
 <div class="box">
-  <div class="cols">
-    <div class="col"><label>いつ</label><input id="d" type="date"></div>
-    <div class="col"><label>出発地（緯度）</label><input id="la" type="text" value="35.7768"></div>
-    <div class="col"><label>出発地（経度）</label><input id="ln" type="text" value="139.6836"></div>
-    <div class="col"><label>どこまで（km）</label><input id="km" type="number" value="150" min="10" max="500" step="10"></div>
+  <label for="d">いつ</label>
+  <div class="datewrap">
+    <input id="d" type="date">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#a8a29e" stroke-width="2"
+         stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg>
   </div>
+  <label for="la">出発地（緯度・経度）</label>
+  <div class="pair">
+    <input id="la" type="text" value="35.7768" aria-label="緯度">
+    <input id="ln" type="text" value="139.6836" aria-label="経度">
+  </div>
+  <label for="km">どこまで（km）</label>
+  <input id="km" type="number" value="150" min="10" max="500" step="10">
   <button class="go" id="go">探す</button>
   <span id="ms" class="ms"></span>
 </div>
@@ -9640,7 +9666,7 @@ async function load(){
       +'<p>作品「'+esc(s.title)+'」'+esc(s.winner)+'／'+esc(s.award)+'　'+s.dist_km+'km</p>'
       +(s.place_note?'<span class="tag">'+esc(s.place_note)+'</span>':'')+'</div>'
     ).join(''):'<p class="ms">候補がありません。</p>')+'</div>';
-    if(j.notice) h+='<div class="box"><p class="ms">'+esc(j.notice)+'</p></div>';
+    if(j.notice) h+='<div class="box"><p class="notice">'+esc(j.notice)+'</p></div>';
     $('#out').innerHTML=h;
   }catch(e){ $('#out').innerHTML='<div class="box">'+esc(e)+'</div>'; }
   finally{ $('#go').disabled=false; }
