@@ -9290,6 +9290,195 @@ def page_place_sweep():
     return resp
 
 
+# ──────────────── 選択肢の数を数える（確認専用） ────────────────
+# 「いつ」「どこから」だけで検索し、そこから選べる軸（なにを撮る・地域・撮影地）を
+# 出す、という画面を考えている。成り立つかどうかは、実際にいくつ出るかで決まる。
+# 20も30も並ぶなら、3つに絞るために30から選ばせることになって本末転倒。
+# 想像で画面を描く前に、本当の数を見る。（2026-10-18）
+
+_FACETS_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>選択肢の数を数える</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ h2{font-size:15px;margin:0 0 10px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer}
+ button:disabled{background:#94a3b8;cursor:default}
+ .cols{display:flex;gap:16px;flex-wrap:wrap}
+ .col{flex:1 1 280px}
+ .chip{display:inline-block;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;
+       border-radius:999px;padding:3px 11px;margin:0 6px 6px 0;font-size:13px}
+ .chip b{font-weight:700} .chip.sm{background:#f1f5f9;border-color:#e2e8f0;color:#475569}
+ .sum b{font-size:18px} .n{color:#b91c1c;font-weight:700}
+ table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:4px 8px;text-align:left}
+ th{background:#f1f5f9;white-space:nowrap}
+</style></head><body>
+<h1>選択肢の数を数える</h1>
+<p class="lead">「いつ」「どこから」「何km以内」だけで絞ったとき、選ばせる軸にいくつ並ぶかを数えます。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" autocomplete="off" placeholder="鍵を貼り付けてください">
+  <div class="cols">
+    <div class="col"><label>いつ（YYYY-MM-DD）</label><input id="d" type="date"></div>
+    <div class="col"><label>どこから（緯度）</label><input id="la" type="text" value="35.7768"></div>
+    <div class="col"><label>どこから（経度）</label><input id="ln" type="text" value="139.6836"></div>
+    <div class="col"><label>何km以内</label><input id="km" type="number" value="150" min="10" max="1000" step="10"></div>
+  </div>
+  <button id="go">数える</button>
+</div>
+<div id="out"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+(function(){ const t=new Date(); $('#d').value=t.toISOString().slice(0,10); })();
+function chips(list, cls){
+  return (list||[]).map(x=>'<span class="chip'+(cls||'')+'">'+esc(x.name)+' <b>'+x.n+'</b></span>').join('');
+}
+$('#go').onclick=async()=>{
+  const key=$('#k').value.trim();
+  if(!key){alert('鍵を入れてください');return;}
+  $('#go').disabled=true; $('#out').innerHTML='<div class="box">数えています…</div>';
+  try{
+    const q='?date='+encodeURIComponent($('#d').value)+'&lat='+$('#la').value
+           +'&lng='+$('#ln').value+'&km='+$('#km').value;
+    const r=await fetch('/api/_facets'+q,{headers:{'X-Check-Key':key}});
+    if(!r.ok){$('#out').innerHTML='<div class="box">返ってきませんでした（'+r.status+'）。鍵を確かめてください。</div>';return;}
+    const j=await r.json();
+    if(!j.ok){$('#out').innerHTML='<div class="box">'+esc(j.error||'失敗しました')+'</div>';return;}
+    let h='<div class="box"><p class="sum">'+esc(j.date)+'ごろ・'+j.km+'km以内で、'
+      +'案内できる作品 <b>'+j.works+'</b> 件</p>'
+      +'<p>なにを撮る <span class="n">'+j.counts.subjects+'</span> 種類 ／ '
+      +'地域 <span class="n">'+j.counts.areas+'</span> か所 ／ '
+      +'撮影地 <span class="n">'+j.counts.places+'</span> 件</p></div>';
+    h+='<div class="box"><h2>距離でどれだけ変わるか</h2><table><tr><th>以内</th><th>作品</th>'
+      +'<th>なにを撮る</th><th>地域</th><th>撮影地</th></tr>';
+    for(const b of j.bands){
+      h+='<tr><td>'+b.km+'km</td><td>'+b.works+'</td><td>'+b.subjects+'</td>'
+        +'<td>'+b.areas+'</td><td>'+b.places+'</td></tr>';
+    }
+    h+='</table></div>';
+    h+='<div class="box"><h2>なにを撮る（多い順）</h2>'+chips(j.subjects)+'</div>';
+    h+='<div class="box"><h2>地域（多い順・上位40）</h2>'+chips(j.areas,' sm')+'</div>';
+    h+='<div class="box"><h2>撮影地（多い順・上位40）</h2>'+chips(j.places,' sm')+'</div>';
+    $('#out').innerHTML=h;
+  }catch(e){ $('#out').innerHTML='<div class="box">'+esc(e)+'</div>'; }
+  finally{ $('#go').disabled=false; }
+};
+</script></body></html>"""
+
+
+@app.route("/_facets", methods=["GET"])
+def page_facets():
+    """ブラウザで開く確認画面。鍵はこの画面の入力欄で受け取り、
+    ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_FACETS_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
+@app.route("/api/_facets", methods=["GET"])
+def api_facets():
+    """「いつ・どこから・何km」で絞った作品を集め、
+    なにを撮る（被写体）・地域・撮影地が、それぞれ何種類あるかを数える。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        lat = float(request.args.get("lat", 35.7768))      # 既定は板橋
+        lng = float(request.args.get("lng", 139.6836))
+        km = float(request.args.get("km", 150))
+    except ValueError:
+        return jsonify({"ok": False, "error": "緯度・経度・kmが数ではありません"}), 400
+    ds = (request.args.get("date") or "").strip()
+    try:
+        _y, _m, _d = [int(x) for x in ds.split("-")]
+        base = date(_y, _m, _d)
+    except Exception:
+        base = date.today()
+    window = half_month_window(base)
+
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+
+    # ── 1. 条件に合う作品を集める ──
+    # 押すたびに14,700件を走査しては応答が鈍る。最初の1回でこの集合を作り、
+    # 以後はこの中だけで数え直す、という作りを想定している。
+    picked = []
+    for d in get_photos():
+        place = d.get('Place', '') or ''
+        area = d.get('Area', '') or ''
+        if d.get('Winner') in excl_authors:
+            continue
+        if is_area_blocked(place, area, blocked_areas):
+            continue
+        if not has_valid_image(d.get('PicFileName')):
+            continue
+        if str(d.get('Published', '') or '').endswith('N'):
+            continue
+        try:
+            _mo = int(d.get('Month'))
+        except Exception:
+            continue
+        if not (1 <= _mo <= 12) or (_mo, junkun(d.get('Day'))) not in window:
+            continue
+        pref = extract_pref(area)
+        ll = place_latlng(area, place) or work_latlng(area, pref) \
+            or (PREF_LATLNG.get(pref) if pref else None)
+        if not ll:
+            continue
+        dist = haversine(lat, lng, ll[0], ll[1])
+        picked.append((dist, area, place, d))
+
+    # ── 2. 距離ごとに数える ──
+    def _tally(rows):
+        subj, ar, pl = Counter(), Counter(), Counter()
+        for _dist, _area, _place, _d in rows:
+            _sf = "%s %s" % (_d.get('Subject', '') or '', _d.get('Title', '') or '')
+            for _key, _vars in KEYWORD_NORMALIZE.items():
+                if any(v and v in _sf for v in _vars):
+                    subj[_key] += 1
+            if _area:
+                ar[display_area(_area)] += 1
+            if _place:
+                pl[_place] += 1
+        return subj, ar, pl
+
+    bands = []
+    for _b in (100, 150, 200, 300):
+        _rows = [r for r in picked if r[0] <= _b]
+        _s, _a, _p = _tally(_rows)
+        bands.append({"km": _b, "works": len(_rows), "subjects": len(_s),
+                      "areas": len(_a), "places": len(_p)})
+
+    rows = [r for r in picked if r[0] <= km]
+    subj, ar, pl = _tally(rows)
+    top = lambda c, n: [{"name": k, "n": v} for k, v in c.most_common(n)]
+    return jsonify({
+        "ok": True,
+        "date": base.isoformat(), "km": int(km), "works": len(rows),
+        "counts": {"subjects": len(subj), "areas": len(ar), "places": len(pl)},
+        "bands": bands,
+        "subjects": top(subj, 60),
+        "areas": top(ar, 40),
+        "places": top(pl, 40),
+    })
+
+
 if __name__ == "__main__":
     # 手元で動かすときの入口。本番（Render）はこれを使わず、gunicorn から
     # app を読み込んで動かす。開発用サーバーは同時アクセスを1件ずつしか
