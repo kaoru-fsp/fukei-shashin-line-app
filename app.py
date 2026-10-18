@@ -421,14 +421,14 @@ PLACE_NOTICE = (
 )
 
 
-def place_note_for(area_disp):
-    """撮影地名が分からない1件に添える、その場の短い断り。
-    全体の断り（PLACE_NOTICE）は出しっぱなしにせず、
-    当てはまるものにだけ添える。断りは、他と違うときにだけ意味を持つ。"""
-    where = str(area_disp or "").strip()
-    if not where:
-        return "撮影ポイントは公開されていません。おおよその場所を示しています。"
-    return "撮影ポイントは公開されていません。地図は%sのおおよその中心を指しています。" % where
+# 撮影地名が分からない1件に付ける印。
+#
+# はじめは「撮影ポイントは公開されていません」と書いていたが、これは
+# その場所について断定してしまっている。同じ場所を別の作者が明かして
+# いるかもしれないし、すでに知れ渡っているかもしれない。こちらには
+# 知りようがない。印は事実だけを言い、理由は上の PLACE_NOTICE が
+# 「公開されていない場合は」と条件つきで引き受ける。（2026-10-18）
+PLACE_APPROX_LABEL = "おおよその位置"
 
 
 def has_valid_image(pic_filename):
@@ -9501,9 +9501,9 @@ def api_facets_live():
         sp = _conc_spot("候補", item)
         sp["works"] = s["n"]
         sp["subjects"] = r["subjects"][:3]
-        # 撮影地名が無いものには、その場で断る。
+        # 撮影地名が無いものには印だけ付ける。理由は全体の断りが引き受ける。
         sp["place_known"] = bool(r["place"])
-        sp["place_note"] = "" if r["place"] else place_note_for(sp.get("area_disp"))
+        sp["place_note"] = "" if r["place"] else PLACE_APPROX_LABEL
         top.append(sp)
 
     out = {
@@ -9558,7 +9558,8 @@ _FACETS_HTML = """<!doctype html>
  .sum b{font-size:19px} .ms{color:#78716c;font-size:12px}
  .card{border:1px solid #e7e5e4;border-radius:11px;padding:12px 14px;margin-bottom:9px}
  .card h3{margin:0 0 3px;font-size:17px} .card p{margin:0;font-size:13px;color:#57534e}
- .card p.note{margin-top:5px;color:#b45309}
+ .card .tag{display:inline-block;margin-top:6px;padding:2px 9px;border-radius:999px;
+            background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:12px}
 </style></head><body>
 <h1>絞り込みの試作</h1>
 <p class="lead">いつ・どこから・どこまでだけで引いた全体から、選べる軸を出します。押すたびに件数が変わり、0件になったものは薄くなります。</p>
@@ -9637,7 +9638,7 @@ async function load(){
       '<div class="card"><h3>'+esc(s.place||s.area_disp)+'</h3>'
       +'<p>'+esc(s.area_disp)+'　'+esc((s.subjects||[]).join('・'))+'　作品'+s.works+'件</p>'
       +'<p>作品「'+esc(s.title)+'」'+esc(s.winner)+'／'+esc(s.award)+'　'+s.dist_km+'km</p>'
-      +(s.place_note?'<p class="note">'+esc(s.place_note)+'</p>':'')+'</div>'
+      +(s.place_note?'<span class="tag">'+esc(s.place_note)+'</span>':'')+'</div>'
     ).join(''):'<p class="ms">候補がありません。</p>')+'</div>';
     if(j.notice) h+='<div class="box"><p class="ms">'+esc(j.notice)+'</p></div>';
     $('#out').innerHTML=h;
