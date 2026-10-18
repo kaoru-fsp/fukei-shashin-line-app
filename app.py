@@ -9290,6 +9290,208 @@ def page_place_sweep():
     return resp
 
 
+# ──────────────── 絞り込み（本番） ────────────────
+# 「いつ・どこから・どこまで」で引ける全体から、選べる軸を出し、
+# 選ぶたびに絞っていく。自由に書かせるのをやめて選ばせるので、
+# 出す選択肢は「実際に作品がある組み合わせ」だけになり、空振りが起きない。
+#
+# 選択肢の顔ぶれは「いつ・どこから・どこまで」だけで決まる集合から作り、
+# 件数は「いま選んでいる条件」で数える。0件のものも名前は返す。
+# 消えずに薄く残るほうが、何を選んだせいで選べなくなったのかが分かる。
+#                                                          （2026-10-18）
+
+def _facet_subjects_of(d):
+    """その作品に当てはまる被写体を、本番の判定で求める。
+    地名の部分一致に取られないよう、除外語つきで見る（竜頭の滝の「滝」はよいが、
+    鳥海山の「鳥」は被写体ではない）。"""
+    out = []
+    title = d.get('Title', '') or ''
+    place = d.get('Place', '') or ''
+    area = d.get('Area', '') or ''
+    sf = d.get('Subject', '') or ''
+    for canon, variants in KEYWORD_NORMALIZE.items():
+        if subject_matches(variants, title=title, place=place, area=area,
+                           subject_field=sf, exclude=subject_exclude_for(canon)):
+            out.append(canon)
+    return out
+
+
+def _facet_base(lat, lng, km, base_date):
+    """「いつ・どこから・どこまで」だけで絞った作品。これが選択肢の母体になる。"""
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    window = half_month_window(base_date)
+    rows = []
+    for d in get_photos():
+        place = d.get('Place', '') or ''
+        area = d.get('Area', '') or ''
+        if d.get('Winner') in excl_authors:
+            continue
+        if is_area_blocked(place, area, blocked_areas):
+            continue
+        if not has_valid_image(d.get('PicFileName')):
+            continue
+        if str(d.get('Published', '') or '').endswith('N'):
+            continue
+        try:
+            mo = int(d.get('Month'))
+        except Exception:
+            continue
+        if not (1 <= mo <= 12) or (mo, junkun(d.get('Day'))) not in window:
+            continue
+        pref = extract_pref(area)
+        ll = place_latlng(area, place) or work_latlng(area, pref) \
+            or (PREF_LATLNG.get(pref) if pref else None)
+        if not ll:
+            continue
+        if haversine(lat, lng, ll[0], ll[1]) > km:
+            continue
+        disp = display_area(area)
+        city = disp[len(pref):] if (pref and disp.startswith(pref)) else disp
+        rows.append({
+            "d": d, "area": area, "place": place, "pref": pref or "",
+            "city": city or "", "ll": ll,
+            "subjects": _facet_subjects_of(d),
+            "dist": haversine(lat, lng, ll[0], ll[1]),
+            "ascore": calc_award_score(d.get('AwardRank')),
+        })
+    return rows
+
+
+@app.route("/api/facets", methods=["GET", "OPTIONS"])
+def api_facets_live():
+    """絞り込みの選択肢と件数を返す。
+    リファレンス（別ドメイン）から呼ばれるのでCORSを許可する。
+
+    受け取るもの
+      lat, lng   出発地（必須）
+      km         どこまで（既定150）
+      date       いつ（YYYY-MM-DD、既定は明日）
+      subject    選んだ被写体（カンマ区切り、重ねるほど絞る）
+      pref       選んだ県
+      city       選んだ市区町村
+      place      選んだ撮影地
+    """
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"] = _REF_SITE
+        resp.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "86400"
+        return resp
+
+    try:
+        lat = float(request.args.get("lat"))
+        lng = float(request.args.get("lng"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "出発地がありません"}), 400
+    try:
+        km = float(request.args.get("km") or 150)
+    except ValueError:
+        km = 150.0
+    km = max(10.0, min(500.0, km))
+    ds = (request.args.get("date") or "").strip()
+    try:
+        _y, _m, _d = [int(x) for x in ds.split("-")]
+        base = date(_y, _m, _d)
+    except Exception:
+        base = date.today() + timedelta(days=1)
+
+    picked_subj = [s for s in (request.args.get("subject") or "").split(",") if s.strip()]
+    picked_subj = [s.strip() for s in picked_subj if s.strip() in KEYWORD_NORMALIZE]
+    sel_pref = (request.args.get("pref") or "").strip()
+    sel_city = (request.args.get("city") or "").strip()
+    sel_place = (request.args.get("place") or "").strip()
+
+    try:
+        rows = _facet_base(lat, lng, km, base)
+    except Exception:
+        import traceback
+        print("[ERROR] api_facets_live: %s" % traceback.format_exc(), flush=True)
+        return jsonify({"ok": False, "error": "うまく数えられませんでした"}), 500
+
+    def _keep(r):
+        if picked_subj and not all(s in r["subjects"] for s in picked_subj):
+            return False
+        if sel_pref and r["pref"] != sel_pref:
+            return False
+        if sel_city and r["city"] != sel_city:
+            return False
+        if sel_place and r["place"] != sel_place:
+            return False
+        return True
+
+    now = [r for r in rows if _keep(r)]
+
+    # 顔ぶれは母体から、件数はいまの条件から。0件のものも薄くして残す。
+    def _facet(name_of, source, limit=None, order_by_base=True):
+        base_c, now_c = Counter(), Counter()
+        for r in source:
+            for nm in name_of(r):
+                base_c[nm] += 1
+        for r in now:
+            for nm in name_of(r):
+                now_c[nm] += 1
+        names = [n for n, _ in base_c.most_common()]
+        if not order_by_base:
+            names.sort(key=lambda n: -now_c[n])
+        out = [{"name": n, "n": now_c.get(n, 0)} for n in names]
+        return out[:limit] if limit else out
+
+    subjects = _facet(lambda r: r["subjects"], rows)
+    prefs = _facet(lambda r: [r["pref"]] if r["pref"] else [], rows)
+    # 市区町村と撮影地は、上の軸が決まってから出す。先に93件並べても選べない。
+    cities = _facet(lambda r: [r["city"]] if r["city"] else [],
+                    [r for r in rows if (not sel_pref or r["pref"] == sel_pref)]) \
+        if sel_pref else []
+    show_places = bool(picked_subj or sel_pref or sel_city)
+    places = _facet(lambda r: [r["place"]] if r["place"] else [], now) if show_places else []
+
+    # ── 候補。撮影地ごとに一番の作品を立て、賞と作品数で並べる ──
+    spots = {}
+    for r in now:
+        k = spot_key(r["area"], r["place"])
+        cur = spots.get(k)
+        if cur is None or r["ascore"] > cur["best"]["ascore"]:
+            spots[k] = {"best": r, "n": (cur["n"] + 1) if cur else 1}
+        else:
+            cur["n"] += 1
+    ranked = sorted(spots.values(), key=lambda s: (-s["best"]["ascore"], -s["n"],
+                                                   s["best"]["dist"]))
+    top = []
+    for s in ranked[:3]:
+        r = s["best"]
+        d = r["d"]
+        item = {
+            'dist': r["dist"], 'pref': r["pref"], 'area': r["area"], 'place': r["place"],
+            'title': d.get('Title', ''), 'period': format_period(d.get('Month'), d.get('Day')),
+            'winner': d.get('Winner', ''), 'award': d.get('AwardRank', ''),
+            'pic': d.get('PicFileName', ''), 'pub': d.get('Published', ''),
+            'url': view_image_url(d.get('Published', ''), d.get('PicFileName', '')),
+            'dnumb': str(d.get('dNumb', '')),
+        }
+        sp = _conc_spot("候補", item)
+        sp["works"] = s["n"]
+        sp["subjects"] = r["subjects"][:3]
+        top.append(sp)
+
+    out = {
+        "ok": True,
+        "date": base.isoformat(), "km": int(km),
+        "base_works": len(rows), "works": len(now),
+        "spots": len(spots),
+        "picked": {"subject": picked_subj, "pref": sel_pref,
+                   "city": sel_city, "place": sel_place},
+        "subjects": subjects, "prefs": prefs, "cities": cities, "places": places,
+        "top": top,
+    }
+    resp = jsonify(out)
+    resp.headers["Access-Control-Allow-Origin"] = _REF_SITE
+    return resp
+
+
 # ──────────────── 選択肢の数を数える（確認専用） ────────────────
 # 「いつ」「どこから」だけで検索し、そこから選べる軸（なにを撮る・地域・撮影地）を
 # 出す、という画面を考えている。成り立つかどうかは、実際にいくつ出るかで決まる。
@@ -9300,81 +9502,128 @@ _FACETS_HTML = """<!doctype html>
 <html lang="ja"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>選択肢の数を数える</title>
+<title>絞り込みの試作</title>
 <style>
- body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
-      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
- h1{font-size:18px;margin:0 0 4px} p.lead{color:#475569;font-size:13px;margin:0 0 18px}
- h2{font-size:15px;margin:0 0 10px}
- .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
- label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
- input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
-       border-radius:7px;font-size:15px;margin-bottom:12px}
- button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
-        font-size:15px;cursor:pointer}
- button:disabled{background:#94a3b8;cursor:default}
- .cols{display:flex;gap:16px;flex-wrap:wrap}
- .col{flex:1 1 280px}
- .chip{display:inline-block;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;
-       border-radius:999px;padding:3px 11px;margin:0 6px 6px 0;font-size:13px}
- .chip b{font-weight:700} .chip.sm{background:#f1f5f9;border-color:#e2e8f0;color:#475569}
- .sum b{font-size:18px} .n{color:#b91c1c;font-weight:700}
- table{border-collapse:collapse;width:100%;font-size:13px;margin-top:6px}
- th,td{border-bottom:1px solid #e2e8f0;padding:4px 8px;text-align:left}
- th{background:#f1f5f9;white-space:nowrap}
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:18px;
+      background:#fafaf9;color:#1c1917;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} p.lead{color:#57534e;font-size:13px;margin:0 0 16px}
+ h2{font-size:15px;margin:0 0 9px}
+ .box{background:#fff;border:1px solid #e7e5e4;border-radius:12px;padding:15px;margin-bottom:14px}
+ .cols{display:flex;gap:12px;flex-wrap:wrap}
+ .col{flex:1 1 150px}
+ label{display:block;font-size:13px;color:#57534e;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #d6d3d1;
+       border-radius:8px;font-size:16px;margin-bottom:10px}
+ button{font-family:inherit;cursor:pointer}
+ .go{background:#047857;color:#fff;border:0;border-radius:8px;padding:11px 22px;font-size:15px;font-weight:700}
+ .chip{display:inline-flex;align-items:center;min-height:40px;padding:0 14px;margin:0 7px 7px 0;
+       border:1px solid #a7f3d0;background:#ecfdf5;color:#065f46;border-radius:999px;font-size:15px}
+ .chip b{margin-left:4px}
+ .chip.area{border-color:#d6d3d1;background:#fff;color:#292524}
+ .chip.off{border-color:#e7e5e4;background:#f5f5f4;color:#78716c;cursor:default}
+ .chip.on{border-color:#047857;background:#047857;color:#fff;font-weight:700}
+ .sum b{font-size:19px} .ms{color:#78716c;font-size:12px}
+ .card{border:1px solid #e7e5e4;border-radius:11px;padding:12px 14px;margin-bottom:9px}
+ .card h3{margin:0 0 3px;font-size:17px} .card p{margin:0;font-size:13px;color:#57534e}
 </style></head><body>
-<h1>選択肢の数を数える</h1>
-<p class="lead">「いつ」「どこから」「何km以内」だけで絞ったとき、選ばせる軸にいくつ並ぶかを数えます。</p>
+<h1>絞り込みの試作</h1>
+<p class="lead">いつ・どこから・どこまでだけで引いた全体から、選べる軸を出します。押すたびに件数が変わり、0件になったものは薄くなります。</p>
+
 <div class="box">
-  <label>CHECK_KEY</label>
-  <input id="k" type="password" autocomplete="off" placeholder="鍵を貼り付けてください">
   <div class="cols">
-    <div class="col"><label>いつ（YYYY-MM-DD）</label><input id="d" type="date"></div>
-    <div class="col"><label>どこから（緯度）</label><input id="la" type="text" value="35.7768"></div>
-    <div class="col"><label>どこから（経度）</label><input id="ln" type="text" value="139.6836"></div>
-    <div class="col"><label>何km以内</label><input id="km" type="number" value="150" min="10" max="1000" step="10"></div>
+    <div class="col"><label>いつ</label><input id="d" type="date"></div>
+    <div class="col"><label>出発地（緯度）</label><input id="la" type="text" value="35.7768"></div>
+    <div class="col"><label>出発地（経度）</label><input id="ln" type="text" value="139.6836"></div>
+    <div class="col"><label>どこまで（km）</label><input id="km" type="number" value="150" min="10" max="500" step="10"></div>
   </div>
-  <button id="go">数える</button>
+  <button class="go" id="go">探す</button>
+  <span id="ms" class="ms"></span>
 </div>
+
 <div id="out"></div>
+
 <script>
 const $=s=>document.querySelector(s);
-const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-(function(){ const t=new Date(); $('#d').value=t.toISOString().slice(0,10); })();
-function chips(list, cls){
-  return (list||[]).map(x=>'<span class="chip'+(cls||'')+'">'+esc(x.name)+' <b>'+x.n+'</b></span>').join('');
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let sel={subject:[],pref:"",city:"",place:""};
+(function(){ $('#d').value=new Date().toISOString().slice(0,10); })();
+
+function q(){
+  const p=new URLSearchParams();
+  p.set('lat',$('#la').value); p.set('lng',$('#ln').value);
+  p.set('km',$('#km').value); p.set('date',$('#d').value);
+  if(sel.subject.length) p.set('subject',sel.subject.join(','));
+  if(sel.pref) p.set('pref',sel.pref);
+  if(sel.city) p.set('city',sel.city);
+  if(sel.place) p.set('place',sel.place);
+  return '/api/facets?'+p.toString();
 }
-$('#go').onclick=async()=>{
-  const key=$('#k').value.trim();
-  if(!key){alert('鍵を入れてください');return;}
-  $('#go').disabled=true; $('#out').innerHTML='<div class="box">数えています…</div>';
+function chipsHtml(list,kind,cls){
+  return (list||[]).map(x=>{
+    const off = x.n===0;
+    const on = (kind==='subject') ? sel.subject.indexOf(x.name)>=0 : sel[kind]===x.name;
+    const c='chip '+(cls||'')+(on?' on':(off?' off':''));
+    const dis=off&&!on?' disabled':'';
+    return '<button type="button" class="'+c+'" data-k="'+kind+'" data-v="'+esc(x.name)+'"'+dis+'>'
+      +esc(x.name)+'<b>'+x.n+'</b></button>';
+  }).join('');
+}
+function selectedHtml(){
+  const out=[];
+  sel.subject.forEach(v=>out.push(['subject',v]));
+  if(sel.pref) out.push(['pref',sel.pref]);
+  if(sel.city) out.push(['city',sel.city]);
+  if(sel.place) out.push(['place',sel.place]);
+  if(!out.length) return '';
+  return '<div class="box"><h2>選んだ条件</h2>'+out.map(([k,v])=>
+    '<button type="button" class="chip on" data-k="'+k+'" data-v="'+esc(v)+'">'+esc(v)+' ×</button>').join('')
+    +'</div>';
+}
+async function load(){
+  $('#go').disabled=true; $('#ms').textContent='数えています…';
+  const t0=performance.now();
   try{
-    const q='?date='+encodeURIComponent($('#d').value)+'&lat='+$('#la').value
-           +'&lng='+$('#ln').value+'&km='+$('#km').value;
-    const r=await fetch('/api/_facets'+q,{headers:{'X-Check-Key':key}});
-    if(!r.ok){$('#out').innerHTML='<div class="box">返ってきませんでした（'+r.status+'）。鍵を確かめてください。</div>';return;}
+    const r=await fetch(q());
     const j=await r.json();
-    if(!j.ok){$('#out').innerHTML='<div class="box">'+esc(j.error||'失敗しました')+'</div>';return;}
-    let h='<div class="box"><p class="sum">'+esc(j.date)+'ごろ・'+j.km+'km以内で、'
-      +'案内できる作品 <b>'+j.works+'</b> 件</p>'
-      +'<p>なにを撮る <span class="n">'+j.counts.subjects+'</span> 種類 ／ '
-      +'地域 <span class="n">'+j.counts.areas+'</span> か所 ／ '
-      +'撮影地 <span class="n">'+j.counts.places+'</span> 件</p></div>';
-    h+='<div class="box"><h2>距離でどれだけ変わるか</h2><table><tr><th>以内</th><th>作品</th>'
-      +'<th>なにを撮る</th><th>地域</th><th>撮影地</th></tr>';
-    for(const b of j.bands){
-      h+='<tr><td>'+b.km+'km</td><td>'+b.works+'</td><td>'+b.subjects+'</td>'
-        +'<td>'+b.areas+'</td><td>'+b.places+'</td></tr>';
-    }
-    h+='</table></div>';
-    h+='<div class="box"><h2>なにを撮る（多い順）</h2>'+chips(j.subjects)+'</div>';
-    h+='<div class="box"><h2>地域（多い順・上位40）</h2>'+chips(j.areas,' sm')+'</div>';
-    h+='<div class="box"><h2>撮影地（多い順・上位40）</h2>'+chips(j.places,' sm')+'</div>';
+    const ms=Math.round(performance.now()-t0);
+    if(!j.ok){ $('#out').innerHTML='<div class="box">'+esc(j.error||'失敗')+'</div>'; return; }
+    $('#ms').textContent=ms+' ミリ秒';
+    let h='<div class="box"><p class="sum">'+esc(j.date)+'ごろ・'+j.km+'km以内　'
+      +'作品 <b>'+j.works+'</b> 件 ／ 撮影地 <b>'+j.spots+'</b> か所'
+      +(j.works!==j.base_works?'<span class="ms">（絞る前は '+j.base_works+' 件）</span>':'')
+      +'</p></div>';
+    h+=selectedHtml();
+    h+='<div class="box"><h2>なにを撮る？</h2>'+chipsHtml(j.subjects,'subject')+'</div>';
+    h+='<div class="box"><h2>どのあたり？</h2>'+chipsHtml(j.prefs,'pref','area')+'</div>';
+    if((j.cities||[]).length) h+='<div class="box"><h2>市区町村</h2>'+chipsHtml(j.cities,'city','area')+'</div>';
+    if((j.places||[]).length) h+='<div class="box"><h2>撮影地（'+j.places.length+'）</h2>'
+      +chipsHtml(j.places,'place','area')+'</div>';
+    h+='<div class="box"><h2>候補3件</h2>'+(j.top||[]).map(s=>
+      '<div class="card"><h3>'+esc(s.place||s.area_disp)+'</h3>'
+      +'<p>'+esc(s.area_disp)+'　'+esc((s.subjects||[]).join('・'))+'　作品'+s.works+'件</p>'
+      +'<p>作品「'+esc(s.title)+'」'+esc(s.winner)+'／'+esc(s.award)+'　'+s.dist_km+'km</p></div>'
+    ).join('')+'</div>';
     $('#out').innerHTML=h;
   }catch(e){ $('#out').innerHTML='<div class="box">'+esc(e)+'</div>'; }
   finally{ $('#go').disabled=false; }
-};
-</script></body></html>"""
+}
+$('#go').onclick=()=>{ sel={subject:[],pref:"",city:"",place:""}; load(); };
+$('#out').addEventListener('click',(e)=>{
+  const b=e.target.closest('button[data-k]'); if(!b||b.disabled) return;
+  const k=b.dataset.k, v=b.dataset.v;
+  if(k==='subject'){
+    const i=sel.subject.indexOf(v);
+    if(i>=0) sel.subject.splice(i,1); else sel.subject.push(v);
+  }else{
+    sel[k] = (sel[k]===v) ? "" : v;
+    if(k==='pref'&&!sel.pref){ sel.city=""; }
+    if(k==='pref'){ sel.city=""; sel.place=""; }
+    if(k==='city'){ sel.place=""; }
+  }
+  load();
+});
+</script></body></html>
+"""
 
 
 @app.route("/_facets", methods=["GET"])
