@@ -2703,6 +2703,30 @@ def expand_pref_name(s):
         if s == full or s == short:
             return full
     return s
+def with_external_browser(url, fallback=None):
+    """LINEのトークから開くリンクに、外部ブラウザで開く印を付ける。
+
+    LINEの中でリンクを押すと、アプリの中のブラウザが立ち上がる。そこは
+    Safariとログインの控えを別々に持っているので、Safariでログイン済みの
+    人にも、またメールアドレスから入れ直させてしまう。撮影ノートは保存も
+    共有もログインが要るので、ここで止まると何もできない。
+
+    openExternalBrowser=1 を付けると、LINEは外部のブラウザ（iPhoneなら
+    Safari）で開く。リファレンス側はこの文字を見ていないので、付いていても
+    画面の動きは何も変わらない。
+
+    操作マニュアルのリンクには前から付けてあった。撮影ノートに付け忘れて
+    いたのを、石川さんが「コンシェルジュと行き来している最中にログインを
+    求められた」と気づいて分かった。（2026-10-19）
+    """
+    s = str(url or '').strip()
+    if not s:
+        return fallback
+    if 'openExternalBrowser=1' in s:
+        return s
+    return s + ('&' if '?' in s else '?') + 'openExternalBrowser=1'
+
+
 def safe_uri(u, fallback=None):
     """LINEの uri アクションに渡せる形に整える。
     LINEは未エンコードの空白・非ASCIIを含むURIを400『Invalid action URI』で弾き、
@@ -2777,8 +2801,10 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
         fallback="https://maps.google.com/")
     ref_base = "https://reference.fukei-shashin.co.jp/reference"
     ref_location = place if place else area
-    ref_uri = safe_uri(
-        f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base,
+    ref_uri = with_external_browser(
+        safe_uri(
+            f"{ref_base}?location={quote(ref_location)}" if ref_location else ref_base,
+            fallback=ref_base),
         fallback=ref_base)
 
     # 撮影ノート（リファレンス側 /planner）のURL
@@ -2806,7 +2832,9 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
         if item.get('award'):
             planner_params.append(f"award={quote(item['award'])}")
         planner_uri = f"{planner_base}?{'&'.join(planner_params)}" if planner_params else planner_base
-    planner_uri = safe_uri(planner_uri, fallback=planner_base)
+    planner_uri = with_external_browser(
+        safe_uri(planner_uri, fallback=planner_base),
+        fallback=planner_base)
 
     footer_buttons = [
         {
