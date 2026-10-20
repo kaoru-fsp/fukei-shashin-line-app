@@ -2881,7 +2881,7 @@ def build_carousel_bubble(item, label_emoji, area_note="", matched_kw=None, plan
             "color": "#1DB446",
             "action": {
                 "type": "uri",
-                "label": "📋 撮影ノート",
+                "label": "📋 撮影ノートをつくる",
                 "uri": planner_uri
             }
         }
