@@ -6059,6 +6059,47 @@ def get_place_names():
     return out
 
 
+_PHOTO_PLACE_NAMES = None
+_PHOTO_PLACE_NAMES_AT = 0.0
+
+def get_photo_place_names():
+    """作品データに実在する撮影地名を、照合用の形にそろえて集めたもの。
+
+    get_place_names() は座標の表（PlaceGeo）から作っている。座標を採って
+    いない撮影地の名前はそこに無いので、「撮影地の名前として在る」と認めて
+    もらえず、市区町村の名前として読まれる。すると concierge_search の
+    「6. 地点名として探す」へ落ちる道が塞がれ、地図に聞いた座標のまわりを
+    半径で探すことになって、その撮影地自身が出てこない。
+
+    10月20日の一斉点検（3,902件）で出てこなかった38件のうち32件がこれだった。
+      「余呉湖」      → 市区町村:余呉湖 と読まれ、何も出ない
+      「球磨川」      → 市区町村:球磨川 と読まれ、10km先の五木村ばかり出る
+      「白猪の滝付近」 → 市区町村:白猪の滝付近 と読まれ、何も出ない
+    いずれも作品の Place そのものなので、6. に入りさえすれば
+    search_by_place() の字面照合で必ず当たる。
+
+    被写体の語と同じ名前は入れない。「桜」や「滝」という撮影地名が1件でも
+    あると、こんどは被写体で探す道のほうが塞がれるため。（2026-10-20）"""
+    global _PHOTO_PLACE_NAMES, _PHOTO_PLACE_NAMES_AT
+    now = time.time()
+    if _PHOTO_PLACE_NAMES and (now - _PHOTO_PLACE_NAMES_AT) < _PLACEGEO_TTL:
+        return _PHOTO_PLACE_NAMES
+    ban = set()
+    for _k, _vs in KEYWORD_NORMALIZE.items():
+        ban.add(_spot_name_norm(_k))
+        for _v in _vs or []:
+            ban.add(_spot_name_norm(_v))
+    out = set()
+    for d in get_photos():
+        nm = _spot_name_norm(d.get('Place', '') or '')
+        if len(nm) >= 2 and nm not in ban:
+            out.add(nm)
+    # 空のまま覚え込まない（get_place_names と同じ理由）。
+    if out:
+        _PHOTO_PLACE_NAMES, _PHOTO_PLACE_NAMES_AT = out, now
+    return out
+
+
 def place_latlng(area, place):
     """撮影地そのものの座標。無ければ None（呼び出し側が市区町村へ落とす）。"""
     if not place:
@@ -8170,6 +8211,18 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                 _exact_place = _cand
         except Exception:
             pass              # 表が読めなくても、これまでどおりの振る舞いに落とす
+
+        # 座標の表に無くても、作品データに実在する撮影地名なら、同じく
+        # 撮影地の名前として扱う。座標を採っていないだけで、名前は本物だから。
+        # 10月20日の一斉点検で出てこなかった38件のうち32件が、ここで拾える。
+        # 当たらなかったときだけ試すので、いま通っているものは変わらない。
+        #                                                   （2026-10-20）
+        if not _exact_place:
+            try:
+                if len(_cand) >= 2 and _spot_name_norm(_cand) in get_photo_place_names():
+                    _exact_place = _cand
+            except Exception:
+                pass          # 作品データが読めなくても、これまでどおりに落とす
 
     # ── 1. 地域を読む ──
     area_name, area_latlng, area_display = parse_target_area(t)
