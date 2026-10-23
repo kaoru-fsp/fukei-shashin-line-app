@@ -1204,6 +1204,45 @@ PREF_SAME_NAME_CITY = {
     "宮崎県": "宮崎市", "鹿児島県": "鹿児島市", "沖縄県": "沖縄市",
 }
 
+# ──────────────── 略称が長い地名の一部でないかを見る ────────────────
+# 2026-10-23 「奈良井宿」と送られて「奈良市は複数の地域にあります」と聞き返していた。
+# 奈良井宿は長野県塩尻市の宿場町で、奈良とは関係がない。「奈良市」から「市」を
+# 落とした『奈良』が、字面の中に見つかっていた。
+#
+# 本物の地名を先に伏せる仕掛けは既にあるが（_build_short_mask_names、
+# _build_area_mask_names）、伏せる表に入っているのは全国の市区町村名だけで、
+# 奈良井宿のような宿場町・高原・滝の名前は入っていない。伏せようがないので
+# 素通りしてしまう。誌面に作品が無い地名ほど、この穴に落ちる。
+#
+# そこで字面そのものを見る。略称のうしろに漢字が続いていれば、より長い地名の
+# 一部とみなして採らない。ただし続く漢字が被写体の語（城・滝・桜・紅葉など）の
+# ときは地名ではないので、これまでどおり採る。「大阪城」「京都紅葉」がこれにあたる。
+# かな・空白・記号が続くとき、末尾で終わるときも、これまでどおり採る。
+_SUBJECT_HEADS = set()
+for _k, _vs in KEYWORD_NORMALIZE.items():
+    _SUBJECT_HEADS.add(_k)
+    for _v in (_vs or []):
+        if _v:
+            _SUBJECT_HEADS.add(_v)
+
+def _bare_name_standalone(text, name):
+    """name が、より長い地名の一部ではなく単独の呼び名として現れていれば True。"""
+    t, n = str(text or ''), str(name or '')
+    if not n:
+        return False
+    i = t.find(n)
+    while i >= 0:
+        j = i + len(n)
+        nxt = t[j:j + 1]
+        if not nxt or not ('一' <= nxt <= '鿿'):
+            return True                      # うしろが漢字でない＝単独の呼び名
+        rest = t[j:]
+        if any(rest.startswith(w) for w in _SUBJECT_HEADS):
+            return True                      # うしろは被写体の語（大阪城・京都紅葉）
+        i = t.find(n, j)
+    return False
+
+
 # ──────────────── 県の略称の取り違え防止 ────────────────
 # 「静岡」「京都」のように県・府から末尾の都/府/県を取った呼び方は、同名の市と
 # 県のどちらを指すのか分からない。そこで単独で送られたときだけ、市→県→隣県→全国と
@@ -1246,7 +1285,8 @@ def bare_pref_short(user_message):
         if _n in masked:
             masked = masked.replace(_n, '　')
     for _sh, (_pf, _ct) in _SHORT_PREF_OF.items():
-        if _sh in masked:
+        # 伏せきれない地名（奈良井宿など）に備えて、字面でも見る。（2026-10-23）
+        if _sh in masked and _bare_name_standalone(masked, _sh):
             return _pf, _ct
     return None, None
 
@@ -1279,7 +1319,8 @@ def pref_by_short(text):
     best = None
     for _sh, _pf in _PREF_SHORT_OF.items():
         i = masked.find(_sh)
-        if i >= 0 and (best is None or i < best[0]):
+        # 伏せきれない地名（奈良井宿など）に備えて、字面でも見る。（2026-10-23）
+        if i >= 0 and _bare_name_standalone(masked, _sh) and (best is None or i < best[0]):
             best = (i, _pf)
     return best[1] if best else None
 
@@ -1526,7 +1567,9 @@ def parse_target_area(text):
             return pref, latlng, matched_name
     for city in CITY_TO_PREF_MULTI:
         city_base = re.sub(r'[市区町村郡]', '', city).strip()
-        if city in text or (len(city_base) >= 2 and city_base in text):
+        # 「奈良市」→『奈良』のような呼び名は、ここだけ地名を伏せずに探していた。
+        # 「奈良井宿」の中から拾われていたので、字面で見分ける。（2026-10-23）
+        if city in text or (len(city_base) >= 2 and _bare_name_standalone(text, city_base)):
             return "AMBIGUOUS", None, city
     # 3. 県の略称。市区町村で決まらなかったときだけ見る。
     #    「大阪　夜景」のような書き方を拾うための最後の手当て。
