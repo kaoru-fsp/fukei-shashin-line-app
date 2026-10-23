@@ -9313,6 +9313,44 @@ def _sweep_place_list():
     return out
 
 
+def _sweep_image_gap(area, place, base_date):
+    """その撮影地の、点検で使う旬の窓に入る作品のうち、画像がサーバに無い数を返す。
+
+    2026-10-24 点検で「出てこない」とされたものの多くが、名前の不具合ではなく
+    画像欠けだった。余呉湖は4作品のうち4月の1件だけが窓に入り、それが
+    2022年11-12月号（画像がサーバに無い）なので、窓の中が空になっていた。
+    名前の問題と画像の問題を同じ欄に並べていては、どちらも判定できない。
+
+    戻り値: (窓に入る作品数, そのうち画像が無い数)"""
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    window = half_month_window(base_date or date.today())
+    total = miss = 0
+    for d in get_photos():
+        if (d.get('Place') or '') != place or (d.get('Area') or '') != area:
+            continue
+        if d.get('Winner') in excl_authors:
+            continue
+        if is_area_blocked(place, area, blocked_areas):
+            continue
+        if not has_valid_image(d.get('PicFileName')):
+            continue
+        if str(d.get('Published', '') or '').endswith('N'):
+            continue
+        try:
+            _mo = int(d.get('Month'))
+        except Exception:
+            continue
+        if not (1 <= _mo <= 12) or (_mo, junkun(d.get('Day'))) not in window:
+            continue
+        total += 1
+        if not image_available(view_image_url(d.get('Published'), d.get('PicFileName'))):
+            miss += 1
+    return total, miss
+
+
 @app.route("/api/_place-sweep", methods=["GET"])
 def api_place_sweep():
     """撮影地名で検索して、その撮影地そのものが出てくるかを見る。
@@ -9375,6 +9413,19 @@ def api_place_sweep():
             row.update({"verdict": "warn", "why": "聞き返しになった"})
         else:
             row.update({"verdict": "ok", "why": ""})
+
+        # 出てこなかったものは、名前の問題か画像の問題かを分ける。
+        # 旬の窓に入る作品が全部画像欠けなら、名前は正しくても出ようがない。
+        # （2026-10-24）
+        if row.get("verdict") == "ng":
+            try:
+                _tot, _miss = _sweep_image_gap(area, place, _base)
+                if _tot and _miss >= _tot:
+                    row.update({"verdict": "wait",
+                                "why": "画像待ち（旬の窓の%d件すべて画像なし）" % _tot})
+            except Exception:
+                pass        # 調べられなければ、これまでどおり「出てこない」のまま
+
         rows.append(row)
 
     return jsonify({"ok": True, "total": total, "offset": offset,
@@ -9401,7 +9452,7 @@ _PLACE_SWEEP_HTML = """<!doctype html>
  table{border-collapse:collapse;width:100%;font-size:13px}
  th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
  th{background:#f1f5f9;font-weight:600;white-space:nowrap}
- tr.ng{background:#fef2f2} tr.warn{background:#fffbeb}
+ tr.ng{background:#fef2f2} tr.warn{background:#fffbeb} tr.wait{background:#eff6ff}
  .why{color:#b91c1c;white-space:nowrap} .wy2{color:#b45309;white-space:nowrap}
  .sum b{font-size:17px} .prog{color:#475569;font-size:13px}
  .got{color:#64748b}
@@ -9433,7 +9484,7 @@ $('#go').onclick=async()=>{
   stop=false; $('#go').disabled=true; $('#halt').style.display='';
   $('#t').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
     +'<th>作品</th><th>旬</th><th>どう読まれたか</th><th>出てきたもの</th></tr>';
-  let off=0, ok=0, ng=0, warn=0, total=null;
+  let off=0, ok=0, ng=0, warn=0, wait=0, total=null;
   while(!stop && off<want){
     let j;
     try{
@@ -9446,9 +9497,9 @@ $('#go').onclick=async()=>{
     if(total===null) total=j.total;
     for(const r2 of j.rows){
       if(r2.verdict==='ok'){ok++;continue;}
-      if(r2.verdict==='warn')warn++; else ng++;
-      const cls=r2.verdict==='warn'?'warn':'ng';
-      const wc=r2.verdict==='warn'?'wy2':'why';
+      if(r2.verdict==='warn')warn++; else if(r2.verdict==='wait')wait++; else ng++;
+      const cls=r2.verdict==='warn'?'warn':(r2.verdict==='wait'?'wait':'ng');
+      const wc=r2.verdict==='ng'?'why':'wy2';
       $('#t').insertAdjacentHTML('beforeend','<tr class="'+cls+'">'
         +'<td class="'+wc+'">'+esc(r2.why)+'</td>'
         +'<td><b>'+esc(r2.place)+'</b></td><td>'+esc(r2.area)+'</td>'
@@ -9461,13 +9512,203 @@ $('#go').onclick=async()=>{
     $('#prog').textContent=off+' 件まで調べました（全 '+total+' 件中）';
     $('#sum').innerHTML='<div class="box"><p class="sum">通った <b>'+ok+'</b> ／ '
       +'出てこなかった <b style="color:#b91c1c">'+ng+'</b> ／ '
-      +'聞き返し <b style="color:#b45309">'+warn+'</b></p></div>';
+      +'画像待ち <b style="color:#1d4ed8">'+wait+'</b> ／ '
+      +'聞き返し <b style="color:#b45309">'+warn+'</b></p>'
+      +'<p class="prog">「画像待ち」は、旬の窓に入る作品の画像がすべてサーバに無いもの。'
+      +'名前の不具合ではないので、判定3番の数には入れません。</p></div>';
     if(j.next>=j.total)break;
   }
   $('#go').disabled=false; $('#halt').style.display='none';
   if(stop)$('#prog').textContent+='（止めました）';
 };
 </script></body></html>"""
+
+
+# ──────────────── 審査員・選者の点検（判定5番） ────────────────
+# 除外は excl_authors への「字面の完全一致」で効いている（10か所）。一文字でも
+# 書き方が違えば素通りするので、別表記で載っている審査員がそのまま作者として
+# 出てしまう。野呂希一・米美智子で起きていたのがこれ。
+#
+# 名簿と突き合わせるのではなく、作品データの Judge 列から審査員の実在する氏名を
+# 集めて、同じ人が Winner にも居ないかを見る。こうすると、名簿に載っていない
+# 審査員も見つかる。（2026-10-24）
+#
+# 照合用に、空白・区切りに加えて異体字もそろえる。印刷物では同じ方が号によって
+# 髙／高、﨑／崎で入ることがある。ここは点検なので、やや広めに寄せて、
+# 人の目で確かめられるよう両方の書き方を並べて出す。
+_PERSON_SAME = {
+    '髙': '高', '﨑': '崎', '嵜': '崎', '齋': '斎', '齊': '斉',
+    '邊': '辺', '邉': '辺', '澤': '沢', '瀨': '瀬', '瀧': '滝', '嶋': '島',
+    '眞': '真', '惠': '恵', '德': '徳', '寬': '寛', '彌': '弥', '栁': '柳',
+    '濵': '浜', '濱': '浜', '渕': '淵', '藪': '薮', '籔': '薮', '舘': '館',
+    '條': '条', '萬': '万', '曻': '昇', '內': '内', '靑': '青',
+}
+# 「斉」と「斎」、「富」と「冨」のように、姓として別のものは寄せない。
+# 寄せると人違いを疑うことになり、確かめる手間だけが増える。
+
+def _person_norm(s):
+    """人名を照合用の形にそろえる。空白・区切りを落とし、異体字を寄せる。"""
+    t = unicodedata.normalize("NFKC", str(s or ''))
+    t = re.sub(r'[\s　,、.。・･／/｜|()（）\[\]「」]+', '', t).strip()
+    for a, b in _PERSON_SAME.items():
+        t = t.replace(a, b)
+    return t
+
+
+def _judge_audit():
+    """審査員として載っている方が、作者としても出ていないかを調べる。"""
+    try:
+        excl_authors, _blocked = load_exclusions()
+    except Exception:
+        excl_authors = set()
+    excl_norm = {_person_norm(n) for n in excl_authors if n}
+
+    judges, winners = {}, {}
+    for d in get_photos():
+        j = str(d.get('Judge') or '').strip()
+        if j:
+            nj = _person_norm(j)
+            if len(nj) >= 2:
+                e = judges.setdefault(nj, {"names": set(), "times": 0})
+                e["names"].add(j)
+                e["times"] += 1
+        w = str(d.get('Winner') or '').strip()
+        if w:
+            nw = _person_norm(w)
+            if len(nw) >= 2:
+                e = winners.setdefault(nw, {"names": set(), "count": 0, "works": []})
+                e["names"].add(w)
+                e["count"] += 1
+                if len(e["works"]) < 3:
+                    e["works"].append("%s（%s／%s／%s）" % (
+                        str(d.get('Title') or '無題'),
+                        display_area(d.get('Area') or ''),
+                        str(d.get('AwardRank') or ''),
+                        str(d.get('Published') or '')))
+
+    both, missing = [], []
+    for nj, je in judges.items():
+        in_list = nj in excl_norm
+        we = winners.get(nj)
+        if we:
+            both.append({
+                "judge": "／".join(sorted(je["names"])),
+                "winner": "／".join(sorted(we["names"])),
+                "judge_times": je["times"],
+                "winner_count": we["count"],
+                "in_list": in_list,
+                "works": we["works"],
+            })
+        elif not in_list:
+            missing.append({"judge": "／".join(sorted(je["names"])),
+                            "judge_times": je["times"]})
+    both.sort(key=lambda r: (-r["winner_count"], r["judge"]))
+    missing.sort(key=lambda r: (-r["judge_times"], r["judge"]))
+    return {
+        "judges": len(judges),
+        "excluded": len(excl_authors),
+        "both": both,
+        "missing": missing,
+    }
+
+
+@app.route("/api/_judge-audit", methods=["GET"])
+def api_judge_audit():
+    """審査員・選者が作者としても出ていないかを調べて返す。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        return jsonify({"ok": True, **_judge_audit()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_JUDGE_AUDIT_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>審査員・選者の点検</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} h2{font-size:16px;margin:24px 0 8px}
+ p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer}
+ button:disabled{background:#94a3b8;cursor:default}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
+ th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+ tr.ng{background:#fef2f2} tr.warn{background:#fffbeb}
+ .sum b{font-size:17px} .no{color:#b91c1c;white-space:nowrap} .yes{color:#15803d;white-space:nowrap}
+</style></head><body>
+<h1>審査員・選者の点検</h1>
+<p class="lead">作品データの Judge 列から審査員の氏名を集め、同じ方が作者（Winner）としても出ていないかを見ます。空白と異体字（髙／高、﨑／崎など）はそろえて照合します。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" placeholder="CHECK_KEY" autocomplete="off">
+  <button id="go">点検する</button>
+  <span id="prog" class="prog"></span>
+</div>
+<div class="box sum" id="sum" style="display:none"></div>
+<div id="out"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+$('#go').onclick=async()=>{
+  const k=$('#k').value.trim(); if(!k){alert('CHECK_KEY を入れてください');return;}
+  $('#go').disabled=true; $('#prog').textContent='調べています…';
+  try{
+    const r=await fetch('/api/_judge-audit',{headers:{'X-Check-Key':k}});
+    if(!r.ok){alert('鍵が違うか、点検に失敗しました（'+r.status+'）');return;}
+    const d=await r.json();
+    if(!d.ok){alert('点検に失敗しました：'+(d.error||''));return;}
+    $('#sum').style.display='block';
+    $('#sum').innerHTML='審査員として載っている方 <b>'+d.judges+'</b> 名／除外名簿 <b>'+d.excluded+'</b> 名<br>'
+      +'作者としても出ている <b>'+d.both.length+'</b> 名／名簿に入っていない審査員 <b>'+d.missing.length+'</b> 名';
+    let h='';
+    h+='<h2>作者としても出ている方（'+d.both.length+'名）</h2>';
+    if(!d.both.length){h+='<p>ありません。</p>';}
+    else{
+      h+='<table><tr><th>名簿</th><th>審査員としての書き方</th><th>作者としての書き方</th>'
+        +'<th>審査</th><th>作品</th><th>例</th></tr>';
+      for(const r of d.both){
+        h+='<tr class="'+(r.in_list?'warn':'ng')+'"><td>'+(r.in_list
+            ?'<span class="yes">入っている</span>':'<span class="no">入っていない</span>')
+          +'</td><td>'+esc(r.judge)+'</td><td>'+esc(r.winner)+'</td><td>'+r.judge_times
+          +'</td><td>'+r.winner_count+'</td><td>'+r.works.map(esc).join('<br>')+'</td></tr>';
+      }
+      h+='</table>';
+    }
+    h+='<h2>名簿に入っていない審査員（'+d.missing.length+'名）</h2>';
+    if(!d.missing.length){h+='<p>ありません。</p>';}
+    else{
+      h+='<table><tr><th>審査員</th><th>審査した作品数</th></tr>';
+      for(const r of d.missing){h+='<tr><td>'+esc(r.judge)+'</td><td>'+r.judge_times+'</td></tr>';}
+      h+='</table>';
+    }
+    $('#out').innerHTML=h;
+    $('#prog').textContent='終わりました。';
+  }catch(e){alert('通信に失敗しました：'+e);}
+  finally{$('#go').disabled=false;}
+};
+</script></body></html>"""
+
+
+@app.route("/_judge-audit", methods=["GET"])
+def page_judge_audit():
+    """ブラウザで開く審査員の点検画面。鍵は入力欄で受け取り、ヘッダーに載せて送る。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_JUDGE_AUDIT_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
 
 
 @app.route("/_place-sweep", methods=["GET"])
