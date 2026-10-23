@@ -1225,20 +1225,34 @@ for _k, _vs in KEYWORD_NORMALIZE.items():
         if _v:
             _SUBJECT_HEADS.add(_v)
 
+_NAME_SUFFIX = set("都道府県市区町村郡")   # 「京都府」「岐阜市」は略称＋字
+
 def _bare_name_standalone(text, name):
-    """name が、より長い地名の一部ではなく単独の呼び名として現れていれば True。"""
+    """name が、より長い地名の一部ではなく単独の呼び名として現れていれば True。
+
+    前後を見る。
+      うしろが漢字 → より長い地名の一部とみなす。ただし都道府県市区町村郡の字
+                      （京都府・岐阜市）か、被写体の語（大阪城・京都紅葉）なら採る。
+      まえが漢字   → より長い地名の一部とみなす。「東[京都]」「北[広島]市」
+                      「大阪市[福島]区」がこれにあたる。
+    """
     t, n = str(text or ''), str(name or '')
     if not n:
         return False
     i = t.find(n)
     while i >= 0:
         j = i + len(n)
+        prv = t[i - 1:i] if i > 0 else ''
         nxt = t[j:j + 1]
-        if not nxt or not ('一' <= nxt <= '鿿'):
-            return True                      # うしろが漢字でない＝単独の呼び名
-        rest = t[j:]
-        if any(rest.startswith(w) for w in _SUBJECT_HEADS):
-            return True                      # うしろは被写体の語（大阪城・京都紅葉）
+        head_ok = not (prv and '一' <= prv <= '鿿')
+        if head_ok:
+            if not nxt or not ('一' <= nxt <= '鿿'):
+                return True                  # うしろが漢字でない＝単独の呼び名
+            if nxt in _NAME_SUFFIX:
+                return True                  # 京都府・岐阜市・長野県
+            rest = t[j:]
+            if any(rest.startswith(w) for w in _SUBJECT_HEADS):
+                return True                  # うしろは被写体の語（大阪城・京都紅葉）
         i = t.find(n, j)
     return False
 
@@ -1296,6 +1310,31 @@ def bare_pref_short(user_message):
 _PREF_SHORT_OF = {}
 for _p in PREF_LATLNG:
     _PREF_SHORT_OF["北海道" if _p == "北海道" else re.sub(r'[都府県]$', '', _p)] = _p
+
+
+def _term_hits(field, term):
+    """作品の Place / Area / Title に、探している語が当たっているか。
+
+    ふつうは素の部分一致でよい。「薬師池」は「町田薬師池公園」に当たってほしいし、
+    撮影地名は前後に字が付く書き方のほうが多い。
+
+    ただし県の略称（京都・長野・広島・福島など47語）だけは話が別で、素の部分一致を
+    すると別の県の作品を拾う。
+        「京都」で探すと Areaが「東[京都]国分寺市」「東[京都]町田市」の作品が当たる
+        「長野」で探すと「[長野]原町」（群馬県）が当たる
+        「広島」で探すと「北[広島]市」（北海道）が当たる
+        「福島」で探すと「大阪市[福島]区」が当たる
+    入力を読み取るほうは2026-10-03に直したが、作品を照合するこちら側には同じ手当てが
+    入っていなかった。略称のときだけ、前後の字を見て単独の呼び名かどうかを確かめる。
+    「京都府」「京都市」は採り、「東京都」は採らない。（2026-10-23）"""
+    t = str(term or '')
+    if not t:
+        return False
+    f = str(field or '')
+    if t in _PREF_SHORT_OF:
+        return _bare_name_standalone(f, t)
+    return t in f
+
 
 def _build_area_mask_names():
     names = set(PREF_LATLNG.keys())
@@ -2028,9 +2067,9 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
             # 撮影地名そのものに当たったものを先に出す。（2026-10-17）
             _pl = 0
             if place_terms:
-                if any(t in place for t in place_terms):
+                if any(_term_hits(place, t) for t in place_terms):
                     _pl = 2
-                elif any((t in area or t in title) for t in place_terms):
+                elif any((_term_hits(area, t) or _term_hits(title, t)) for t in place_terms):
                     _pl = 1
                 else:
                     # 字面で当たらなければ、揺れをそろえた形でもう一度見る。
@@ -2043,9 +2082,9 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                                           _spot_name_norm(title)))
                         d['_norm'] = nz
                     _np, _na, _nt = nz.split('\x01')
-                    if any(n in _np for n in place_norms):
+                    if any(_term_hits(_np, n) for n in place_norms):
                         _pl = 2
-                    elif any((n in _na or n in _nt) for n in place_norms):
+                    elif any((_term_hits(_na, n) or _term_hits(_nt, n)) for n in place_norms):
                         _pl = 1
                     else:
                         continue
@@ -8425,9 +8464,12 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                                       "その周り%dkm以内まで広げて探しました%s。"
                                       % (pr['region'], _subj, pr['region_found'], _km, _sfx))
                 else:
-                    out["message"] = ("「%s」という地名の撮影地は見つかりませんでしたが、"
-                                      "その周り%dkm以内で撮影された%sの作品はこちらです%s。"
-                                      % (pr['region'], _km, _subj, _sfx))
+                    # 2026-10-23 「地名の撮影地は見つかりませんでしたが、その周り10km」
+                    # では筋が通らない。見つからなかったのは地名ではなく作品のほうで、
+                    # 場所そのものは地図で引けている。そう書く。
+                    out["message"] = ("「%s」で撮影された%sの作品は見つかりませんでしたので、"
+                                      "その場所から%dkm以内まで広げて探しました%s。"
+                                      % (pr['region'], _subj, _km, _sfx))
             else:
                 out["message"] = ("%sに「%s」で撮影された%sの作品はこちらです%s。"
                                   % (period_phrase(pp), place_disp, _subj, _sfx))
@@ -8563,8 +8605,9 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                                       "その周り%dkm以内まで広げて探しました。"
                                       % (pr['region'], pr['region_found'], _km))
                 else:
-                    out["message"] = ("「%s」という地名の撮影地は見つかりませんでしたが、"
-                                      "その周り%dkm以内で撮影された作品はこちらです。"
+                    # 文言の考え方は上の同じ分かれ道と同じ。（2026-10-23）
+                    out["message"] = ("「%s」で撮影された作品は見つかりませんでしたので、"
+                                      "その場所から%dkm以内まで広げて探しました。"
                                       % (pr['region'], _km))
                 return out
             if pr['status'] == 'in_season':
