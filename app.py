@@ -519,7 +519,11 @@ def load_exclusions():
     try:
         doc = db.collection('settings').document('excluded_authors').get()
         if doc.exists:
-            authors = set(doc.to_dict().get('names', []))
+            # 照合用の形にそろえて持つ。名簿は人が手で書くので、誌面データと
+            # 空白の有無や異体字が揃わない。字面の完全一致で見ていたため、
+            # 「米美知子」で登録した方が誌面に「米 美知子」と入っていると
+            # 素通りし、29件が案内に出ていた。（2026-10-24）
+            authors = {_person_norm(n) for n in doc.to_dict().get('names', []) if n}
     except:
         pass
     try:
@@ -1090,7 +1094,7 @@ def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, li
                 continue
             if not has_valid_image(d.get('PicFileName')):
                 continue
-            if d.get('Winner') in excl_authors:
+            if _person_norm(d.get('Winner')) in excl_authors:
                 continue
             area = d.get('Area', '') or ''
             place = d.get('Place', '') or ''
@@ -1721,7 +1725,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 if dist > radius:
                     continue
 
-            if d.get('Winner') in excl_authors:
+            if _person_norm(d.get('Winner')) in excl_authors:
                 continue
             if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
                 continue
@@ -1796,7 +1800,7 @@ def select_three_points(base_date=None, base_latlng=None, radius=None, place_nam
                 dist = haversine(tokyo[0], tokyo[1], lat, lng)
                 if dist > radius:
                     continue
-                if d.get('Winner') in excl_authors:
+                if _person_norm(d.get('Winner')) in excl_authors:
                     continue
                 if not has_valid_image(d.get('PicFileName')):
                     continue
@@ -2090,7 +2094,7 @@ def search_by_place(place_query, base_date=None, origin_latlng=None, origin_name
                         continue
             if subject_variants and not subject_matches(subject_variants, title=title, place=place, area=area, subject_field=d.get('Subject', ''), exclude=subject_exclude):
                 continue
-            if d.get('Winner') in excl_authors:
+            if _person_norm(d.get('Winner')) in excl_authors:
                 continue
             if is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas):
                 continue
@@ -2311,7 +2315,7 @@ def search_by_person(name_query, origin_latlng=None, origin_name=None):
             listed += 1
             if d.get('Winner'):
                 display = str(d.get('Winner')).strip()
-            if d.get('Winner') in excl_authors:
+            if _person_norm(d.get('Winner')) in excl_authors:
                 continue
             pub = d.get('Published', '')
             if pub and pub.endswith('N'):      # 風景写真祭作品は検索対象外
@@ -2626,7 +2630,7 @@ def subjects_in_peak_near(center_latlng, radius_km, base_date=None):
     for lat, lng, bi, subs, winner, pa, *_rest in get_peak_index():
         if haversine(clat, clng, lat, lng) > radius_km:
             continue
-        if winner and winner in excl_authors:
+        if winner and _person_norm(winner) in excl_authors:
             continue
         if blocked_areas and any(b and b in pa for b in blocked_areas):
             continue
@@ -5077,7 +5081,7 @@ def plan_spots(base_date, subject=None, expand=False):
         lat, lng, bi, subs, winner, pa, hour, weather, area, pref, place = row
         if bi not in want:
             continue
-        if winner and winner in excl_authors:
+        if winner and _person_norm(winner) in excl_authors:
             continue
         if blocked_areas and any(b and b in pa for b in blocked_areas):
             continue
@@ -9224,7 +9228,7 @@ def api_place_audit():
             pub = str(d.get('Published', '') or '')
             pic = d.get('PicFileName', '') or ''
             url = view_image_url(pub, pic)
-            if d.get('Winner') in excl_authors:
+            if _person_norm(d.get('Winner')) in excl_authors:
                 why = "作者を伏せている"
             elif is_area_blocked(place, area, blocked_areas):
                 why = "この地域を伏せている"
@@ -9284,7 +9288,7 @@ def _sweep_place_list():
         if not place:
             continue
         area = d.get('Area', '') or ''
-        if d.get('Winner') in excl_authors:
+        if _person_norm(d.get('Winner')) in excl_authors:
             continue
         if is_area_blocked(place, area, blocked_areas):
             continue
@@ -9331,7 +9335,7 @@ def _sweep_image_gap(area, place, base_date):
     for d in get_photos():
         if (d.get('Place') or '') != place or (d.get('Area') or '') != area:
             continue
-        if d.get('Winner') in excl_authors:
+        if _person_norm(d.get('Winner')) in excl_authors:
             continue
         if is_area_blocked(place, area, blocked_areas):
             continue
@@ -9572,19 +9576,29 @@ def _judge_audit():
                 e = judges.setdefault(nj, {"names": set(), "times": 0})
                 e["names"].add(j)
                 e["times"] += 1
+        # 作者としての数は、検索と同じ条件で数える。風景写真祭（Published末尾N）と
+        # 画像名の無いものは、もともと案内に出ない。これを混ぜると、直す必要のない
+        # ものまで数に入り、話が大きく見えてしまう。（2026-10-24）
+        pub = str(d.get('Published') or '')
+        if pub.endswith('N') or not has_valid_image(d.get('PicFileName')):
+            continue
         w = str(d.get('Winner') or '').strip()
         if w:
             nw = _person_norm(w)
             if len(nw) >= 2:
-                e = winners.setdefault(nw, {"names": set(), "count": 0, "works": []})
+                e = winners.setdefault(nw, {"names": set(), "count": 0,
+                                            "awarded": 0, "works": []})
                 e["names"].add(w)
                 e["count"] += 1
+                rank = str(d.get('AwardRank') or '').strip()
+                if rank:
+                    e["awarded"] += 1
                 if len(e["works"]) < 3:
                     e["works"].append("%s（%s／%s／%s）" % (
                         str(d.get('Title') or '無題'),
                         display_area(d.get('Area') or ''),
-                        str(d.get('AwardRank') or ''),
-                        str(d.get('Published') or '')))
+                        rank or '賞なし',
+                        pub))
 
     both, missing = [], []
     for nj, je in judges.items():
@@ -9596,6 +9610,7 @@ def _judge_audit():
                 "winner": "／".join(sorted(we["names"])),
                 "judge_times": je["times"],
                 "winner_count": we["count"],
+                "awarded": we["awarded"],
                 "in_list": in_list,
                 "works": we["works"],
             })
@@ -9607,6 +9622,7 @@ def _judge_audit():
     return {
         "judges": len(judges),
         "excluded": len(excl_authors),
+        "list_names": sorted(excl_norm),
         "both": both,
         "missing": missing,
     }
@@ -9645,6 +9661,7 @@ _JUDGE_AUDIT_HTML = """<!doctype html>
  th{background:#f1f5f9;font-weight:600;white-space:nowrap}
  tr.ng{background:#fef2f2} tr.warn{background:#fffbeb}
  .sum b{font-size:17px} .no{color:#b91c1c;white-space:nowrap} .yes{color:#15803d;white-space:nowrap}
+ .prog{color:#475569;font-size:13px}
 </style></head><body>
 <h1>審査員・選者の点検</h1>
 <p class="lead">作品データの Judge 列から審査員の氏名を集め、同じ方が作者（Winner）としても出ていないかを見ます。空白と異体字（髙／高、﨑／崎など）はそろえて照合します。</p>
@@ -9669,18 +9686,20 @@ $('#go').onclick=async()=>{
     if(!d.ok){alert('点検に失敗しました：'+(d.error||''));return;}
     $('#sum').style.display='block';
     $('#sum').innerHTML='審査員として載っている方 <b>'+d.judges+'</b> 名／除外名簿 <b>'+d.excluded+'</b> 名<br>'
-      +'作者としても出ている <b>'+d.both.length+'</b> 名／名簿に入っていない審査員 <b>'+d.missing.length+'</b> 名';
+      +'作者としても出ている <b>'+d.both.length+'</b> 名／名簿に入っていない審査員 <b>'+d.missing.length+'</b> 名<br>'
+      +'<span class="prog">名簿の中身：'+(d.list_names||[]).map(esc).join('、')+'</span>';
     let h='';
     h+='<h2>作者としても出ている方（'+d.both.length+'名）</h2>';
     if(!d.both.length){h+='<p>ありません。</p>';}
     else{
       h+='<table><tr><th>名簿</th><th>審査員としての書き方</th><th>作者としての書き方</th>'
-        +'<th>審査</th><th>作品</th><th>例</th></tr>';
+        +'<th>審査</th><th>案内に出うる作品</th><th>うち入賞</th><th>例</th></tr>';
       for(const r of d.both){
         h+='<tr class="'+(r.in_list?'warn':'ng')+'"><td>'+(r.in_list
             ?'<span class="yes">入っている</span>':'<span class="no">入っていない</span>')
           +'</td><td>'+esc(r.judge)+'</td><td>'+esc(r.winner)+'</td><td>'+r.judge_times
-          +'</td><td>'+r.winner_count+'</td><td>'+r.works.map(esc).join('<br>')+'</td></tr>';
+          +'</td><td>'+r.winner_count+'</td><td>'+r.awarded
+          +'</td><td>'+r.works.map(esc).join('<br>')+'</td></tr>';
       }
       h+='</table>';
     }
@@ -9761,7 +9780,7 @@ def _facet_base(lat, lng, km, base_date):
     for d in get_photos():
         place = d.get('Place', '') or ''
         area = d.get('Area', '') or ''
-        if d.get('Winner') in excl_authors:
+        if _person_norm(d.get('Winner')) in excl_authors:
             continue
         if is_area_blocked(place, area, blocked_areas):
             continue
@@ -10143,7 +10162,7 @@ def api_facets():
     for d in get_photos():
         place = d.get('Place', '') or ''
         area = d.get('Area', '') or ''
-        if d.get('Winner') in excl_authors:
+        if _person_norm(d.get('Winner')) in excl_authors:
             continue
         if is_area_blocked(place, area, blocked_areas):
             continue
