@@ -4384,19 +4384,8 @@ def handle_message(event):
                              f"それぞれの撮影地もあわせてご覧ください。")
                     reply_with_carousel(reply_token, _head, _per['results'], base_date=target_date)
                     return
-                if _per['status'] == 'judge':
-                    line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=f"{_per['display']}さんは、本誌フォトコンテストの審査員としてご登場の方です。\n\n"
-                             f"コンシェルジュがご案内しているのは応募作品の撮影地ですので、"
-                             f"審査員やプロの方の作品は対象にしておりません。\n"
-                             f"地名や被写体（滝・桜・紅葉など）でお探しください。"))
-                    return
-                if _per['status'] == 'listed_only':
-                    line_bot_api.reply_message(reply_token, TextSendMessage(
-                        text=f"{_per['display']}さんの作品は本誌に掲載がありますが、"
-                             f"撮影地のご案内の対象にはしておりません。\n"
-                             f"地名や被写体（滝・桜・紅葉など）でお探しください。"))
-                    return
+                # 審査員・掲載のみの方も、理由は言わずに下の「見つかりませんでした」で返す。
+                # 事情を述べると、守れない線引きを説明することになる。（2026-10-24）
                 line_bot_api.reply_message(reply_token, TextSendMessage(
                     text=f"「{place_query}」に合う撮影地は見つかりませんでした。\n地域名(県名・市町村名)や被写体(滝・桜・紅葉・星空など)でもお試しください。"
                          + (("\n\n" + _note) if _note else "")))
@@ -8585,16 +8574,13 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
                     out["spots"] = _conc_pack(_per['results'])
                     out["count"] = len(out["spots"])
                     return out
-                if _per['status'] in ('judge', 'listed_only'):
-                    out["status"] = "info"
-                    if _per['status'] == 'judge':
-                        out["message"] = ("%sさんは本誌フォトコンテストの審査員としてご登場の方です。"
-                                          "ご案内しているのは応募作品の撮影地ですので、審査員やプロの方の作品は対象にしておりません。"
-                                          % _per['display'])
-                    else:
-                        out["message"] = ("%sさんの作品は本誌に掲載がありますが、撮影地のご案内の対象にはしておりません。"
-                                          % _per['display'])
-                    return out
+                # 審査員・掲載のみの方でも、理由は言わずに「見つからなかった」で返す。
+                #
+                # 2026-10-24 以前は「本誌の審査員です。ご案内は応募作品の撮影地に
+                # 限っています」と事情を述べていた。だが審査員にもアマチュア時代の
+                # 入賞作があり、風景写真祭まで入ると、プロとアマの線は引けなくなる。
+                # 守れない線引きを説明してしまうと、そのぶん食い違いが表に出る。
+                # 線引きの話をしないのがいちばん正確。
                 out["status"] = "none"
                 out["message"] = ("「%s」に合う撮影地は見つかりませんでした。"
                                   "地域名（県名・市町村名）や被写体（滝・桜・紅葉・星空など）でもお試しください。" % residual)
