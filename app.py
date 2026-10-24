@@ -9718,6 +9718,172 @@ $('#go').onclick=async()=>{
 </script></body></html>"""
 
 
+# ──────────────── 被写体の点検（判定7番） ────────────────
+# 被写体は Subject 列・作品名だけでなく、撮影地名と市区町村名からも拾っている。
+# 「尾瀬ヶ原」の中の『瀬』ではなく、たとえば「日本海」を含む地名から『海』を
+# 拾うような取り方があり得る。地名から拾ったものだけを並べれば、明らかな誤りは
+# 目で見つけられる。（2026-10-24）
+_SUBJ_PHOTOS = None
+_SUBJ_PHOTOS_AT = 0.0
+
+def _subject_audit_photos():
+    """点検に使う作品。案内に出うるものだけに絞って持っておく。"""
+    global _SUBJ_PHOTOS, _SUBJ_PHOTOS_AT
+    now = time.time()
+    if _SUBJ_PHOTOS and (now - _SUBJ_PHOTOS_AT) < _PLACEGEO_TTL:
+        return _SUBJ_PHOTOS
+    try:
+        excl_authors, blocked_areas = load_exclusions()
+    except Exception:
+        excl_authors, blocked_areas = set(), []
+    out = [d for d in get_photos()
+           if not str(d.get('Published') or '').endswith('N')
+           and has_valid_image(d.get('PicFileName'))
+           and _person_norm(d.get('Winner')) not in excl_authors
+           and not is_area_blocked(d.get('Place'), d.get('Area'), blocked_areas)]
+    if out:
+        _SUBJ_PHOTOS, _SUBJ_PHOTOS_AT = out, now
+    return out
+
+
+def _subject_audit(offset=0, limit=5):
+    """被写体を offset から limit 語ぶんだけ調べて返す。
+
+    154語×約1万件を一息に調べると、返事を返すまでに時間がかかりすぎて
+    途中で切られる。画面から少しずつ呼ぶ。（2026-10-24）"""
+    photos = _subject_audit_photos()
+    canons = list(KEYWORD_NORMALIZE.items())
+    rows = []
+    for canon, variants in canons[offset:offset + limit]:
+        ex = subject_exclude_for(canon)
+        n_all = n_said = 0
+        from_place = []
+        for d in photos:
+            subj = str(d.get('Subject') or '')
+            title = str(d.get('Title') or '')
+            place = str(d.get('Place') or '')
+            area = str(d.get('Area') or '')
+            hit_said = subject_matches(variants, title=title, subject_field=subj, exclude=ex)
+            hit_all = subject_matches(variants, title=title, place=place, area=area,
+                                      subject_field=subj, exclude=ex)
+            if not hit_all:
+                continue
+            n_all += 1
+            if hit_said:
+                n_said += 1
+            elif len(from_place) < 5:
+                from_place.append("%s（%s）／%s／被写体欄：%s" % (
+                    place or '（撮影地名なし）', display_area(area) or '—',
+                    title or '無題', subj or '（空）'))
+        if n_all:
+            rows.append({"subject": canon, "all": n_all, "said": n_said,
+                         "from_place": n_all - n_said, "examples": from_place})
+    return {"total": len(canons), "offset": offset,
+            "next": min(offset + limit, len(canons)),
+            "works": len(photos), "rows": rows}
+
+
+@app.route("/api/_subject-audit", methods=["GET"])
+def api_subject_audit():
+    """被写体ごとに、地名から拾ったものがどれだけあるかを返す。"""
+    if not _check_key_ok():
+        abort(404)
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+        limit = min(10, max(1, int(request.args.get("limit", 5))))
+    except ValueError:
+        return jsonify({"ok": False, "error": "offset か limit が数ではありません"}), 400
+    try:
+        return jsonify({"ok": True, **_subject_audit(offset, limit)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_SUBJECT_AUDIT_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>被写体の一斉点検</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer}
+ button:disabled{background:#94a3b8;cursor:default}
+ table{border-collapse:collapse;width:100%;font-size:13px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
+ th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+ tr.warn{background:#fffbeb}
+ .sum b{font-size:17px} .prog{color:#475569;font-size:13px} .got{color:#64748b}
+</style></head><body>
+<h1>被写体の一斉点検</h1>
+<p class="lead">被写体は、被写体欄と作品名のほか、撮影地名・市区町村名からも拾っています。地名から拾ったものだけを並べますので、明らかな誤り（内陸の撮影地に「海」が付くなど）がないかを見てください。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" placeholder="CHECK_KEY" autocomplete="off">
+  <button id="go">点検する</button>
+  <span id="prog" class="prog"></span>
+</div>
+<div class="box sum" id="sum" style="display:none"></div>
+<table id="t"></table>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+$('#go').onclick=async()=>{
+  const k=$('#k').value.trim(); if(!k){alert('CHECK_KEY を入れてください');return;}
+  $('#go').disabled=true;
+  $('#t').innerHTML='<tr><th>被写体</th><th>当たる作品</th><th>被写体欄・作品名から</th>'
+    +'<th>地名から</th><th>地名から拾った例（最大5件）</th></tr>';
+  $('#sum').style.display='block';
+  let off=0, total=null, works=0, warned=0, all=[];
+  while(true){
+    let d;
+    try{
+      const r=await fetch('/api/_subject-audit?offset='+off+'&limit=5',
+                          {headers:{'X-Check-Key':k}});
+      if(!r.ok){$('#prog').textContent='返ってきませんでした（'+r.status+'）。鍵を確かめてください。';break;}
+      d=await r.json();
+      if(!d.ok){$('#prog').textContent=d.error||'失敗しました';break;}
+    }catch(e){ $('#prog').textContent=String(e); break; }
+    if(total===null){total=d.total; works=d.works;}
+    for(const r2 of d.rows){
+      all.push(r2);
+      if(r2.from_place)warned++;
+      $('#t').insertAdjacentHTML('beforeend','<tr class="'+(r2.from_place?'warn':'')+'">'
+        +'<td><b>'+esc(r2.subject)+'</b></td><td>'+r2.all+'</td><td>'+r2.said+'</td>'
+        +'<td>'+r2.from_place+'</td>'
+        +'<td class="got">'+r2.examples.map(esc).join('<br>')+'</td></tr>');
+    }
+    off=d.next;
+    $('#prog').textContent=off+' 語まで調べました（全 '+total+' 語中）';
+    $('#sum').innerHTML='被写体 <b>'+total+'</b> 語／案内に出うる作品 <b>'+works+'</b> 件／'
+      +'地名から拾っている語 <b>'+warned+'</b>'
+      +'<p class="prog">「地名から」が多い語ほど、取り違えが混じりやすいところです。'
+      +'例を見て、明らかにおかしいものがあれば教えてください。</p>';
+    if(off>=total)break;
+  }
+  $('#go').disabled=false;
+};
+</script></body></html>"""
+
+
+@app.route("/_subject-audit", methods=["GET"])
+def page_subject_audit():
+    """ブラウザで開く被写体の点検画面。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_SUBJECT_AUDIT_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
+
+
 @app.route("/_judge-audit", methods=["GET"])
 def page_judge_audit():
     """ブラウザで開く審査員の点検画面。鍵は入力欄で受け取り、ヘッダーに載せて送る。"""
