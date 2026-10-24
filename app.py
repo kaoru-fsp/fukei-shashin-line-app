@@ -4359,7 +4359,9 @@ def handle_message(event):
             for w in FILLER_WORDS:
                 residual = residual.replace(w, '')
             residual = re.sub(r'[、,。.・/／｜|\s　]+', '', residual).strip()
-            if len(residual) >= 2:
+            # 一文字でも、実在する撮影地名なら通す。Web側と同じ。（2026-10-24）
+            if len(residual) >= 2 or (
+                    residual and _spot_name_norm(residual) in get_short_place_names()):
                 place_query = residual
         # 距離の起点: 現在地(あれば市区町村名つき) / なければ新宿区。検索中心とは独立。
         _uloc = USER_LOCATION.get(user_id)
@@ -6137,6 +6139,40 @@ def get_place_names():
     # 「華厳滝」がまた割れはじめる。読めるまで、毎回やり直す。（2026-10-16）
     if out:
         _PLACE_NAMES, _PLACE_NAMES_AT = out, now
+    return out
+
+
+_SHORT_PLACE_NAMES = None
+_SHORT_PLACE_NAMES_AT = 0.0
+
+def get_short_place_names():
+    """一文字の撮影地名。作品データと座標表の両方から集める。
+
+    一文字の語は撮影地名として探す道に入れていない。当たりすぎるからで、
+    その判断自体は正しい。ただし「雷」（奈良県明日香村）のように、本当に
+    一文字の撮影地が誌面にある。実在する名前だと分かっていれば通してよい。
+    全件点検で最後に1件だけ残ったのがこれだった。（2026-10-24）"""
+    global _SHORT_PLACE_NAMES, _SHORT_PLACE_NAMES_AT
+    now = time.time()
+    if _SHORT_PLACE_NAMES and (now - _SHORT_PLACE_NAMES_AT) < _PLACEGEO_TTL:
+        return _SHORT_PLACE_NAMES
+    out = set()
+    try:
+        for d in get_photos():
+            nm = _spot_name_norm(d.get('Place', '') or '')
+            if len(nm) == 1:
+                out.add(nm)
+    except Exception:
+        pass
+    try:
+        for _area, _place in get_placegeo().keys():
+            nm = _spot_name_norm(_place or '')
+            if len(nm) == 1:
+                out.add(nm)
+    except Exception:
+        pass
+    if out:
+        _SHORT_PLACE_NAMES, _SHORT_PLACE_NAMES_AT = out, now
     return out
 
 
@@ -8556,7 +8592,9 @@ def concierge_search(text, origin_latlng=None, origin_name=None, base_date=None,
         for w in FILLER_WORDS:
             residual = residual.replace(w, '')
         residual = re.sub(r'[、,。.・/／｜|\s　]+', '', residual).strip()
-        if len(residual) >= 2:
+        # 一文字でも、実在する撮影地名なら通す。「雷」がこれ。（2026-10-24）
+        if len(residual) >= 2 or (
+                residual and _spot_name_norm(residual) in get_short_place_names()):
             _read(None, residual, None, None, None)
             pr = search_by_place(residual, base_date=target_date,
                                  origin_latlng=ol, origin_name=on,
@@ -9862,6 +9900,391 @@ $('#go').onclick=async()=>{
   $('#go').disabled=false;
 };
 </script></body></html>"""
+
+
+# ──────────────── 取り込み点検（判定8番） ────────────────
+# 新しいデータを入れたら、まずここを通す。撮影地・審査員・被写体の点検は
+# それぞれ全件向けの画面があるが、号を1つ入れるたびに全件を回すわけにいかない。
+# 号（コンテスト）または年（風景写真祭）を選び、その範囲だけを調べる。
+#
+# 風景写真祭の作品は検索の対象外なので、点検も減らす。「探して出てくるか」も
+# 「被写体の拾い方」も、出ないものには意味がない。（2026-10-24）
+_JUDGE_NORMS = None
+_JUDGE_NORMS_AT = 0.0
+
+def _judge_norms():
+    """審査員として載っている方の氏名を、照合用の形で集めたもの。"""
+    global _JUDGE_NORMS, _JUDGE_NORMS_AT
+    now = time.time()
+    if _JUDGE_NORMS and (now - _JUDGE_NORMS_AT) < _PLACEGEO_TTL:
+        return _JUDGE_NORMS
+    out = {}
+    for d in get_photos():
+        j = str(d.get('Judge') or '').strip()
+        if not j:
+            continue
+        nj = _person_norm(j)
+        if len(nj) >= 2:
+            out.setdefault(nj, j)
+    if out:
+        _JUDGE_NORMS, _JUDGE_NORMS_AT = out, now
+    return out
+
+
+# UTF-8で書かれた日本語をCP932として読むと現れる字。ふつうの地名・人名には
+# まず出てこないものを選んである。審査員の列で20件ほど見つかった。（2026-10-24）
+_MOJIBAKE_HINT = set(
+    "縺繧繝荳蜀蜈蜑蜷蝟蝓螟蟄蟶蠖蠑譁譌譎譚譏讒豎莠菴蜿遖遏遒邀鄒關隕驛驤驥"
+    "髫髮鬮魘縲晏榊伜閭蛹蠎蜻蟆蟇蟾螻譛邇遨郛鄙蝣蝪蝗蝨蝪")
+
+def _looks_mojibake(s):
+    """文字化けして入っていないか。
+
+    末尾が欠けて「�」になっているものが多く、元の字には戻せない。
+    戻すのはあきらめて、化けた字に特有の並びがあるかどうかだけを見る。"""
+    t = str(s or '')
+    if not t:
+        return False
+    n = sum(1 for c in t if c in _MOJIBAKE_HINT)
+    return n >= 2 or (n >= 1 and '�' in t)
+
+
+def _tricky_text(place, area, winner, title):
+    """これまで取り違えの元になってきた字面を拾う。（2026-10-24）"""
+    notes = []
+    whole = '%s %s' % (place, area)
+
+    # 1. 県の略称を字面に含む（しかも実際は別の県）。
+    #    「東京都板橋区」の中の『京都』、「長野原町」の中の『長野』。
+    try:
+        here = extract_pref(area) or ''
+    except Exception:
+        here = ''
+    for _sh, _pf in _PREF_SHORT_OF.items():
+        if _sh in whole and _pf != here:
+            notes.append('『%s』を字面に含む（実際は%s）' % (_sh, here or '県名なし'))
+            break
+
+    # 2. 異体字。号によって書き分かれると名寄せで割れる。
+    _old = [c for c in whole + winner if c in _PERSON_SAME]
+    if _old:
+        notes.append('異体字：%s' % '・'.join(sorted(set(_old))))
+
+    # 3. 文字化け。
+    for _label, _v in (('撮影地', place), ('市区町村', area),
+                       ('作者', winner), ('作品名', title)):
+        if _looks_mojibake(_v):
+            notes.append('%sが文字化けしている疑い' % _label)
+
+    # 4. 余分な空白・全角英数字・半角カナ。
+    for _label, _v in (('撮影地', place), ('市区町村', area), ('作者', winner)):
+        if not _v:
+            continue
+        if _v != _v.strip() or '  ' in _v or '　　' in _v:
+            notes.append('%sに余分な空白' % _label)
+        if re.search(r'[Ａ-Ｚａ-ｚ０-９]', _v):
+            notes.append('%sに全角の英数字' % _label)
+        if re.search(r'[｡-ﾟ]', _v):
+            notes.append('%sに半角カナ' % _label)
+    return notes
+
+
+def _import_units():
+    """選べる単位。号（コンテスト）と年（風景写真祭）を、新しい順に。"""
+    cnt = Counter()
+    for d in get_photos():
+        cnt[str(d.get('Published') or '').strip() or '（掲載号が空）'] += 1
+    issues, fests = [], []
+    for pub, n in cnt.items():
+        (fests if pub.endswith('N') else issues).append({"pub": pub, "works": n})
+    issues.sort(key=lambda r: r["pub"], reverse=True)
+    fests.sort(key=lambda r: r["pub"], reverse=True)
+    return issues, fests
+
+
+def _import_check_works(pub, offset, limit):
+    """その号（年）の作品を1件ずつ見る。画像・欠け・審査員・座標・被写体。"""
+    photos = [d for d in get_photos()
+              if (str(d.get('Published') or '').strip() or '（掲載号が空）') == pub]
+    is_fest = pub.endswith('N')
+    geo = get_placegeo()
+    judges = _judge_norms()
+    page = photos[offset:offset + limit]
+
+    # 画像の確認は1件ずつ投げると、20件で最悪50秒かかる。まとめて並べて投げる。
+    img_ok = {}
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        _urls = [view_image_url(d.get('Published'), str(d.get('PicFileName') or '').strip())
+                 for d in page if has_valid_image(d.get('PicFileName'))]
+        if _urls:
+            with ThreadPoolExecutor(max_workers=min(8, len(_urls))) as ex:
+                img_ok = dict(zip(_urls, ex.map(image_available, _urls)))
+    except Exception:
+        img_ok = {}
+
+    rows = []
+    for d in page:
+        place = str(d.get('Place') or '').strip()
+        area = str(d.get('Area') or '').strip()
+        pic = str(d.get('PicFileName') or '').strip()
+        winner = str(d.get('Winner') or '').strip()
+        title = str(d.get('Title') or '').strip()
+        mon, day = str(d.get('Month') or '').strip(), str(d.get('Day') or '').strip()
+        bad, warn = [], []
+
+        # 1. 欠け。撮影地名だけは、無くても誌面にそういう作品があるので注意どまり。
+        for label, v in (('市区町村', area), ('月', mon), ('日', day),
+                         ('画像名', pic), ('作者', winner)):
+            if not v:
+                bad.append('%sが空' % label)
+        if not place:
+            warn.append('撮影地名が空')
+
+        # 2. 画像
+        if not pic:
+            pass                                  # 欠けで言っている
+        elif not has_valid_image(pic):
+            warn.append('画像名が「%s」' % pic)    # 「無し.jpg」の類
+        elif img_ok.get(view_image_url(d.get('Published'), pic), True) is False:
+            bad.append('画像がサーバにない')
+
+        # 3. 審査員が作者として入っていないか
+        nw = _person_norm(winner)
+        if nw and nw in judges:
+            warn.append('作者「%s」は審査員として載っている方' % (judges[nw] or winner))
+
+        # 4. 座標
+        if place and (area, place) not in geo:
+            warn.append('座標表（PlaceGeo）に無い')
+
+        # 5. 被写体を地名の字面だけから拾っているもの
+        if not is_fest:
+            subj = str(d.get('Subject') or '')
+            picked = []
+            for canon, variants in KEYWORD_NORMALIZE.items():
+                ex = subject_exclude_for(canon)
+                if subject_matches(variants, title=title, subject_field=subj, exclude=ex):
+                    continue
+                if subject_matches(variants, title=title, place=place, area=area,
+                                   subject_field=subj, exclude=ex):
+                    picked.append(canon)
+            if picked:
+                warn.append('地名から拾う被写体：%s' % '・'.join(picked))
+
+        # 6. これまで取り違えの元になってきた字面
+        warn.extend(_tricky_text(place, area, winner, title))
+
+        rows.append({
+            "place": place, "area": display_area(area), "title": title,
+            "winner": winner, "pic": pic,
+            "verdict": "ng" if bad else ("warn" if warn else "ok"),
+            "why": "／".join(bad + warn),
+        })
+    return {"total": len(photos), "offset": offset,
+            "next": min(offset + limit, len(photos)), "rows": rows}
+
+
+def _import_check_places(pub, offset, limit):
+    """その号の撮影地を、その名前で探して自分が出てくるかを見る。"""
+    if pub.endswith('N'):
+        return {"total": 0, "offset": 0, "next": 0, "rows": []}
+    seen, names = set(), []
+    for d in get_photos():
+        if (str(d.get('Published') or '').strip() or '（掲載号が空）') != pub:
+            continue
+        place = str(d.get('Place') or '').strip()
+        if not place or not has_valid_image(d.get('PicFileName')):
+            continue
+        area = str(d.get('Area') or '').strip()
+        if (area, place) in seen:
+            continue
+        seen.add((area, place))
+        try:
+            _mo = int(d.get('Month'))
+        except Exception:
+            _mo = 0
+        names.append({"area": area, "place": place, "month": _mo})
+    rows = []
+    for item in names[offset:offset + limit]:
+        place, area = item["place"], item["area"]
+        _mo = item["month"]
+        base = date(date.today().year, _mo, 15) if 1 <= _mo <= 12 else None
+        row = {"place": place, "area": display_area(area),
+               "month": ("%d月ごろ" % _mo) if _mo else ""}
+        try:
+            res = concierge_search(place, base_date=base)
+        except Exception as e:
+            row.update({"verdict": "ng", "why": "検索が落ちた（%s）" % e, "got": []})
+            rows.append(row)
+            continue
+        spots = res.get("spots") or []
+        got = [str(s.get("place") or s.get("area_disp") or "") for s in spots]
+        want = _spot_name_norm(place)
+        row["got"] = got[:5]
+        if any(want and want in _spot_name_norm(g) for g in got):
+            row.update({"verdict": "ok", "why": ""})
+        elif res.get("region"):
+            row.update({"verdict": "ng", "why": "周りへ逸れた（%skm）"
+                        % res.get("region_radius_km", "")})
+        elif not spots:
+            row.update({"verdict": "ng", "why": "見つからない"})
+        else:
+            row.update({"verdict": "ng", "why": "別の撮影地が出た"})
+        rows.append(row)
+    return {"total": len(names), "offset": offset,
+            "next": min(offset + limit, len(names)), "rows": rows}
+
+
+@app.route("/api/_import-check", methods=["GET"])
+def api_import_check():
+    """取り込み点検。kind=units|works|places。"""
+    if not _check_key_ok():
+        abort(404)
+    kind = request.args.get("kind", "units")
+    try:
+        if kind == "units":
+            issues, fests = _import_units()
+            return jsonify({"ok": True, "issues": issues, "fests": fests})
+        pub = str(request.args.get("pub", "")).strip()
+        if not pub:
+            return jsonify({"ok": False, "error": "号（年）が指定されていません"}), 400
+        offset = max(0, int(request.args.get("offset", 0)))
+        if kind == "works":
+            limit = min(50, max(1, int(request.args.get("limit", 20))))
+            return jsonify({"ok": True, **_import_check_works(pub, offset, limit)})
+        if kind == "places":
+            limit = min(20, max(1, int(request.args.get("limit", 5))))
+            return jsonify({"ok": True, **_import_check_places(pub, offset, limit)})
+        return jsonify({"ok": False, "error": "kind が不正です"}), 400
+    except ValueError:
+        return jsonify({"ok": False, "error": "offset か limit が数ではありません"}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+_IMPORT_CHECK_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>取り込み点検</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} h2{font-size:16px;margin:24px 0 8px}
+ p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input,select{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px;background:#fff}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer;margin-right:8px}
+ button:disabled{background:#94a3b8;cursor:default}
+ table{border-collapse:collapse;width:100%;font-size:13px;margin-bottom:8px}
+ th,td{border-bottom:1px solid #e2e8f0;padding:6px 8px;text-align:left;vertical-align:top}
+ th{background:#f1f5f9;font-weight:600;white-space:nowrap}
+ tr.ng{background:#fef2f2} tr.warn{background:#fffbeb}
+ .why{color:#b91c1c} .wy2{color:#b45309} .got{color:#64748b}
+ .sum b{font-size:17px} .prog{color:#475569;font-size:13px}
+</style></head><body>
+<h1>取り込み点検</h1>
+<p class="lead">新しく入れた号（コンテスト）または年（風景写真祭）を選んで、まとめて点検します。風景写真祭は検索の対象外なので、画像・欠け・座標だけを見ます。</p>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" placeholder="CHECK_KEY" autocomplete="off">
+  <button id="load">号の一覧を出す</button>
+  <div id="pick" style="display:none;margin-top:12px">
+    <label>点検する号・年</label>
+    <select id="pub"></select>
+    <button id="go">点検する</button>
+    <span id="prog" class="prog"></span>
+  </div>
+</div>
+<div class="box sum" id="sum" style="display:none"></div>
+<h2 id="h1x" style="display:none">作品ごとの点検</h2>
+<table id="tw"></table>
+<h2 id="h2x" style="display:none">撮影地ごとの点検（その名前で探して出てくるか）</h2>
+<table id="tp"></table>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let KEY='';
+$('#load').onclick=async()=>{
+  KEY=$('#k').value.trim(); if(!KEY){alert('CHECK_KEY を入れてください');return;}
+  const r=await fetch('/api/_import-check?kind=units',{headers:{'X-Check-Key':KEY}});
+  if(!r.ok){alert('鍵が違うようです（'+r.status+'）');return;}
+  const d=await r.json(); if(!d.ok){alert(d.error||'失敗しました');return;}
+  let o='';
+  o+='<optgroup label="号（コンテスト）">';
+  for(const x of d.issues)o+='<option value="'+esc(x.pub)+'">'+esc(x.pub)+'（'+x.works+'件）</option>';
+  o+='</optgroup><optgroup label="年（風景写真祭）">';
+  for(const x of d.fests)o+='<option value="'+esc(x.pub)+'">'+esc(x.pub)+'（'+x.works+'件）</option>';
+  o+='</optgroup>';
+  $('#pub').innerHTML=o; $('#pick').style.display='';
+};
+$('#go').onclick=async()=>{
+  const pub=$('#pub').value; if(!pub)return;
+  $('#go').disabled=true; $('#sum').style.display='block';
+  $('#h1x').style.display=''; $('#h2x').style.display='';
+  $('#tw').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
+    +'<th>作品名</th><th>作者</th></tr>';
+  $('#tp').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
+    +'<th>旬</th><th>出てきたもの</th></tr>';
+  let wOk=0,wNg=0,wWarn=0,pOk=0,pNg=0;
+  const draw=()=>{$('#sum').innerHTML='作品：通った <b>'+wOk+'</b> ／ 誤り <b style="color:#b91c1c">'
+    +wNg+'</b> ／ 注意 <b style="color:#b45309">'+wWarn+'</b><br>撮影地：通った <b>'+pOk
+    +'</b> ／ 出てこない <b style="color:#b91c1c">'+pNg+'</b>';};
+  for(let off=0;;){
+    const r=await fetch('/api/_import-check?kind=works&pub='+encodeURIComponent(pub)
+      +'&offset='+off+'&limit=20',{headers:{'X-Check-Key':KEY}});
+    if(!r.ok){$('#prog').textContent='失敗しました（'+r.status+'）';break;}
+    const d=await r.json(); if(!d.ok){$('#prog').textContent=d.error;break;}
+    for(const x of d.rows){
+      if(x.verdict==='ok'){wOk++;continue;}
+      if(x.verdict==='warn')wWarn++; else wNg++;
+      $('#tw').insertAdjacentHTML('beforeend','<tr class="'+x.verdict+'">'
+        +'<td class="'+(x.verdict==='ng'?'why':'wy2')+'">'+esc(x.why)+'</td>'
+        +'<td>'+esc(x.place||'—')+'</td><td>'+esc(x.area)+'</td>'
+        +'<td>'+esc(x.title)+'</td><td>'+esc(x.winner)+'</td></tr>');
+    }
+    off=d.next; draw();
+    $('#prog').textContent='作品 '+off+'／'+d.total+' 件';
+    if(off>=d.total)break;
+  }
+  for(let off=0;;){
+    const r=await fetch('/api/_import-check?kind=places&pub='+encodeURIComponent(pub)
+      +'&offset='+off+'&limit=5',{headers:{'X-Check-Key':KEY}});
+    if(!r.ok){$('#prog').textContent='失敗しました（'+r.status+'）';break;}
+    const d=await r.json(); if(!d.ok){$('#prog').textContent=d.error;break;}
+    if(!d.total){$('#h2x').style.display='none';break;}
+    for(const x of d.rows){
+      if(x.verdict==='ok'){pOk++;continue;}
+      pNg++;
+      $('#tp').insertAdjacentHTML('beforeend','<tr class="ng">'
+        +'<td class="why">'+esc(x.why)+'</td><td><b>'+esc(x.place)+'</b></td>'
+        +'<td>'+esc(x.area)+'</td><td class="got">'+esc(x.month)+'</td>'
+        +'<td class="got">'+esc((x.got||[]).join('／'))+'</td></tr>');
+    }
+    off=d.next; draw();
+    $('#prog').textContent='撮影地 '+off+'／'+d.total+' か所';
+    if(off>=d.total)break;
+  }
+  $('#prog').textContent+='　終わりました。';
+  $('#go').disabled=false;
+};
+</script></body></html>"""
+
+
+@app.route("/_import-check", methods=["GET"])
+def page_import_check():
+    """ブラウザで開く取り込み点検の画面。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_IMPORT_CHECK_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
 
 
 @app.route("/_subject-audit", methods=["GET"])
