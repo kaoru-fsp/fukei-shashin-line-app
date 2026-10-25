@@ -10037,9 +10037,11 @@ def _import_check_works(pub, offset, limit):
         for label, v in (('市区町村', area), ('月', mon), ('日', day),
                          ('画像名', pic), ('作者', winner)):
             if not v:
-                bad.append('%sが空' % label)
-        if not place:
-            warn.append('撮影地名が空')
+                bad.append('%sが未入力' % label)
+        # 「空」は空（ソラ）とも読めるので「未入力」と書く。（2026-10-24）
+        # 撮影地名の無い作品は誌面にあるものなので、これだけのときは表に出さず、
+        # 集計で件数だけ数える。20行並ぶと、ほかの注意が埋もれる。
+        no_place = not place
 
         # 2. 画像
         if not pic:
@@ -10075,9 +10077,11 @@ def _import_check_works(pub, offset, limit):
         # 6. これまで取り違えの元になってきた字面
         warn.extend(_tricky_text(place, area, winner, title))
 
+        if no_place and (bad or warn):
+            warn.insert(0, '撮影地名が未入力')
         rows.append({
             "place": place, "area": display_area(area), "title": title,
-            "winner": winner, "pic": pic,
+            "winner": winner, "pic": pic, "no_place": no_place,
             "verdict": "ng" if bad else ("warn" if warn else "ok"),
             "why": "／".join(bad + warn),
         })
@@ -10230,16 +10234,19 @@ $('#go').onclick=async()=>{
     +'<th>作品名</th><th>作者</th></tr>';
   $('#tp').innerHTML='<tr><th>どうなったか</th><th>撮影地</th><th>市区町村</th>'
     +'<th>旬</th><th>出てきたもの</th></tr>';
-  let wOk=0,wNg=0,wWarn=0,pOk=0,pNg=0;
+  let wOk=0,wNg=0,wWarn=0,wNoPlace=0,pOk=0,pNg=0;
   const draw=()=>{$('#sum').innerHTML='作品：通った <b>'+wOk+'</b> ／ 誤り <b style="color:#b91c1c">'
     +wNg+'</b> ／ 注意 <b style="color:#b45309">'+wWarn+'</b><br>撮影地：通った <b>'+pOk
-    +'</b> ／ 出てこない <b style="color:#b91c1c">'+pNg+'</b>';};
+    +'</b> ／ 出てこない <b style="color:#b91c1c">'+pNg+'</b>'
+    +'<p class="prog">撮影地名が未入力の作品 '+wNoPlace+' 件（誌面にそういう作品はあるので、'
+    +'ほかに注意が無ければ表には出しません）</p>';};
   for(let off=0;;){
     const r=await fetch('/api/_import-check?kind=works&pub='+encodeURIComponent(pub)
       +'&offset='+off+'&limit=20',{headers:{'X-Check-Key':KEY}});
     if(!r.ok){$('#prog').textContent='失敗しました（'+r.status+'）';break;}
     const d=await r.json(); if(!d.ok){$('#prog').textContent=d.error;break;}
     for(const x of d.rows){
+      if(x.no_place)wNoPlace++;
       if(x.verdict==='ok'){wOk++;continue;}
       if(x.verdict==='warn')wWarn++; else wNg++;
       $('#tw').insertAdjacentHTML('beforeend','<tr class="'+x.verdict+'">'
