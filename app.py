@@ -3415,6 +3415,65 @@ def handle_location(event):
         event.reply_token,
         TextSendMessage(text=f"{where}を登録しました。この場所を起点に撮影地をご提案します。\n撮影したい日程や地域があればお知らせください。")
     )
+# ──────────────── LINEとアカウントの結びつけ ────────────────
+# Webの撮影ノートで出した6桁の数字を、ここへ送ってもらって結びつける。
+# 撮り頃の知らせを「誰に送るか」を決めるために要る。記録を送ってダイアリーに
+# するとき（判定10番）も、同じ結びつきを使う。（2026-10-28）
+_LINK_CODES_COL = 'LineLinkCodes'
+_LINE_ACCOUNTS_COL = 'LineAccounts'
+
+def link_line_account(code, line_user_id):
+    """6桁の数字で結びつける。戻り値は (結びついたか, 返す言葉)。"""
+    if not db:
+        return False, None
+    try:
+        ref = db.collection(_LINK_CODES_COL).document(str(code))
+        snap = ref.get()
+        if not snap.exists:
+            return False, ("その番号は見つかりませんでした。\n"
+                           "撮影ノートの画面で番号を出し直して、10分以内に送ってください。")
+        d = snap.to_dict() or {}
+        uid = str(d.get('uid') or '')
+        try:
+            exp = int(d.get('expiresAt') or 0)
+        except (TypeError, ValueError):
+            exp = 0
+        if not uid:
+            ref.delete()
+            return False, "その番号は使えませんでした。出し直してください。"
+        if exp and time.time() > exp:
+            ref.delete()
+            return False, ("その番号は期限が切れています。\n"
+                           "撮影ノートの画面で出し直して、10分以内に送ってください。")
+        # 結びつける。どちらからも引けるように、両方へ書く。
+        db.collection(_LINE_ACCOUNTS_COL).document(str(line_user_id)).set({
+            'uid': uid,
+            'linked_at': firestore.SERVER_TIMESTAMP,
+        })
+        db.collection('Users').document(uid).set({
+            'lineUserId': str(line_user_id),
+        }, merge=True)
+        ref.delete()        # 使った番号は残さない
+        return True, ("結びつけました。\n"
+                      "保存した撮影ノートの撮り頃が近づいたら、ここでお知らせします。")
+    except Exception as e:
+        print(f"[WARN] link_line_account failed: {e}", flush=True)
+        return False, "結びつけに失敗しました。少し時間をおいてからお試しください。"
+
+
+def uid_of_line_user(line_user_id):
+    """LINEの利用者から、結びついているGoogleアカウントのIDを引く。無ければ空。"""
+    if not db or not line_user_id:
+        return ''
+    try:
+        snap = db.collection(_LINE_ACCOUNTS_COL).document(str(line_user_id)).get()
+        if snap.exists:
+            return str((snap.to_dict() or {}).get('uid') or '')
+    except Exception as e:
+        print(f"[WARN] uid_of_line_user failed: {e}", flush=True)
+    return ''
+
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
 
@@ -3446,6 +3505,15 @@ def handle_message(event):
                      "📋 操作マニュアル\nhttps://reference.fukei-shashin.co.jp/manual?openExternalBrowser=1"
             ))
         return
+
+    # 6桁の数字だけが送られてきたら、結びつけの番号とみなす。
+    # 地名にも被写体にもならない形なので、ほかの探し方とぶつからない。（2026-10-28）
+    _msg = event.message.text.strip()
+    if re.fullmatch(r'\d{6}', _msg):
+        _ok, _text = link_line_account(_msg, user_id)
+        if _text:
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=_text))
+            return
 
     # 「現在地」だけで送られたとき（リッチメニューの「現在地から探す」）。
     # 単独では検索の形になっていないため、そのままだと地名として検索されて空振りする。
