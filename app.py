@@ -17,7 +17,7 @@ import hashlib
 import time
 import urllib.parse
 import urllib.request
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict, Counter
 from flask import Flask, request, abort, jsonify, make_response
 from linebot import LineBotApi, WebhookHandler
@@ -3472,6 +3472,354 @@ def uid_of_line_user(line_user_id):
     except Exception as e:
         print(f"[WARN] uid_of_line_user failed: {e}", flush=True)
     return ''
+
+
+# ──────────────── 撮り頃の知らせ ────────────────
+# 保存された撮影ノート（SavedPlans）を毎朝ひととおり見て、撮り頃が近づいた
+# ものの持ち主へ LINE で知らせる。結びつけ（上のしくみ）が土台になる。
+#
+# 撮り頃は、ノートに入っている作品の撮影時期（period。［5月中旬］の形）を
+# そのまま使う。誌面に載った作品が実際に撮られた時期なので、その場所の
+# 撮り頃として最も確かな手がかりになる。新しくデータを作る必要はない。
+#
+# 旬の初日（上旬=1日・中旬=11日・下旬=21日）まで _NOTICE_LEAD_DAYS 日を切ったら
+# 一度だけ送る。遠出の段取りがつき、天気予報も見え始める頃合い。
+#
+# 「ちょうど10日前の日」ではなく「10日以内に迫ったら」にしてあるのは、
+# 旬の初日が1日・11日・21日の3つしかないため。ちょうどの日だけで判めると、
+# 知らせの日が月に3日しかなく、その日を過ぎてから保存したノートには
+# その年ずっと知らせが行かない。
+#
+# 同じノートの同じ撮影地について同じ年に二度送らないよう、送った印を
+# PeakNotices に残す。（2026-10-29）
+_PEAK_NOTICE_COL = 'PeakNotices'
+_NOTICE_LEAD_DAYS = 10
+_NOTICE_MAX_LINES = 3                   # 1通に並べる撮影地の数の上限
+_BILLING_START_UNIX = 1793458800        # 2026-11-01 00:00 JST。それまでは全員に届く
+_PLANNER_URL = 'https://reference.fukei-shashin.co.jp/planner'
+_JST = timezone(timedelta(hours=9))
+
+_PERIOD_RE = re.compile(r'(\d{1,2})\s*月\s*(上旬|中旬|下旬)?')
+_JUN_FIRST_DAY = {'上旬': 1, '中旬': 11, '下旬': 21}
+
+
+def jst_today():
+    """日本時間の今日。Renderの時計は協定世界時なので、朝7時に動かすと
+    date.today() では前日になってしまう。ここだけは明示的に足す。"""
+    return datetime.now(_JST).date()
+
+
+def peak_notice_due(period, today, lead_days=_NOTICE_LEAD_DAYS):
+    """撮り頃まで lead_days 日を切っていれば (撮り頃の初日, 旬の名前) を返す。
+    まだ先か、もう始まっていれば None。［5月中旬］なら5月11日が初日。
+    旬の書かれていない［5月］は、その月の初日として扱う。"""
+    m = _PERIOD_RE.search(str(period or ''))
+    if not m:
+        return None
+    try:
+        mo = int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= mo <= 12:
+        return None
+    jun = m.group(2) or ''
+    day = _JUN_FIRST_DAY.get(jun, 1)
+    # 年をまたぐ撮り頃（1月上旬は前年12月に知らせる）も拾えるよう、2年ぶん見る
+    for y in (today.year, today.year + 1):
+        try:
+            start = date(y, mo, day)
+        except ValueError:
+            continue
+        if 0 <= (start - today).days <= lead_days:
+            return start, (f"{mo}月{jun}" if jun else f"{mo}月")
+    return None
+
+
+def _notice_target(uid, free):
+    """知らせを送ってよい相手なら、LINEの利用者IDを返す。だめなら空。
+    条件は2つ。結びついていること、そしてAdvancedであること。
+    無料開放中（11月1日まで）は、結びついていれば全員に届く。"""
+    if not db or not uid:
+        return ''
+    try:
+        snap = db.collection('Users').document(str(uid)).get()
+    except Exception as e:
+        print(f"[WARN] notice target lookup failed ({uid}): {e}", flush=True)
+        return ''
+    if not snap.exists:
+        return ''
+    u = snap.to_dict() or {}
+    line_id = str(u.get('lineUserId') or '')
+    if not line_id:
+        return ''
+    if not free and not bool(u.get('isPro')):
+        return ''
+    return line_id
+
+
+def collect_peak_notices(today=None, lead_days=_NOTICE_LEAD_DAYS):
+    """撮り頃が近づいた撮影ノートを集める。送信はしない。
+    送る前に中身だけ確かめられるよう、集めると送るを分けてある。
+    戻り値: [{'savedId','uid','lineUserId','title','hits':[...]}, ...]"""
+    if not db:
+        return []
+    today = today or jst_today()
+    free = time.time() < _BILLING_START_UNIX
+    out, targets = [], {}
+
+    try:
+        notes = list(db.collection('SavedPlans').stream())
+    except Exception as e:
+        print(f"[WARN] SavedPlans scan failed: {e}", flush=True)
+        return []
+
+    for snap in notes:
+        d = snap.to_dict() or {}
+        items = d.get('items')
+        if not isinstance(items, list) or not items:
+            continue
+        uid = str(d.get('ownerUid') or '')
+        if not uid:
+            continue
+
+        hits = []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict):
+                continue
+            due = peak_notice_due(it.get('period'), today, lead_days)
+            if not due:
+                continue
+            start, label = due
+            hits.append({
+                'idx': i,
+                'place': str(it.get('place') or '').strip(),
+                'area': str(it.get('area') or '').strip(),
+                'label': label,
+                'start': start,
+            })
+        if not hits:
+            continue
+
+        if uid not in targets:
+            targets[uid] = _notice_target(uid, free)
+        if not targets[uid]:
+            continue
+
+        out.append({
+            'savedId': snap.id,
+            'uid': uid,
+            'lineUserId': targets[uid],
+            'title': str(d.get('title') or '').strip(),
+            'hits': hits,
+        })
+    return out
+
+
+def _notice_sent_already(key):
+    """もう送ってある印があるか。読めないときは「送ってある」と答える。
+    重ねて送るほうが、送り損ねるより迷惑なため。"""
+    try:
+        return db.collection(_PEAK_NOTICE_COL).document(key).get().exists
+    except Exception as e:
+        print(f"[WARN] peak notice lookup failed ({key}): {e}", flush=True)
+        return True
+
+
+def peak_notice_message(note, today):
+    """1通ぶんの文面を作る。"""
+    lines = ['撮り頃が近づきました。', '']
+    for h in note['hits'][:_NOTICE_MAX_LINES]:
+        if h['place'] and h['area']:
+            where = f"{h['place']}（{h['area']}）"
+        else:
+            where = h['place'] or h['area'] or 'この撮影地'
+        days = (h['start'] - today).days
+        when = '今日から' if days <= 0 else ('明日から' if days == 1 else f"あと{days}日")
+        lines.append(where)
+        lines.append(f"撮り頃 {h['label']} ／ {when}")
+        lines.append('')
+    rest = len(note['hits']) - _NOTICE_MAX_LINES
+    if rest > 0:
+        lines.append(f"ほか{rest}か所も近づいています。")
+        lines.append('')
+    lines.append('▼ 撮影ノートを開く')
+    lines.append(f"{_PLANNER_URL}?savedId={note['savedId']}")
+    return '\n'.join(lines).strip()
+
+
+@app.route('/_notify-peak', methods=['GET', 'POST'])
+def notify_peak():
+    """撮り頃の知らせを送る。毎朝 Cloud Scheduler から叩かれる。
+    鍵は X-Check-Key ヘッダーで受け取る（URLには載せない。Renderの
+    アクセスログに平文で残ってしまうため）。
+
+    ?dry=1 … 送らずに「誰に何を送るか」だけを返す。
+    ?lead=N … 何日前に知らせるかをその場で変える。確認用。"""
+    if not _check_key_ok():
+        abort(404)
+    if not db:
+        return jsonify({'error': 'firestore unavailable'}), 500
+
+    dry = request.args.get('dry') == '1'
+    today = jst_today()
+    try:
+        lead = int(request.args.get('lead') or _NOTICE_LEAD_DAYS)
+    except (TypeError, ValueError):
+        lead = _NOTICE_LEAD_DAYS
+
+    sent, held, failed = [], 0, []
+
+    for note in collect_peak_notices(today, lead):
+        fresh = []
+        for h in note['hits']:
+            key = f"{note['savedId']}_{h['idx']}_{h['start'].year}"
+            if _notice_sent_already(key):
+                held += 1
+                continue
+            fresh.append((key, h))
+        if not fresh:
+            continue
+
+        one = dict(note, hits=[h for _, h in fresh])
+        text = peak_notice_message(one, today)
+
+        if dry:
+            sent.append({'savedId': one['savedId'], 'text': text})
+            continue
+
+        try:
+            line_bot_api.push_message(one['lineUserId'], TextSendMessage(text=text))
+        except Exception as e:
+            print(f"[WARN] peak notice push failed ({one['savedId']}): {e}", flush=True)
+            failed.append({'savedId': one['savedId'], 'error': str(e)})
+            continue
+
+        for key, h in fresh:
+            try:
+                db.collection(_PEAK_NOTICE_COL).document(key).set({
+                    'savedId': one['savedId'], 'uid': one['uid'], 'idx': h['idx'],
+                    'place': h['place'], 'peak': h['label'],
+                    'peakStart': h['start'].isoformat(),
+                    'sentAt': firestore.SERVER_TIMESTAMP,
+                })
+            except Exception as e:
+                print(f"[WARN] peak notice mark failed ({key}): {e}", flush=True)
+        sent.append({'savedId': one['savedId'], 'text': text})
+
+    return jsonify({
+        'today': today.isoformat(),
+        'lead': lead,
+        'dry': dry,
+        'sent': len(sent),
+        'held': held,
+        'failed': len(failed),
+        'details': sent if dry else [s['savedId'] for s in sent],
+        'errors': failed,
+    })
+
+
+# 撮り頃の知らせを、ブラウザから確かめるための画面。
+# 入口（/_notify-peak）は鍵をヘッダーでしか受け取らないので、
+# アドレス欄から直に叩けない。鍵はこの画面の入力欄で預かって、
+# ヘッダーに載せて送る。ほかの点検画面と同じ流儀。（2026-10-29）
+_NOTIFY_CHECK_HTML = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>撮り頃の知らせの確認</title>
+<style>
+ body{font-family:system-ui,-apple-system,"Hiragino Sans",sans-serif;margin:0;padding:20px;
+      background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.7}
+ h1{font-size:18px;margin:0 0 4px} h2{font-size:16px;margin:24px 0 8px}
+ p.lead{color:#475569;font-size:13px;margin:0 0 18px}
+ .box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;margin-bottom:16px}
+ label{display:block;font-size:13px;color:#475569;margin-bottom:4px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #cbd5e1;
+       border-radius:7px;font-size:15px;margin-bottom:12px}
+ button{background:#0f766e;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+        font-size:15px;cursor:pointer;margin-right:8px}
+ button.real{background:#b45309}
+ button:disabled{background:#94a3b8;cursor:default}
+ .prog{color:#475569;font-size:13px}
+ .sum b{font-size:17px}
+ pre{background:#f1f5f9;border:1px solid #e2e8f0;border-radius:8px;padding:12px;
+     white-space:pre-wrap;word-break:break-all;font-size:13px;line-height:1.8;margin:0 0 12px}
+ .cap{font-size:12px;color:#64748b;margin:0 0 4px}
+ .note{font-size:13px;color:#475569;background:#fffbeb;border:1px solid #fde68a;
+       border-radius:8px;padding:10px 12px;margin-bottom:16px}
+</style></head><body>
+<h1>撮り頃の知らせの確認</h1>
+<p class="lead">保存された撮影ノートを見て、撮り頃が迫っているものを拾います。「送らずに確かめる」なら、誰に何が届くかを見るだけで、LINEには何も送りません。</p>
+<div class="note">
+  旬の初日は1日・11日・21日の3つだけです。「何日前から」を変えると、どの旬が引っかかるかが変わります。<br>
+  例：今日が10月29日なら、3＝11月上旬／13＝11月中旬／23＝11月下旬 が射程に入ります。
+</div>
+<div class="box">
+  <label>CHECK_KEY</label>
+  <input id="k" type="password" placeholder="CHECK_KEY" autocomplete="off">
+  <label>何日前から知らせるか（ふだんは10）</label>
+  <input id="lead" type="number" value="10" min="0" max="400">
+  <button id="dry">送らずに確かめる</button>
+  <button id="go" class="real">実際に送る</button>
+  <span id="prog" class="prog"></span>
+</div>
+<div class="box sum" id="sum" style="display:none"></div>
+<div id="out"></div>
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+async function run(dry){
+  const k=$('#k').value.trim(); if(!k){alert('CHECK_KEY を入れてください');return;}
+  const lead=parseInt($('#lead').value,10);
+  if(!(lead>=0)){alert('何日前かを数で入れてください');return;}
+  if(!dry && !confirm('実際にLINEへ送ります。よろしいですか？')) return;
+  $('#dry').disabled=true; $('#go').disabled=true;
+  $('#prog').textContent = dry ? '調べています…' : '送っています…';
+  try{
+    const u='/_notify-peak?lead='+lead+(dry?'&dry=1':'');
+    const r=await fetch(u,{headers:{'X-Check-Key':k}});
+    if(!r.ok){alert('鍵が違うか、失敗しました（'+r.status+'）');return;}
+    const d=await r.json();
+    $('#sum').style.display='block';
+    $('#sum').innerHTML='今日（日本時間） <b>'+esc(d.today)+'</b>／何日前から <b>'+d.lead+'</b>日<br>'
+      +(d.dry?'<b>送っていません</b>（確かめただけ）':'<b>送りました</b>')
+      +'：対象 <b>'+d.sent+'</b>通／送信済みのため見送り <b>'+d.held+'</b>件／失敗 <b>'+d.failed+'</b>件';
+    let h='';
+    if(d.dry){
+      h+='<h2>届く文面（'+d.details.length+'通）</h2>';
+      if(!d.details.length){h+='<p>今日あてはまるノートはありません。「何日前から」を変えてみてください。</p>';}
+      for(const s of d.details){
+        h+='<p class="cap">'+esc(s.savedId)+'</p><pre>'+esc(s.text)+'</pre>';
+      }
+    }else{
+      h+='<h2>送った撮影ノート（'+d.details.length+'件）</h2>';
+      if(!d.details.length){h+='<p>送るものはありませんでした。</p>';}
+      else{h+='<pre>'+d.details.map(esc).join('\\n')+'</pre>';}
+    }
+    if(d.errors && d.errors.length){
+      h+='<h2>失敗（'+d.errors.length+'件）</h2><pre>'
+        +d.errors.map(e=>esc(e.savedId)+' … '+esc(e.error)).join('\\n')+'</pre>';
+    }
+    $('#out').innerHTML=h;
+  }catch(e){alert('失敗しました：'+e);}
+  finally{$('#dry').disabled=false; $('#go').disabled=false; $('#prog').textContent='';}
+}
+$('#dry').onclick=()=>run(true);
+$('#go').onclick=()=>run(false);
+</script></body></html>"""
+
+
+@app.route('/_notify-check', methods=['GET'])
+def page_notify_check():
+    """撮り頃の知らせをブラウザから確かめる画面。
+    鍵はこの画面の入力欄で受け取り、ヘッダーに載せて送る。URLには載せない。"""
+    if not os.environ.get("CHECK_KEY", ""):
+        abort(404)
+    resp = make_response(_NOTIFY_CHECK_HTML)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    return resp
 
 
 @handler.add(MessageEvent, message=TextMessage)
