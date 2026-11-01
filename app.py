@@ -10970,6 +10970,25 @@ def api_facets_live():
         return out[:limit] if limit else out
 
     subjects = _facet(lambda r: r["subjects"], rows)
+
+    # いま盛りの被写体に印をつける。
+    #
+    # ここで数えている件数は「この時期に撮られた作品がいくつあるか」で、
+    # 証拠ではあっても「いまが盛りか」は言っていない。盛りかどうかは
+    # subjects_in_peak_near() が別に判断していて、コンシェルジュの
+    # 「いま撮り頃」はそちらを使っている。同じ場所・同じ日で両者が
+    # 違うことを言うので、画面の上で噛み合わせる。
+    #
+    # 判断は撮り頃の索引（6時間もつ）から出るので、ここでの読み足しは無い。
+    #                                                   （2026-11-01）
+    try:
+        _peak_of = {s: pk for s, pk, _n in subjects_in_peak_near((lat, lng), km, base)}
+    except Exception as e:
+        print(f"[WARN] peak mark failed: {e}", flush=True)
+        _peak_of = {}
+    for _s in subjects:
+        _s["peak"] = _peak_of.get(_s["name"])
+
     prefs = _facet(lambda r: [r["pref"]] if r["pref"] else [], rows)
     # 市区町村と撮影地は、上の軸が決まってから出す。先に93件並べても選べない。
     cities = _facet(lambda r: [r["city"]] if r["city"] else [],
