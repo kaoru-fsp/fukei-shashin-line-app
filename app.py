@@ -1074,6 +1074,33 @@ def category_members_in_peak(canon_list, center_latlng, radius_km, base_date=Non
             if row[0] in allow]
 
 
+def subjects_this_period_near(center_latlng, radius_km, base_date=None, limit=12):
+    """この時期（基準日の前後およそ3週間）に撮られた作品を、半径内で被写体別に数える。
+    戻り値: [(被写体, 件数), ...] を件数の多い順。
+
+    subjects_in_peak_near とは別の問いに答えるもの。あちらは「いま統計的に盛りか」を
+    判断する（3旬の窓に3件以上集まる山があり、今日がその±1旬以内）。こちらは
+    「この時期に撮られた作品が実際にあるか」を数えるだけで、1件でも出る。
+
+    Webの「風景撮ろうよ！」が数えているのはこちらで、同じ仕掛け（_facet_base）を
+    呼んでいる。コンシェルジュが「いま盛りの被写体はありません」と黙ったときに、
+    同じ数字を添えられるようにするため。黙られると、Webと食い違って見える。
+                                                          （2026-11-01）"""
+    if not center_latlng:
+        return []
+    base = base_date or date.today()
+    try:
+        rows = _facet_base(center_latlng[0], center_latlng[1], radius_km, base)
+    except Exception as e:
+        print(f"[WARN] subjects_this_period_near failed: {e}", flush=True)
+        return []
+    c = Counter()
+    for r in rows:
+        for s in r.get("subjects") or []:
+            c[s] += 1
+    return c.most_common(limit)
+
+
 def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, limit=3):
     """カテゴリ内で『次に近い撮り頃』の被写体を返す。撮り頃の花が一つも無い季節（冬など）に、
     無いものは無いと言った上で次の見込みを案内するために使う。
@@ -4318,14 +4345,48 @@ def handle_message(event):
         m_peak = re.match(r'^\s*(?:見頃|撮り頃|撮りごろ|みごろ)\s*(\d+)?\s*(?:km|キロ\S*)?\s*$', user_message)
         if m_peak:
             radius = max(5, min(int(m_peak.group(1) or 100), 2000))
-            lst = subjects_in_peak_near(_ccenter, radius, date.today())
-            if not lst:
+            _today = date.today()
+            lst = subjects_in_peak_near(_ccenter, radius, _today)
+            if lst:
+                lines = "\n".join(f"・{s}（撮り頃 {pk}・{n}件）" for s, pk, n in lst[:12])
                 line_bot_api.reply_message(reply_token, TextSendMessage(
-                    text=f"{_cname}から半径{radius}km圏内では、今が撮り頃の被写体が見つかりませんでした。半径を広げてお試しください。"))
+                    text=f"{_cname}から半径{radius}km圏内で、今が撮り頃の被写体です。\n{lines}\n\n気になる被写体名を送ると撮影地をご案内します。"))
                 return
-            lines = "\n".join(f"・{s}（撮り頃 {pk}・{n}件）" for s, pk, n in lst[:12])
-            line_bot_api.reply_message(reply_token, TextSendMessage(
-                text=f"{_cname}から半径{radius}km圏内で、今が撮り頃の被写体です。\n{lines}\n\n気になる被写体名を送ると撮影地をご案内します。"))
+
+            # いま盛りの被写体が無いとき、黙って終わらせない。
+            #
+            # ここで「見つかりませんでした」とだけ返していたため、Webの
+            # 「風景撮ろうよ！」が同じ場所・同じ日で紅葉12件を出しているのに、
+            # コンシェルジュは0件と答えていた。利用者にはどちらが正しいのか
+            # 分からない。
+            #
+            # 食い違いの正体は、問いが違うことである。こちらは「いま統計的に
+            # 盛りか」を判断し、あちらは「この時期に撮られた作品があるか」を
+            # 数えている。関東の紅葉は11月下旬が山なので、11月上旬は
+            # ±1旬の枠から外れて落ちる——判断としては正しい。
+            #
+            # そこで、黙るかわりに両方を渡す。盛りでないことを言い、同じ数字を
+            # 添え、次に近い撮り頃を示す。これでWebと噛み合う。（2026-11-01）
+            _parts = [f"{_cname}から半径{radius}km圏内に、いま盛りの被写体はありません。"]
+
+            _now = subjects_this_period_near(_ccenter, radius, _today, limit=8)
+            if _now:
+                _parts.append("\nこの時期に撮られた作品なら、こちらがあります。\n"
+                              + "\n".join(f"・{s} {n}件" for s, n in _now))
+
+            _nexts = category_next_peaks(list(KEYWORD_NORMALIZE.keys()),
+                                         _ccenter, radius, _today, limit=3)
+            if _nexts:
+                _parts.append("\n次に近い撮り頃は、"
+                              + "、".join(f"{s}（{lbl}ごろ）" for s, lbl, _d in _nexts)
+                              + " です。")
+
+            if not _now and not _nexts:
+                _parts.append("\n半径を広げてお試しください。")
+            else:
+                _parts.append("\n気になる被写体名を送ると撮影地をご案内します。")
+
+            line_bot_api.reply_message(reply_token, TextSendMessage(text="\n".join(_parts)))
             return
 
         # 自宅(帰路の基準点)の登録: 「自宅 川越市」「帰宅先 ○○」
