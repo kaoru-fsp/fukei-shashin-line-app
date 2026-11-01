@@ -3995,6 +3995,16 @@ def handle_message(event):
             _show_loading = False
     if _pure_digit and not _in_pending:
         _show_loading = False  # 保留メニューが無い数字のみ → 検索せず安全網へ
+    # 「自宅 川越市」などの登録は検索しない。
+    #
+    # 2026-11-01 自宅を登録しただけで「ご指定の条件で風景写真データベースを
+    # 調べています」と言っていた。調べていない。待たせているように見えるうえ、
+    # 1通ぶんの無駄になる。自宅の登録はこの先（4400行台）で処理されるので、
+    # 手前のここで一律に押し出されていた。
+    #
+    # 『r板橋区』は登録と検索を兼ねるので、ここでは外さないこと。
+    if re.match(r'^\s*(?:自宅|帰宅先|帰路先)\s*[:：]?\s*\S', _norm_txt):
+        _show_loading = False
     if _show_loading:
         try:
             line_bot_api.push_message(user_id, TextSendMessage(text="少々お待ちください。ご指定の条件で風景写真データベースを調べています。🔍"))
