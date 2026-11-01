@@ -1156,9 +1156,20 @@ def category_next_peaks(canon_list, center_latlng, radius_km, base_date=None, li
             continue
         nd, lbl = next_peak_date(peaks, base)
         if nd:
-            out.append((canon, lbl, nd))
-    out.sort(key=lambda x: x[2])
-    return out[:limit]
+            out.append((canon, lbl, nd, canon not in SEASONAL_SUBJECTS, -sum(bc.values())))
+
+    # 並べ方。日付だけで並べていたため、同じ旬に重なったものの順番が
+    # 何も決まっていなかった。板橋100kmで「次に近い撮り頃」を出したとき、
+    # 30件ある紅葉が押し出されて、神社が残った。
+    #
+    # 順は、近い日付 → 季節もの → 作品数の多い順。
+    #
+    # 季節ものを先にするのは、compute_peaks が作品の固まりさえあれば何にでも
+    # 山を見つけるからである。川にも神社にも山は立つが、それを「撮り頃」と
+    # 呼ぶのは言い過ぎになる。同じ区別は SEASONAL_SUBJECTS として既にあり、
+    # ほかの場所でも使っている。（2026-11-01）
+    out.sort(key=lambda x: (x[2], x[3], x[4]))
+    return [(canon, lbl, nd) for canon, lbl, nd, _s, _n in out[:limit]]
 # カテゴリ別の除外語。作品データのSubject/Title等で、被写体variantを部分文字列として含むが
 # その被写体ではない語を、判定前に各フィールドから除去する（subject_matchesのexclude引数へ渡す）。
 # 例: 「鳥」は「鳥居」(神社)「鳥海山」「鳥甲山」(山名)の一部として現れるため、鳥の野鳥判定から外す。
