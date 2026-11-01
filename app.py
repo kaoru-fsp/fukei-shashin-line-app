@@ -10981,8 +10981,18 @@ def api_facets_live():
     #
     # 判断は撮り頃の索引（6時間もつ）から出るので、ここでの読み足しは無い。
     #                                                   （2026-11-01）
+    # 印をつけるのは季節ものだけ。
+    #
+    # はじめは盛りと判定されたもの全部に印をつけたが、4月5日で試すと10個のうち
+    # 8個に点いた（桜・雪・川・霧・神社・朝焼け・寺・菜の花）。全部に点いていては、
+    # どれが特別なのか分からない。印が意味を失う。
+    #
+    # compute_peaks は作品の固まりさえあれば何にでも山を見つけるので、川にも神社にも
+    # 山は立つ。しかも1つの被写体が山を2つ持てるため、どの日付でもどれかが引っかかる。
+    # 「いまが盛り」と言ってよいのは、季節で姿を変えるものだけ。（2026-11-01）
     try:
-        _peak_of = {s: pk for s, pk, _n in subjects_in_peak_near((lat, lng), km, base)}
+        _peak_of = {s: pk for s, pk, _n in subjects_in_peak_near((lat, lng), km, base)
+                    if s in SEASONAL_SUBJECTS}
     except Exception as e:
         print(f"[WARN] peak mark failed: {e}", flush=True)
         _peak_of = {}
